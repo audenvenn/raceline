@@ -1,0 +1,38 @@
+{
+  "model": "models/Qwen3.5-4B-MLX-4bit",
+  "engine": "mlx-lm (mlx 0.32.4)",
+  "results": [
+    {
+      "prompt_tokens": 128,
+      "prefill_tps": 1106.1727890325512,
+      "ttft_s": 0.11605558299925178,
+      "gen_tokens": 256,
+      "decode_tps": 50.182066398099266,
+      "peak_gb": 2.735304658
+    },
+    {
+      "prompt_tokens": 1024,
+      "prefill_tps": 1773.3526041944874,
+      "ttft_s": 0.5779308329802006,
+      "gen_tokens": 256,
+      "decode_tps": 48.510608637818066,
+      "peak_gb": 3.543092834
+    },
+    {
+      "prompt_tokens": 4096,
+      "prefill_tps": 1678.4303111507295,
+      "ttft_s": 2.4420777919876855,
+      "gen_tokens": 256,
+      "decode_tps": 46.60129065298191,
+      "peak_gb": 3.980467754
+    },
+    {
+      "prompt_tokens": 16384,
+      "prefill_tps": 1432.2380252287805,
+      "ttft_s": 11.447929292015033,
+      "gen_tokens": 256,
+      "decode_tps": 40.16175696709683,
+      "peak_gb": 4.38317009
+    }
+  ]
+}

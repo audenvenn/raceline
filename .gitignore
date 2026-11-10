@@ -1,0 +1,16 @@
+# local environments and build output
+.venv/
+build/
+__pycache__/
+*.pyc
+.DS_Store
+
+# model weights and converted files are never committed
+models/
+*.safetensors
+*.gguf
+*.rlm
+
+# working notes from the initial landscape research
+research_notes/
+reports/

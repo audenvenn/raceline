@@ -1,0 +1,30 @@
+{
+  "model": "models/Qwen3.8-27B-4bit",
+  "engine": "mlx-lm (mlx 0.32.4)",
+  "results": [
+    {
+      "prompt_tokens": 128,
+      "prefill_tps": 21.53616633196178,
+      "ttft_s": 8.541444542002864,
+      "gen_tokens": 64,
+      "decode_tps": 8.683234715249814,
+      "peak_gb": 15.641148679
+    },
+    {
+      "prompt_tokens": 1024,
+      "prefill_tps": 267.1290265231468,
+      "ttft_s": 3.8344956249929965,
+      "gen_tokens": 64,
+      "decode_tps": 8.518158140342917,
+      "peak_gb": 16.930065482
+    },
+    {
+      "prompt_tokens": 4096,
+      "prefill_tps": 246.6395666441375,
+      "ttft_s": 16.608685708022676,
+      "gen_tokens": 64,
+      "decode_tps": 8.440644041688818,
+      "peak_gb": 18.26534097
+    }
+  ]
+}

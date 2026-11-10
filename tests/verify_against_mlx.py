@@ -10,6 +10,7 @@ quantized model; its distance to the float32 reference is printed for scale).
 """
 
 import argparse
+import gc
 import os
 import subprocess
 import sys
@@ -67,6 +68,12 @@ def main():
     ref_h, ref_logits = run_mlx(model, tokens.tolist(), mx.float32)
     bf_h, bf_logits = run_mlx(model, tokens.tolist(), mx.bfloat16)
     hidden = ref_h[0].shape[1]
+    kinds = ["linear" if l.is_linear else "attn" for l in model.language_model.model.layers]
+    # Release MLX's copy of the weights before the engine maps its own: a 27B
+    # model does not fit twice in 24 GB.
+    del model
+    gc.collect()
+    mx.clear_cache()
 
     with tempfile.TemporaryDirectory() as d:
         r = subprocess.run([args.redline, "dump", args.rlm_model, args.tokens, d], capture_output=True, text=True)
@@ -82,7 +89,7 @@ def main():
     for i, (e, r_, b) in enumerate(zip(eng_h, ref_h, bf_h)):
         er, br = rel(e, r_), rel(b, r_)
         worst = max(worst, er)
-        kind = "linear" if model.language_model.model.layers[i].is_linear else "attn"
+        kind = kinds[i]
         if i < 4 or i % 4 == 3 or er > args.tol:
             print(f"{i:5d} {kind:>6s} {er:15.2e} {br:17.2e}")
 

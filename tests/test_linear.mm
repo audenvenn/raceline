@@ -26,6 +26,16 @@ struct Tile { int tm, tn, nsg; };
 
 uint64_t g_seed = 0x9e3779b97f4a7c15ULL;
 uint64_t rnd() { g_seed ^= g_seed << 13; g_seed ^= g_seed >> 7; g_seed ^= g_seed << 17; return g_seed; }
+// bfloat16 = the top 16 bits of a float32 (round to nearest even).
+uint16_t to_bf16(float v) {
+  uint32_t u; memcpy(&u, &v, 4);
+  return (uint16_t)((u + 0x7FFF + ((u >> 16) & 1)) >> 16);
+}
+float from_bf16(uint16_t h) {
+  uint32_t u = (uint32_t)h << 16; float v; memcpy(&v, &u, 4);
+  return v;
+}
+
 float uniform(float lo, float hi) { return lo + (hi - lo) * (float)((rnd() >> 11) * (1.0 / 9007199254740992.0)); }
 
 // A quantized layer in the blocked on-GPU layout, plus (optionally) the plain
@@ -34,22 +44,22 @@ struct Layer {
   int K, N, G, n_blocks;
   id<MTLBuffer> w, s, b;
   std::vector<uint8_t> q;        // [N][K], only kept when keep_ref
-  std::vector<_Float16> sc, bi;  // [N][G]
+  std::vector<uint16_t> sc, bi;   // [N][G], bfloat16 bit patterns
 };
 
 Layer make_layer(Metal &mt, int K, int N, bool keep_ref, bool high_nibble_first = false) {
   Layer L;
   L.K = K; L.N = N; L.G = K / kGroup; L.n_blocks = (N + kBlock - 1) / kBlock;
   size_t w_bytes = (size_t)L.n_blocks * K * (kBlock / 2);
-  size_t sb_bytes = (size_t)L.n_blocks * L.G * kBlock * sizeof(_Float16);
+  size_t sb_bytes = (size_t)L.n_blocks * L.G * kBlock * sizeof(uint16_t);
   L.w = mt.alloc(w_bytes);
   L.s = mt.alloc(sb_bytes);
   L.b = mt.alloc(sb_bytes);
   uint8_t *w = (uint8_t *)L.w.contents;
-  _Float16 *s = (_Float16 *)L.s.contents, *b = (_Float16 *)L.b.contents;
+  uint16_t *s = (uint16_t *)L.s.contents, *b = (uint16_t *)L.b.contents;
   if (!keep_ref) {
     for (size_t i = 0; i < w_bytes; i += 8) { uint64_t x = rnd(); memcpy(w + i, &x, 8); }
-    for (size_t i = 0; i < sb_bytes / 2; i++) { s[i] = (_Float16)0.004f; b[i] = (_Float16)-0.03f; }
+    for (size_t i = 0; i < sb_bytes / 2; i++) { s[i] = to_bf16(0.004f); b[i] = to_bf16(-0.03f); }
     return L;
   }
   L.q.resize((size_t)N * K);
@@ -58,8 +68,8 @@ Layer make_layer(Metal &mt, int K, int N, bool keep_ref, bool high_nibble_first 
   for (auto &v : L.q) v = (uint8_t)(rnd() & 15);
   for (size_t i = 0; i < L.sc.size(); i++) {
     float sv = uniform(0.001f, 0.012f);
-    L.sc[i] = (_Float16)sv;
-    L.bi[i] = (_Float16)(-7.5f * sv + uniform(-0.01f, 0.01f));
+    L.sc[i] = to_bf16(sv);
+    L.bi[i] = to_bf16(-7.5f * sv + uniform(-0.01f, 0.01f));
   }
   for (int n = 0; n < N; n++) {
     int blk = n / kBlock, col = n % kBlock;
@@ -155,7 +165,7 @@ bool check(Metal &mt, int M, int K, int N, Tile t, bool high_first, bool verbose
       double ref = 0;
       for (int k = 0; k < K; k++) {
         size_t gi = (size_t)n * L.G + k / kGroup;
-        double wq = (double)L.sc[gi] * L.q[(size_t)n * K + k] + (double)L.bi[gi];
+        double wq = (double)from_bf16(L.sc[gi]) * L.q[(size_t)n * K + k] + (double)from_bf16(L.bi[gi]);
         ref += (double)av[(size_t)m * K + k] * wq;
       }
       double got = cv[(size_t)m * n_pad + n];

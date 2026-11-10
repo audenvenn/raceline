@@ -101,8 +101,9 @@ void Engine::reset() {
 }
 
 Engine::Tile Engine::tile_for(int rows) const {
-  // Picked from tests/test_linear --sweep on M6: two SIMD-groups per 64 output
-  // columns is the best or near-best tile for every layer shape at both ends.
+  // From tests/test_linear --sweep and end-to-end runs on M6. Tiles taller
+  // than 32 rows are ~3x slower in this kernel: the in-register scale step
+  // does not scale up with the tile.
   if (rows <= 16) return {16, 64, 2};
   return {32, 64, 2};
 }
@@ -137,12 +138,16 @@ void Engine::encode_linear(const QTensor &w, int rows, id<MTLBuffer> out, size_t
 
 void Engine::encode_norm(const FTensor &wgt, int rows, size_t in_offset) {
   const Config &c = config();
-  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rms_norm_rows")];
+  // A decode step pays for per-kernel latency, so the row is spread over 16
+  // SIMD-groups; a prefill chunk has enough rows to fill the GPU with one
+  // SIMD-group each, and launching 16x the threads only costs time there.
+  const int sg = rows <= 16 ? 16 : 1;
+  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rms_norm_rows", {{"NORM_SG", std::to_string(sg)}})];
   [enc_ setBuffer:h_ offset:in_offset atIndex:0];
   [enc_ setBuffer:wgt.buf offset:wgt.offset atIndex:1];
   [enc_ setBuffer:xn_ offset:0 atIndex:2];
   set_params(enc_, NormParams{rows, c.hidden, c.hidden, x_stride_, c.norm_eps}, 3);
-  simdgroups(enc_, 1, rows);
+  [enc_ dispatchThreadgroups:MTLSizeMake(1, rows, 1) threadsPerThreadgroup:MTLSizeMake(32 * sg, 1, 1)];
   mark("rms_norm");
 }
 

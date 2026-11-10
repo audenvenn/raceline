@@ -61,6 +61,10 @@ id<MTLComputePipelineState> Metal::pipeline(const std::string &file, const std::
 
   MTLCompileOptions *opt = [MTLCompileOptions new];
   opt.languageVersion = MTLLanguageVersion4_1;
+  // No value-changing floating-point rewrites: kernel variants that are written
+  // to add in the same order must produce the same bits, so that the model's
+  // output does not depend on how the tokens were chunked.
+  opt.mathMode = MTLMathModeSafe;
   NSMutableDictionary<NSString *, NSObject *> *defs = [NSMutableDictionary dictionary];
   for (const auto &[k, v] : macros) defs[@(k.c_str())] = @(v.c_str());
   opt.preprocessorMacros = defs;

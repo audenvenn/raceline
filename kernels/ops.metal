@@ -17,8 +17,8 @@ static inline float sigmoidf(float x) { return 1.0f / (1.0f + exp(-x)); }
 // One thread dequantizes 8 values (one packed word).
 kernel void embed_rows(device const int *tok [[buffer(0)]],
                        device const uchar *w [[buffer(1)]],
-                       device const half *s [[buffer(2)]],
-                       device const half *b [[buffer(3)]],
+                       device const bfloat *s [[buffer(2)]],
+                       device const bfloat *b [[buffer(3)]],
                        device float *h [[buffer(4)]],
                        constant EmbedParams &p [[buffer(5)]],
                        uint2 tid [[thread_position_in_grid]])
@@ -35,21 +35,57 @@ kernel void embed_rows(device const int *tok [[buffer(0)]],
 }
 
 // ----------------------------------------------------------------- RMS norm
-// out[t] = x[t] * rsqrt(mean(x[t]^2) + eps) * weight. One SIMD-group per row.
+// out[t] = x[t] * rsqrt(mean(x[t]^2) + eps) * weight, one threadgroup per row.
+//
+// NORM_SG selects how many SIMD-groups share a row: 16 for a decode step,
+// where the latency of walking the row serially is what costs, and 1 for a
+// prefill chunk, where there are rows enough to fill the GPU and extra threads
+// only add launch overhead. Both variants add the squares in the same order:
+// a sum per group of 64 elements, accumulated into 16 running sums by
+// (group mod 16), then those 16 added up. The result is therefore the same
+// bits either way, which keeps the model's output independent of how the
+// tokens were chunked.
+#ifndef NORM_SG
+#define NORM_SG 1
+#endif
 kernel void rms_norm_rows(device const float *x [[buffer(0)]],
                           device const float *wgt [[buffer(1)]],
                           device half *out [[buffer(2)]],
                           constant NormParams &p [[buffer(3)]],
                           uint3 tg [[threadgroup_position_in_grid]],
+                          uint sg [[simdgroup_index_in_threadgroup]],
                           uint lane [[thread_index_in_simdgroup]])
 {
+  constexpr int WAYS = 16;
   const device float *row = x + size_t(tg.y) * p.in_stride;
-  float ss = 0.0f;
-  for (int i = int(lane); i < p.D; i += 32) ss += row[i] * row[i];
-  ss = simd_sum(ss);
-  const float inv = rsqrt(ss / float(p.D) + p.eps);
+  const int groups = p.D / 64;
+  float total = 0.0f;
+#if NORM_SG == 1
+  float part[WAYS];
+  for (int i = 0; i < WAYS; ++i) part[i] = 0.0f;
+  for (int g = 0; g < groups; ++g) {
+    const float a = row[g * 64 + lane], b = row[g * 64 + 32 + lane];
+    part[g % WAYS] += simd_sum(a * a + b * b);
+  }
+  for (int i = 0; i < WAYS; ++i) total += part[i];
+#else
+  threadgroup float part[WAYS];
+  float acc = 0.0f;
+  for (int g = int(sg); g < groups; g += WAYS) {
+    const float a = row[g * 64 + lane], b = row[g * 64 + 32 + lane];
+    acc += simd_sum(a * a + b * b);
+  }
+  if (lane == 0) part[sg] = acc;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  for (int i = 0; i < WAYS; ++i) total += part[i];
+#endif
+  const float inv = rsqrt(total / float(p.D) + p.eps);
   device half *o = out + size_t(tg.y) * p.out_stride;
-  for (int i = int(lane); i < p.D; i += 32) o[i] = half(row[i] * inv * wgt[i]);
+  for (int g = int(sg); g < groups; g += NORM_SG) {
+    const int i0 = g * 64 + int(lane), i1 = i0 + 32;
+    o[i0] = half(row[i0] * inv * wgt[i0]);
+    o[i1] = half(row[i1] * inv * wgt[i1]);
+  }
 }
 
 // ---------------------------------------------------- Gated DeltaNet pieces

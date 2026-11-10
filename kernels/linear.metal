@@ -12,7 +12,8 @@
 // is stored as [K][BLOCK] nibbles, i.e. BLOCK/2 bytes per input index. One
 // threadgroup therefore streams one contiguous region, which is what lets a
 // single-token pass run close to the memory-bandwidth ceiling. Scales and
-// biases use the matching [N/BLOCK][K/GROUP][BLOCK] layout.
+// biases use the matching [N/BLOCK][K/GROUP][BLOCK] layout, stored as bfloat16
+// (the precision MLX keeps them in, so the values carry over bit for bit).
 //
 // Specialization macros: TM, TN (tile rows/cols; TN divides BLOCK), NSG
 // (SIMD-groups per threadgroup), GROUP, BLOCK, OUT_T (half or float).
@@ -45,8 +46,8 @@ kernel void group_sums(device half *a [[buffer(0)]],
 
 kernel void linear_q4a(device half *a [[buffer(0)]],
                        device uchar *w [[buffer(1)]],
-                       device half *s [[buffer(2)]],
-                       device half *b [[buffer(3)]],
+                       device bfloat *s [[buffer(2)]],
+                       device bfloat *b [[buffer(3)]],
                        device float *gsum [[buffer(4)]],
                        device OUT_T *c [[buffer(5)]],
                        constant LinearParams &p [[buffer(6)]],
@@ -77,8 +78,8 @@ kernel void linear_q4a(device half *a [[buffer(0)]],
     if (acc.is_valid_element(i)) acc[i] = 0.0f;
   }
 
-  const device half *sg = s + size_t(blk) * size_t(p.G) * BLOCK + col;
-  const device half *bg = b + size_t(blk) * size_t(p.G) * BLOCK + col;
+  const device bfloat *sg = s + size_t(blk) * size_t(p.G) * BLOCK + col;
+  const device bfloat *bg = b + size_t(blk) * size_t(p.G) * BLOCK + col;
   const device float *gs = gsum + size_t(m0) * p.G;
 
   for (int g = 0; g < p.G; ++g) {

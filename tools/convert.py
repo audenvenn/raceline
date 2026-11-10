@@ -68,12 +68,13 @@ class SafeTensors:
 
 # ------------------------------------------------------------------- packing
 
-def to_f16_exact(x: np.ndarray, what: str) -> np.ndarray:
-    y = x.astype(np.float16)
-    if not np.array_equal(y.astype(np.float32), x.astype(np.float32)):
-        bad = float(np.abs(y.astype(np.float32) - x).max())
-        raise SystemExit(f"{what}: values are not exactly representable in float16 (max err {bad:g})")
-    return y
+def to_bf16(x: np.ndarray, what: str) -> np.ndarray:
+    """float32 -> bfloat16 bit patterns (uint16). The source values are bfloat16
+    widened to float32, so this must be lossless; anything else is an error."""
+    bits = np.ascontiguousarray(x, dtype=np.float32).view(np.uint32)
+    if (bits & 0xFFFF).any():
+        raise SystemExit(f"{what}: values are not exactly representable in bfloat16")
+    return (bits >> 16).astype(np.uint16)
 
 
 def unpack_nibbles(w_u32: np.ndarray) -> np.ndarray:
@@ -89,7 +90,7 @@ def unpack_nibbles(w_u32: np.ndarray) -> np.ndarray:
 def pack_blocked(parts):
     """parts: list of (q[N,K] uint8, scales[N,G] f32, biases[N,G] f32) sharing K.
 
-    Returns (w bytes [blocks][K][128], s f16 [blocks][G][256], b f16 [blocks][G][256],
+    Returns (w bytes [blocks][K][128], s bf16 [blocks][G][256], b bf16 [blocks][G][256],
              n_pad, [(row offset, rows) per part]).
     """
     k = parts[0][0].shape[1]
@@ -100,12 +101,12 @@ def pack_blocked(parts):
         n += q.shape[0]
     n_pad = -(-n // BLOCK) * BLOCK
     q_all = np.zeros((n_pad, k), dtype=np.uint8)
-    s_all = np.zeros((n_pad, g), dtype=np.float16)
-    b_all = np.zeros((n_pad, g), dtype=np.float16)
+    s_all = np.zeros((n_pad, g), dtype=np.uint16)   # bfloat16 bit patterns
+    b_all = np.zeros((n_pad, g), dtype=np.uint16)
     for (off, rows), (q, s, b) in zip(offsets, parts):
         q_all[off:off + rows] = q
-        s_all[off:off + rows] = to_f16_exact(s, "scales")
-        b_all[off:off + rows] = to_f16_exact(b, "biases")
+        s_all[off:off + rows] = to_bf16(s, "scales")
+        b_all[off:off + rows] = to_bf16(b, "biases")
     blocks = n_pad // BLOCK
     qb = q_all.reshape(blocks, BLOCK, k).transpose(0, 2, 1)             # [blocks][K][256]
     w = (qb[:, :, 0::2] | (qb[:, :, 1::2] << 4)).astype(np.uint8)       # even element in the low nibble
@@ -117,7 +118,7 @@ def pack_blocked(parts):
 def pack_rows(q, s, b):
     """Row-major 4-bit matrix for row lookups (token embeddings)."""
     w = (q[:, 0::2] | (q[:, 1::2] << 4)).astype(np.uint8)
-    return np.ascontiguousarray(w), to_f16_exact(s, "scales"), to_f16_exact(b, "biases")
+    return np.ascontiguousarray(w), to_bf16(s, "scales"), to_bf16(b, "biases")
 
 
 # -------------------------------------------------------------------- writer
@@ -260,7 +261,7 @@ def main():
     out.end()
 
     out.finish(dict(format="redline", version=1, arch="qwen3_5", source=os.path.basename(os.path.normpath(args.src)),
-                    config=cfg, quant=dict(bits=4, group=GROUP, block=BLOCK, mode="affine")))
+                    config=cfg, quant=dict(bits=4, group=GROUP, block=BLOCK, mode="affine", scale_dtype="bf16")))
     size = os.path.getsize(args.dst)
     print(f"wrote {args.dst}: {size / 1e9:.2f} GB in {time.time() - t0:.0f}s")
 

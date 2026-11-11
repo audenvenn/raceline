@@ -9,8 +9,11 @@ companion of bench/agent_bench.py. One backend per run:
   bench/chat_bench.py models/qwen3.5-4b.rlm
   bench/chat_bench.py models/Qwen3.5-4B-MLX-4bit
   RACELINE_MTP=0 bench/chat_bench.py models/qwen3.5-4b.rlm      # the engine without drafts
+  bench/chat_bench.py models/qwen3.5-4b.rlm --json out.json      # also write the results
 """
 
+import argparse
+import json
 import os
 import sys
 
@@ -31,9 +34,12 @@ MODES = [
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    backend = load_backend(sys.argv[1])
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("model")
+    ap.add_argument("--json", help="also write the results to this file")
+    args = ap.parse_args()
+    backend = load_backend(args.model)
+    results = []
     rt = Runtime(backend, Sampling(temperature=0.0))
     for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):   # warm up
         pass
@@ -49,6 +55,12 @@ def main():
                     accepted += value.get("drafts_accepted", 0)
         note = f"   {100 * accepted / drafts:.0f}% of drafts accepted" if drafts else ""
         print(f"{backend.name:8s} {label:40s} {tokens:4d} tokens  {tokens / seconds:6.1f} tok/s{note}", flush=True)
+        results.append(dict(model=args.model, backend=backend.name, mtp=bool(getattr(backend, "mtp", False)),
+                            sampling=label, tokens=tokens, decode_tps=tokens / seconds,
+                            drafts_accepted=accepted / drafts if drafts else None))
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(results, f, indent=1)
 
 
 if __name__ == "__main__":

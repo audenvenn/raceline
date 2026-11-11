@@ -25,8 +25,7 @@ I found the bug! On line 5, there's a typo: `len(value)` should be `len(values)`
   > bash(command="python3 stats.py 3 1 4 1 5")
     [exit code 0]  [+2 lines]
 
-Done! The bug was a typo on line 5: `len(value)` should have been `len(values)`. The script now runs
-successfully, outputting:
+Done! The bug was a typo on line 5: `len(value)` should have been `len(values)`. The script now runs successfully, outputting:
 - mean: 2.8
 - median: 3.0
   [6 steps · context 2004 tok (1971 reused) · 636 out at 95.4 tok/s, 66% of drafts accepted · 6.7s]

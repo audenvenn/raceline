@@ -40,6 +40,15 @@ def resolve(model: str) -> str:
     return model  # left to the backend (an MLX repository id, for instance)
 
 
+def default_model():
+    """The model to use when none is named: $RACELINE_MODEL, or the one pulled model if there is exactly one."""
+    if os.environ.get("RACELINE_MODEL"):
+        return os.environ["RACELINE_MODEL"]
+    d = models_dir()
+    found = sorted(f for f in os.listdir(d) if f.endswith(".rlm")) if os.path.isdir(d) else []
+    return os.path.join(d, found[0]) if len(found) == 1 else None
+
+
 def _open(url: str):
     return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "raceline"}), timeout=60)
 

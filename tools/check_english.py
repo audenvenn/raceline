@@ -9,7 +9,10 @@ import re
 import subprocess
 import sys
 
-CJK = re.compile(r"[　-ヿ㐀-䶿一-鿿가-힯＀-￯]")
+# CJK punctuation and kana, ideographs, Hangul, full-width forms. Written as code points so that this
+# file passes its own check.
+RANGES = [(0x3000, 0x30FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF), (0xAC00, 0xD7AF), (0xFF00, 0xFFEF)]
+CJK = re.compile("[" + "".join(f"{chr(a)}-{chr(b)}" for a, b in RANGES) + "]")
 
 
 def main():

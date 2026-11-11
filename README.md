@@ -265,7 +265,10 @@ positions (`tools/quantize.py` reports this for every conversion):
 For the 4B model the rotation brings the 4-bit format level with MLX's at 0.5
 bits per weight less. For the 27B it does not: the published file is still
 measurably further from the float model than MLX's format, so the speed
-tables compare weights of somewhat different quality there. The speed-up does
+tables compare weights of somewhat different quality there. Measured on what
+the runtimes compute (`bench/kl_compare.py`), the typical position is close
+(median KL 0.0039 against mlx-lm's 0.0032) and the gap is a tail: 5% of the
+positions carry two thirds of the KL. The speed-up does
 not come from the format (without drafts the two decode at about the same
 speed). Where the 27B loses quality is tracked in
 [#15](https://github.com/audenvenn/raceline/issues/15): the hidden states

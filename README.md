@@ -1,141 +1,274 @@
 # redline
 
-A from-scratch inference engine for Apple Silicon that tries to run one model
-family as close to the hardware's limits as it can, for a single local user.
-The end goal is a usable local agent runtime on top of it.
+A local agent runtime for Apple Silicon with its own inference engine, built
+to get as much out of one Mac, for one user, as the hardware allows.
 
-**Status: early.** The engine runs Qwen3.5 / Qwen3.8 correctly and reproducibly,
-but end to end it is still *slower* than MLX. The numbers below say exactly
-where it stands. `redline` is a working name.
+On an M6 Mac mini it decodes Qwen3.5-4B **1.7x to 3.2x faster than mlx-lm**
+on the same machine (81 to 163 tokens/s against 47 to 51), with weights of
+the same quality in less memory. The text it produces is bit-for-bit what
+decoding one token at a time produces, at any sampling temperature.
 
-- Target model: **Qwen3.8-27B** (developed against Qwen3.5-4B, same architecture:
-  75% Gated DeltaNet layers, 25% softmax attention).
-- Target machine: Apple M5 / M6 class GPUs (the per-core GPU neural
-  accelerators are required). Developed on an M6 Mac mini, 24 GB, macOS 27.2.
+```
+$ redline chat models/qwen3.5-4b.rlm --yes -p "python3 stats.py 3 1 4 1 5 crashes. Find the bug, fix it, and run it again to confirm."
 
-## What is here
+  > bash(command="find_files \"*.py\"")
+    [exit code 127]  [+2 lines]
+  > find_files(pattern="*.py")
+    stats.py
+  > read_file(path="stats.py")
+    1	import sys  [+19 lines]
+
+I found the bug! On line 5, there's a typo: `len(value)` should be `len(values)`. [...]
+
+  > edit_file(path="stats.py", old_string="    return sum(values) / len(value)", new_string="    return sum(values) / len(values)")
+    Edited stats.py.
+  > bash(command="python3 stats.py 3 1 4 1 5")
+    [exit code 0]  [+2 lines]
+
+Done! The bug was a typo on line 5: `len(value)` should have been `len(values)`. The script now runs
+successfully, outputting:
+- mean: 2.8
+- median: 3.0
+  [6 steps · context 2004 tok (1971 reused) · 636 out at 95.4 tok/s, 66% of drafts accepted · 6.7s]
+```
+
+(An actual run of the 4B model, first misstep included; its reasoning between the steps is left out.)
+
+It is a terminal agent (`redline chat`), an OpenAI-compatible server
+(`redline serve`) and a hardware probe (`redline probe`) on top of a small
+engine written for one model family, Qwen3.5 / Qwen3.8.
+
+**Status.** Everything below is measured on Qwen3.5-4B. Qwen3.8-27B, the
+model this is aimed at, has the same architecture and takes the same code
+paths; converting it takes about two hours on this machine and its numbers
+are not in yet.
+
+## Numbers
+
+M6 Mac mini (12-core GPU, 24 GB), macOS 27.2, mlx-lm 0.32.2 on MLX 0.32.4. Both
+runtimes are measured back to back through the same Python interface, with
+nothing else on the GPU.
+
+Continuing Python source after a prompt of that length, greedy, 256 tokens
+(`bench/agent_bench.py`):
+
+| Context | Runtime | Prompt processing | Decoding | Memory |
+|---|---|---|---|---|
+| 1,024 tokens | mlx-lm, MLX 4-bit weights | 1665 tok/s | 51.3 tok/s | 4.7 GB |
+| | **redline** | 1795 tok/s | **163.4 tok/s** | 2.0 GB + 2.5 GB file mapped |
+| | redline, drafts off | 1852 tok/s | 47.0 tok/s | |
+| 8,192 tokens | mlx-lm, MLX 4-bit weights | 1576 tok/s | 47.1 tok/s | 6.0 GB |
+| | **redline** | 1568 tok/s | **112.2 tok/s** | 2.0 GB + 2.5 GB file mapped |
+| | redline, drafts off | 1639 tok/s | 41.4 tok/s | |
+
+Chat answers, thinking off, three requests of up to 300 tokens
+(`bench/chat_bench.py`):
+
+| Sampling | mlx-lm | redline | redline, drafts off |
+|---|---|---|---|
+| greedy | 50.8 tok/s | **86.7 tok/s** | 47.5 tok/s |
+| temperature 0.7, top-p 0.8, top-k 20 | 49.1 tok/s | **83.2 tok/s** | 47.0 tok/s |
+| temperature 1.0, top-p 0.95, top-k 20 | 49.0 tok/s | **81.5 tok/s** | 46.6 tok/s |
+
+How to read this. Without drafts the engine decodes at about MLX's speed, and
+it processes prompts at MLX's speed with or without them: there is no
+advantage there. The gain is the drafts, and it depends on how predictable
+the text is: large for source code, smaller for prose. Memory is the peak
+footprint of the process; the model file is mapped read-only on top of that
+and its pages can be dropped and re-read by the system.
+
+## Where the speed comes from
+
+A Mac generating text is limited by memory bandwidth: every weight is read
+once per pass, so 150 GB/s and 2.1 GB of weights allow about 70 passes per
+second, 13.6 GB about 11. `redline probe` measures that ceiling on your
+machine. The engine is built around getting more than one token out of a pass.
+
+1. **Drafts from the model's own head, checked in the same pass.** Qwen3.5 /
+   Qwen3.8 checkpoints ship a small multi-token-prediction (MTP) head that
+   mlx-lm's converter drops. It guesses the token after next and, run again
+   on its own output, the ones after that. The engine feeds the next token
+   and up to seven guesses through the model together; every guess the model
+   confirms is a token that needed no pass of its own. On held-out text the
+   first four guesses hold 79%, 71%, 64% and 59% of the time, each given the
+   ones before it.
+2. **A pass costs about the same for 1 or 16 rows.** The linear-layer kernel
+   hands packed 4-bit weights straight to the GPU's neural accelerators
+   (Metal 4 `matmul2d` with FP4 operands) over a layout made for streaming.
+   The time goes into reading weights, so the extra rows of a speculative
+   pass are nearly free. Attention is two such matrix products, so the cache
+   is read once for all rows as well.
+3. **Wrong guesses cost almost nothing.** Three quarters of these models'
+   layers are recurrent (Gated DeltaNet) and cannot be rewound. A speculative
+   pass leaves the old state next to the new one and keeps, per layer, what
+   went into the recurrence; when only some guesses hold, the state is
+   rebuilt for exactly those rows by replaying the recurrence, without a pass
+   over the weights.
+4. **4.0 bits per weight that the hardware decodes itself.** Weights are
+   stored as `row scale x column scale x FP4 code`, quantized with GPTQ one
+   layer at a time: the quality of MLX's 4-bit format, which needs 4.5 bits,
+   with 11% less to read per pass. The file is mapped, not loaded.
+5. **Nothing is recomputed between turns.** The runtime keeps the model where
+   the last request left it and snapshots the recurrent state at the points a
+   conversation can branch from, so a follow-up request only processes what
+   is new (1971 of 2004 context tokens reused in the run above).
+
+MTP speculative decoding is not new on the Mac (llama.cpp and several MLX
+based servers have it). What this project adds is an engine in which the
+extra rows are close to free, drafts that stay exact under sampling, and the
+numbers to check both.
+
+## Quick start
+
+Requirements: an Apple Silicon Mac whose GPU has neural accelerators (M5 / M6
+families), a recent macOS with Metal 4 (developed on 27.2), Xcode command
+line tools, CMake, Ninja and Python 3.10 or later. It has been run on one
+machine, the M6 Mac mini above.
+
+```sh
+git clone https://github.com/OWNER/redline && cd redline
+cmake -S . -B build/cmake -G Ninja && cmake --build build/cmake
+python3 -m venv .venv && .venv/bin/pip install -e .
+
+# Convert a model once: original checkpoint -> one self-contained .rlm file.
+.venv/bin/python tools/fetch_model.py Qwen/Qwen3.5-4B                         # 9 GB, into models/
+.venv/bin/python tools/quantize.py models/Qwen3.5-4B models/qwen3.5-4b.rlm    # tens of minutes
+.venv/bin/python tools/add_mtp.py  models/Qwen3.5-4B models/qwen3.5-4b.rlm    # about a minute
+
+.venv/bin/redline chat  models/qwen3.5-4b.rlm     # terminal agent in the current directory
+.venv/bin/redline serve models/qwen3.5-4b.rlm     # OpenAI-compatible API on localhost:8080
+.venv/bin/redline probe models/qwen3.5-4b.rlm     # this Mac's limits, and what the model reaches
+```
+
+Larger checkpoints convert the same way, a layer at a time, so they never
+have to fit in memory; an interrupted conversion continues with `--resume`.
+There are no pre-converted downloads yet.
+
+Any MLX model directory also runs, through the MLX backend and without the
+engine's speedups: `redline chat models/Qwen3.5-4B-MLX-4bit`.
+
+## The agent
+
+`redline chat` gives the model seven tools. `read_file`, `list_dir`,
+`find_files` and `search` run freely; `bash`, `write_file` and `edit_file`
+ask first (`--yes` approves everything, answering `a` approves the rest of
+the session). The line after each turn shows the size of the context, how
+much of it was reused, and the decoding speed. `--no-think` skips the model's
+reasoning phase; `--effort` sets the reasoning effort for models whose chat
+template has one (Qwen3.8).
+
+`redline serve` speaks the OpenAI chat-completions protocol, streaming or not,
+with tool calls and the model's reasoning as `reasoning_content`:
+
+```sh
+curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "messages": [{"role": "user", "content": "Name three sorting algorithms."}],
+  "enable_thinking": false}'
+```
+
+Responses carry `usage.prompt_tokens_details.cached_tokens` and a `timings`
+object, so a client can see what a request cost. One conversation is served
+at a time; this is a single-user runtime.
+
+## What is checked
+
+| Check | Result |
+|---|---|
+| Engine on MLX's own 4-bit weights against MLX in float32, layer by layer (`tests/verify_against_mlx.py`) | worst layer 1.5e-3 relative, same top token; MLX's bfloat16 path is ten times further from that reference |
+| Engine on a native file against MLX running the decoded weights (`tests/verify_native.py`) | same top token, logits within 1.6e-2 relative (the reference holds the weights in float16) |
+| MTP head against MLX on the same weights (`tests/verify_mtp.py`) | same draft, logits within 5e-3 relative |
+| A prompt fed in chunks of 96, 17 or 1 tokens | bit-identical logits |
+| Plain decoding against 1 to 7 drafts per pass (`redline-engine spec`) | identical tokens |
+| Passes with wrong, partly right and right drafts, abandoned drafts, state save and load, against a clean run (`tests/verify_spec.py`) | bit-identical logits and drafts |
+| Greedy and sampled text with and without drafts, through the runtime | identical |
+| Linear kernels against a double-precision CPU reference (`build/cmake/test_linear`) | pass |
+| Session reuse and snapshots, tool-call parsing, the sampler, resuming a conversion (`tests/test_runtime.py`, no GPU needed) | pass |
+
+Quantization quality against the float model on held-out text, Qwen3.5-4B,
+1152 positions (`tools/quantize.py` reports this for every conversion):
+
+| Weights | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
+|---|---|---|---|---|
+| MLX affine 4-bit, groups of 64 | 4.5 | 0.072 | 3.465 | 88.5% |
+| **native FP4, GPTQ (this format)** | 4.0 | 0.083 | 3.379 | 88.6% |
+| native FP4, round to nearest | 4.0 | 0.103 | 3.478 | 88.9% |
+
+## How it works
+
+**Model file (`.rlm`).** One file: a JSON header, then page-aligned sections
+that are mapped and handed to Metal without a copy, plus the tokenizer and
+chat template. Every large matrix is `W[n][k] = s[n] * c[k] * L[q[n][k]]`
+with `L` the sixteen FP4 values the accelerators decode natively. The column
+scales are folded into whatever produces the matrix's input and the row
+scales are applied to the result while it is still in registers, so the
+inner product itself is a single hardware matmul over raw 4-bit codes. Output
+rows are stored in blocks of 256 as `[input][256 codes]`, which makes each
+threadgroup read one contiguous stream.
+
+**The MTP head.** `tools/mtp_study.py` measured what it is worth before any
+engine work. Its top choice is the model's own next-next token 81% of the
+time. It needs its attention history (56% without). Only its input projection
+suffers from 4-bit storage (62% with that one matrix rounded to 4 bits, 79%
+with everything else in 4 bits), so that matrix is kept in half precision.
+Feeding the head's output back through its final norm, in place of the hidden
+state the model has not computed yet, gives the further drafts. A draft's
+pass over the output matrix is limited to the frequent part of the
+vocabulary (token ids below 64k cover 98% of English and source code, below
+128k 99% of Chinese), chosen from the recent context.
+
+**Exact sampling with drafts.** A draft is only useful if it equals the token
+the model then picks. With greedy decoding that is the model's top token; at
+a temperature it is a random draw, and a guess that ignores the draw is
+mostly wrong. Here every draw is a Gumbel-max whose noise depends only on
+(seed, position, token), and the head's guess for a position uses the same
+noise as the model's choice there. Each is still an exact sample from its
+own distribution; they coincide whenever the two distributions are close.
+
+**How many drafts.** Drafting continues while the chance that the chain so
+far holds (the product of the drafts' probabilities under the head) is above
+a threshold that follows the measured cost of a draft relative to a token.
+
+**Hardware limits.** `redline probe` prints them for your Mac:
+
+```
+Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
+
+  GPU memory bandwidth        150.1 GB/s
+  matrix multiply (half)       18.4 TFLOPS
+
+  What that allows, per model size at 4 bits per weight:
+
+  model      weights   fits   decode ceiling   prefill ceiling
+  4B           2.3 GB    yes       65.3 tok/s        2189 tok/s
+  9B           5.0 GB    yes       30.0 tok/s        1021 tok/s
+  27B         13.6 GB    yes       11.0 tok/s         340 tok/s
+  70B         35.5 GB     no        4.2 tok/s         131 tok/s
+```
+
+## Repository
 
 | Path | What it is |
 |---|---|
-| `kernels/linear.metal` | Quantized linear layer that hands packed 4-bit weights straight to the GPU neural accelerators (Metal 4 `matmul2d` with `uint4b` operands), over a weight layout built for streaming. |
-| `kernels/ops.metal` | Everything else in a layer: embedding, RMS norm, DeltaNet recurrence, attention, SwiGLU. |
-| `src/` | Metal runtime (kernels compile at run time, no Xcode needed), mmap'd model file, forward pass with recurrent state. |
-| `tools/convert.py` | MLX 4-bit model → `.rlm`. Same quantized values, different memory layout, page-aligned for zero-copy loading. |
-| `tools/fetch_model.py` | Resumable model download from ModelScope or Hugging Face. |
-| `tests/` | Kernel check against a double-precision CPU reference; layer-by-layer check against MLX. |
-| `bench/` | Hardware probes and MLX / llama.cpp baselines. |
+| `redline/` | The runtime: backends (engine, MLX), session reuse and snapshots, chat rendering and tool-call parsing, OpenAI-compatible server, terminal agent, probe. |
+| `src/`, `kernels/` | The engine: Metal runtime, model file reader, forward pass, speculative decoding. Kernels are compiled at run time. C API in `src/capi.h`. |
+| `tools/quantize.py`, `tools/add_mtp.py` | Original checkpoint to native `.rlm`; adds the MTP head. `tools/convert.py` repacks an MLX 4-bit model instead (MLX's exact values, no drafts). |
+| `tools/mtp_study.py`, `tools/quant_study.py` | The measurements behind the design choices above. |
+| `tests/`, `bench/` | Verification against MLX and CPU references; benchmarks and hardware probes. |
 
-## Correctness
+## Limits
 
-The converted model is numerically the model MLX runs (affine 4-bit, groups of
-64), so the engine is checked directly against MLX evaluated in float32:
-
-| Model | Worst layer rel. error | Max logit diff | Same greedy token |
-|---|---|---|---|
-| Qwen3.5-4B (32 layers) | 1.5e-3 | 0.041 | yes |
-| Qwen3.8-27B (64 layers) | 2.1e-3 | 0.024 | yes |
-
-For scale, MLX's default bfloat16 execution sits 1.6e-2 and 2.4e-2 away from
-the same float32 reference. Feeding a prompt in chunks of 1, 17, 40 or 96
-tokens gives **bit-identical** logits.
-
-## Speed, measured on the M6 (24 GB)
-
-End to end, 1024-token prompt, greedy decode:
-
-| Model | Engine | Load | Prefill | Decode |
-|---|---|---|---|---|
-| Qwen3.5-4B | MLX 0.32.4 | 1.2 s | 1767 tok/s | 50.8 tok/s |
-| | llama.cpp 0.9.0 (Q4_K_M) | – | 1250 tok/s | 39.9 tok/s |
-| | **redline**, MLX's weights | 0.03 s | 1588 tok/s | 37.4 tok/s |
-| | **redline**, native FP4 weights | 0.03 s | 1683 tok/s | 43.2 tok/s |
-| Qwen3.8-27B | MLX 0.32.4 | 4.6 s | 269 tok/s | 9.2 tok/s |
-| | **redline**, MLX's weights | 0.05 s | ~205–230 tok/s | 7.2 tok/s |
-
-The 27B figures are noisy: at 4-bit it needs 15–18 GB and the machine swaps.
-The native format has not been run on the 27B yet.
-
-### Native weight format
-
-`tools/quantize.py` turns an original checkpoint into weights of the form
-`s[n] * c[k] * L[q]`: a 4-bit code the accelerators decode themselves, a scale
-per output row and one per input column, nothing per group. It works one layer
-at a time (GPTQ on calibration activations), so a checkpoint larger than RAM
-converts. Held-out quality against the float model, Qwen3.5-4B, 1152 positions:
-
-| Weights | Bits/weight | KL (nats) | Perplexity | Top-1 agreement |
-|---|---|---|---|---|
-| MLX affine 4-bit, groups of 64 | 4.5 | 0.072 | 3.465 | 88.5% |
-| native FP4, GPTQ | 4.0 | 0.083 | 3.379 | 88.6% |
-| native 16-level integer, GPTQ | 4.0 | 0.097 | 3.543 | 88.6% |
-| native FP4, round to nearest | 4.0 | 0.103 | 3.478 | 88.9% |
-| native 16-level integer, round to nearest | 4.0 | 0.155 | 3.782 | 85.4% |
-
-FP4 with GPTQ is on par with MLX's format at 11% less memory. The engine's
-output on that file matches MLX running the same decoded weights
-(`tests/verify_native.py`).
-
-The linear kernel in isolation, same quantized weights as MLX, Qwen3.8-27B
-gate/up projection (5120 → 17408):
-
-| Rows | redline | MLX | |
-|---|---|---|---|
-| 1 | 0.372 ms | 0.416 ms | about parity once MLX's in-model overhead is discounted |
-| 8 | 0.373 ms | 0.784 ms | 2.1x |
-| 64 | 0.746 ms | 0.936 ms | 1.25x |
-| 1024 | 16.0 TFLOPS | 11.45 TFLOPS | 1.4x |
-
-So the kernel is ahead where several rows share one pass over the weights, and
-the engine around it is not yet: about 450 GPU dispatches per decoded token,
-small kernels written for clarity, and a naive attention loop.
-
-## What the hardware allows (same machine)
-
-| Limit | Measured |
-|---|---|
-| Memory read bandwidth, CPU or GPU | ~150 GB/s (decode ceiling: ~63 tok/s for the 4B, ~10 tok/s for the 27B at 4.5 bits/weight) |
-| GPU accelerators, half × 4-bit weights | ~19–20 TFLOPS |
-| GPU accelerators, 8-bit activations × 4-bit weights | ~31–36 TFLOPS |
-| MLX's quantized matmul in prefill | 7.4–13.2 TFLOPS |
-
-Two findings shape the roadmap:
-
-1. `matmul2d` accepts 4-bit, 2-bit, FP4 and FP8 operands natively. MLX
-   dequantizes in software first and does not use them.
-2. With per-group scales applied in registers (what an MLX-compatible format
-   needs), this kernel tops out near 12–16 TFLOPS and tiles taller than 32 rows
-   run ~3x slower. The accelerator's direct path with a scale-free operand is
-   the one that reaches 19–31 TFLOPS.
-
-## Roadmap
-
-1. Engine overhead: fewer and wider kernels per token, attention that scales
-   with context, tile choice per layer shape.
-2. A native weight format without per-group scales inside the matmul, with its
-   accuracy measured against the float model before it is trusted.
-3. 8-bit activations for prefill, same condition.
-4. Multi-token prediction: the checkpoints ship an MTP head that MLX drops;
-   verifying 8–32 candidate tokens costs about one pass over the weights here.
-5. Agent runtime: tokenizer, chat template, tool calls with constrained
-   decoding, state checkpoints for the recurrent layers, an OpenAI-compatible
-   local server.
-
-## Build and run
-
-```sh
-cmake -S . -B build/cmake -G Ninja && cmake --build build/cmake
-
-tools/fetch_model.py mlx-community/Qwen3.5-4B-MLX-4bit        # into models/
-python tools/convert.py models/Qwen3.5-4B-MLX-4bit models/qwen3.5-4b.rlm
-
-build/cmake/test_linear                                        # kernel vs CPU reference
-python tests/verify_against_mlx.py models/Qwen3.5-4B-MLX-4bit models/qwen3.5-4b.rlm tokens.i32
-build/cmake/redline bench models/qwen3.5-4b.rlm tokens.i32 --prompt 1024 --gen 128
-build/cmake/redline profile models/qwen3.5-4b.rlm tokens.i32  # per-kernel GPU time
-```
-
-Token files are raw little-endian int32; tokenization is not in the engine yet.
-The Python tools need `numpy`; verification and baselines also need `mlx-lm`.
+- One model family: dense Qwen3.5 / Qwen3.8 text models. No MoE variants, no
+  vision input. Qwen3.8-27B is not measured in the native format yet.
+- Without drafts, decoding is at 66% of the bandwidth ceiling for the 4B
+  model: a pass is some 380 GPU dispatches, many of them small kernels.
+- Prompt processing is at MLX's speed. The accelerators run 8-bit activations
+  against 4-bit weights about 1.6x faster than half precision; that path is
+  not built and its accuracy is not measured.
+- One conversation context. Alternating between different system prompts
+  reprocesses the prompt each time.
+- Run on a single M6 machine. Engine errors (an unsupported model geometry,
+  misuse of the C API) end the process with a message.
+- Models have to be converted locally.
 
 ## License
 

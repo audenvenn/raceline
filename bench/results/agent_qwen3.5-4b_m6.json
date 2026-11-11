@@ -3,11 +3,11 @@
   "model": "models/qwen3.5-4b.fp4.rlm",
   "backend": "redline",
   "mtp": true,
-  "load_s": 4.068317833007313,
+  "load_s": 0.553696165967267,
   "prompt_tokens": 1024,
   "gen_tokens": 256,
-  "prefill_tps": 1827.5037517959188,
-  "decode_tps": 166.47350873402755,
+  "prefill_tps": 1795.3975852363803,
+  "decode_tps": 163.43731660423904,
   "tokens": [
    318,
    17,
@@ -26,18 +26,18 @@
    681,
    198
   ],
-  "drafts_accepted": 0.828125,
-  "peak_gb": 2.021444128
+  "drafts_accepted": 0.9409090909090909,
+  "peak_gb": 2.02073964
  },
  {
   "model": "models/Qwen3.5-4B-MLX-4bit",
   "backend": "mlx",
   "mtp": false,
-  "load_s": 1.2572452920139767,
+  "load_s": 1.2493043749709614,
   "prompt_tokens": 1024,
   "gen_tokens": 256,
-  "prefill_tps": 1672.41752905703,
-  "decode_tps": 51.513607548057784,
+  "prefill_tps": 1665.4255260656948,
+  "decode_tps": 51.30045440570438,
   "tokens": [
    318,
    17,
@@ -56,17 +56,17 @@
    681,
    198
   ],
-  "peak_gb": 4.680584096
+  "peak_gb": 4.663708576
  },
  {
   "model": "models/qwen3.5-4b.fp4.rlm",
   "backend": "redline",
   "mtp": true,
-  "load_s": 0.5517496250104159,
+  "load_s": 0.5507393750012852,
   "prompt_tokens": 8192,
   "gen_tokens": 256,
-  "prefill_tps": 1563.911980256937,
-  "decode_tps": 113.4886591142364,
+  "prefill_tps": 1567.808194945087,
+  "decode_tps": 112.15069750319309,
   "tokens": [
    198,
    262,
@@ -85,18 +85,18 @@
    1067,
    1267
   ],
-  "drafts_accepted": 0.7014388489208633,
-  "peak_gb": 2.02336108
+  "drafts_accepted": 0.827433628318584,
+  "peak_gb": 2.023328336
  },
  {
   "model": "models/Qwen3.5-4B-MLX-4bit",
   "backend": "mlx",
   "mtp": false,
-  "load_s": 0.9536920419777744,
+  "load_s": 0.9570030840113759,
   "prompt_tokens": 8192,
   "gen_tokens": 256,
-  "prefill_tps": 1573.809821933862,
-  "decode_tps": 46.667505625554156,
+  "prefill_tps": 1576.447934362472,
+  "decode_tps": 47.071024642088126,
   "tokens": [
    198,
    262,
@@ -115,6 +115,6 @@
    1067,
    1267
   ],
-  "peak_gb": 6.034033568
+  "peak_gb": 6.035278752
  }
 ]

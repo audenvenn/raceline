@@ -32,7 +32,7 @@ TOOLS = [
          "timeout": {"type": "integer", "description": "Seconds before the command is stopped. Default 60."}},
         ["command"]),
     _fn("read_file", "Read a text file. Returns numbered lines.",
-        {"path": {"type": "string"},
+        {"path": {"type": "string", "description": "Path relative to the working directory."},
          "offset": {"type": "integer", "description": "First line to return, 1-based. Default 1."},
          "limit": {"type": "integer", "description": "Maximum number of lines. Default 400."}},
         ["path"]),
@@ -63,10 +63,16 @@ Platform: macOS {release} ({machine})
 Date: {date}
 
 How to work:
+- Paths are relative to the working directory: write src/main.py, not an absolute path.
 - Look before you answer: list directories, find and search files, read them. Do not guess at file contents.
-- Make changes with edit_file or write_file. Keep them minimal and focused on the request.
+- Make changes with edit_file or write_file, not with shell commands. Keep them minimal and focused on the request.
+- The shell is macOS zsh with BSD tools (for example, sed -i needs an explicit empty suffix: sed -i '').
 - Shell commands and file writes need the user's approval. If one is declined, do not retry it; ask what they want instead.
 - Be concise. When a task is done, say what you did in a few sentences."""
+
+
+def _short(text: str, limit: int = 72) -> str:
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 def _clip(text: str) -> str:
@@ -83,6 +89,11 @@ class Tools:
 
     def _path(self, path: str) -> str:
         return os.path.abspath(os.path.join(self.cwd, os.path.expanduser(path)))
+
+    def _show(self, full: str) -> str:
+        """A path as the model and the user should see it: relative to the working directory when inside it."""
+        rel = os.path.relpath(full, self.cwd)
+        return full if rel.startswith("..") else rel
 
     def run(self, name: str, args: dict) -> str:
         try:
@@ -116,12 +127,12 @@ class Tools:
     def tool_write_file(self, path: str, content: str) -> str:
         full = self._path(path)
         verb = "overwrite" if os.path.exists(full) else "create"
-        if not self.approve(f"{verb} {full} ({len(content)} characters)"):
+        if not self.approve(f"{verb} {self._show(full)} ({len(content)} characters)"):
             return "The user declined this write."
         os.makedirs(os.path.dirname(full) or ".", exist_ok=True)
         with open(full, "w", encoding="utf-8") as f:
             f.write(content)
-        return f"Wrote {len(content)} characters to {full}."
+        return f"Wrote {len(content)} characters to {self._show(full)}."
 
     def tool_edit_file(self, path: str, old_string: str, new_string: str) -> str:
         full = self._path(path)
@@ -129,12 +140,12 @@ class Tools:
             text = f.read()
         count = text.count(old_string)
         if count != 1:
-            return f"Error: old_string occurs {count} times in {full}; it must occur exactly once."
-        if not self.approve(f"edit {full} (replace {len(old_string)} characters with {len(new_string)})"):
+            return f"Error: old_string occurs {count} times in {self._show(full)}; it must occur exactly once."
+        if not self.approve(f"edit {self._show(full)} (replace {len(old_string)} characters with {len(new_string)})"):
             return "The user declined this edit."
         with open(full, "w", encoding="utf-8") as f:
             f.write(text.replace(old_string, new_string, 1))
-        return f"Edited {full}."
+        return f"Edited {self._show(full)}."
 
     def tool_list_dir(self, path: str = ".") -> str:
         full = self._path(path)
@@ -273,7 +284,7 @@ class Agent:
             if not calls:
                 break
             for call in calls:
-                brief = ", ".join(f"{k}={json.dumps(v, ensure_ascii=False)[:80]}" for k, v in call["arguments"].items())
+                brief = ", ".join(f"{k}={_short(json.dumps(v, ensure_ascii=False))}" for k, v in call["arguments"].items())
                 out.write(self.c("36", f"\n  > {call['name']}({brief})\n"))
                 out.flush()
                 result = self.tools.run(call["name"], call["arguments"])

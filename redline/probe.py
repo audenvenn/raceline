@@ -128,7 +128,11 @@ def measure_model(model: str, backend_name=None, prompt_tokens: int = 1024, gen_
         out["accepted"] = counters["accepted"] / counters["drafts"]
     out["backend"] = b.name
     if model.endswith(".rlm"):
-        out["bytes"] = os.path.getsize(model)
+        # What a pass reads: every section but the token table (looked up, not read), the head and the files.
+        with open(model, "rb") as f:
+            f.seek(8)
+            hdr = json.loads(f.read(int.from_bytes(f.read(8), "little")))
+        out["bytes"] = sum(sec["nbytes"] for sec in hdr["sections"] if sec["name"] not in ("embed", "mtp", "files"))
     else:
         out["bytes"] = sum(os.path.getsize(os.path.join(model, f)) for f in os.listdir(model) if f.endswith(".safetensors"))
     return out

@@ -5,11 +5,29 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "raceline-agent"
 version = "0.1.0"
-description = "A local agent runtime for Apple Silicon: OpenAI-compatible server and terminal agent on MLX or the raceline engine."
+description = "A local agent runtime for Apple Silicon with its own inference engine: OpenAI-compatible server and terminal agent."
 readme = "README.md"
 license = { text = "Apache-2.0" }
+authors = [{ name = "raceline contributors" }]
 requires-python = ">=3.10"
+keywords = ["apple-silicon", "metal", "llm", "inference", "agent", "speculative-decoding", "qwen"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Environment :: GPU",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS :: MacOS X",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = ["mlx-lm>=0.32", "numpy"]
+
+[project.urls]
+Homepage = "https://github.com/audenvenn/raceline"
+Issues = "https://github.com/audenvenn/raceline/issues"
+Changelog = "https://github.com/audenvenn/raceline/blob/main/CHANGELOG.md"
 
 [project.scripts]
 raceline = "raceline.cli:main"

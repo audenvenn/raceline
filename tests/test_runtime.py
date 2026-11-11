@@ -182,6 +182,41 @@ def test_layout_replay_matches_the_writer():
     w.finish({})
 
 
+def test_pull_assembles_parts_and_resumes():
+    """A model cut into release parts comes back identical, also when the download was interrupted."""
+    import json
+    import tempfile
+    import raceline.pull as pull
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    from convert import Writer
+    from release_model import cut
+    tmp = tempfile.mkdtemp()
+    model = os.path.join(tmp, "tiny.rlm")
+    w = Writer(model)
+    w.begin("data")
+    w.add_float("x", np.random.default_rng(1).normal(size=700_000).astype(np.float32))
+    w.end()
+    w.finish(dict(format="raceline", source="test"))
+    manifest = cut(model, os.path.join(tmp, "release"), part_size=1_500_000)
+    assert len(manifest["parts"]) == 3 and sum(p["size"] for p in manifest["parts"]) == os.path.getsize(model)
+
+    saved, pull.RELEASES = pull.RELEASES, "file://" + os.path.join(tmp, "release")
+    try:
+        out = pull.pull("tiny.rlm", os.path.join(tmp, "got.rlm"))
+        assert open(out, "rb").read() == open(model, "rb").read()
+        # An interrupted download: the first part is in place and recorded, the rest is missing.
+        dest = os.path.join(tmp, "again.rlm")
+        with open(dest + ".partial", "wb") as f:
+            f.write(open(model, "rb").read()[:manifest["parts"][0]["size"]])
+        with open(dest + ".partial.json", "w") as f:
+            json.dump({"done": [0]}, f)
+        os.remove(os.path.join(tmp, "release", manifest["parts"][0]["name"]))    # it must not be fetched again
+        assert open(pull.pull("tiny.rlm", dest), "rb").read() == open(model, "rb").read()
+        assert not os.path.exists(dest + ".partial") and not os.path.exists(dest + ".partial.json")
+    finally:
+        pull.RELEASES = saved
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for name, fn in tests:

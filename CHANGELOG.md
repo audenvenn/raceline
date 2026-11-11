@@ -7,6 +7,10 @@ files are published separately, in the `models-v1` release.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-11
+
+First public release.
+
 ### Added
 
 - Engine for dense Qwen3.5 / Qwen3.8 text models on Apple GPU neural
@@ -28,3 +32,6 @@ files are published separately, in the `models-v1` release.
   speculative decoding, and benchmarks against mlx-lm.
 - Project infrastructure: CI, contribution guide, security policy, issue and
   pull-request templates.
+
+[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/audenvenn/raceline/releases/tag/v0.1.0

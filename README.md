@@ -6,44 +6,46 @@
 A local agent runtime for Apple Silicon with its own inference engine, built
 to get as much out of one Mac, for one user, as the hardware allows.
 
-On an M6 Mac mini it decodes Qwen3.5-4B **1.7x to 3.2x faster than mlx-lm**
-on the same machine (81 to 163 tokens/s against 47 to 51), with weights of
-the same quality in less memory. The text it produces is bit-for-bit what
-decoding one token at a time produces, at any sampling temperature.
+On an M6 Mac mini with 24 GB it runs **Qwen3.8-27B at 22 to 41 tokens/s,
+where mlx-lm manages 8 to 9** on the same machine, and Qwen3.5-4B at 81 to
+163 against 47 to 51. The text it produces is bit-for-bit what decoding one
+token at a time produces, at any sampling temperature.
 
 ```
-$ raceline chat models/qwen3.5-4b.rlm --yes -p "python3 stats.py 3 1 4 1 5 crashes. Find the bug, fix it, and run it again to confirm."
+$ raceline chat qwen3.8-27b --yes -p "Run test_inventory.py. If a test fails, find the cause in inventory.py, fix it, and run the tests again until they all pass."
 
-  > bash(command="find_files \"*.py\"")
-    [exit code 127]  [+2 lines]
-  > find_files(pattern="*.py")
-    stats.py
-  > read_file(path="stats.py")
-    1	import sys  [+19 lines]
+  > bash(command="ls -la")
+    [exit code 0]  [+5 lines]
+  > read_file(path="test_inventory.py")
+    1	from inventory import Inventory  [+22 lines]
+  > read_file(path="inventory.py")
+    1	"""A tiny inventory: items with a unit price and a quantity."""  [+21 lines]
 
-I found the bug! On line 5, there's a typo: `len(value)` should be `len(values)`. [...]
+Let me run the tests first to confirm the failures.
 
-  > edit_file(path="stats.py", old_string="    return sum(values) / len(value)", new_string="    return sum(values) / len(values)")
-    Edited stats.py.
-  > bash(command="python3 stats.py 3 1 4 1 5")
+  > bash(command="python3 test_inventory.py")
+    [exit code 1]  [+7 lines]
+
+Two bugs in `inventory.py`:
+1. `total_value` ignores quantity — should multiply price by quantity.
+2. `remove` only deletes when quantity goes negative; removing the last ones leaves quantity at 0, which should also drop the item.
+
+  > edit_file(path="inventory.py", old_string="        if item[\"quantity\"] < 0:", new_string="        if item[\"quantity\"] <= 0:")
+    Edited inventory.py.
+  > edit_file(path="inventory.py", old_string="        return sum(item[\"price\"] for item in self.items.values())", new_string="        return sum(item[\"price\"] * item[\"quantity\"] for item in ...)
+    Edited inventory.py.
+  > bash(command="python3 test_inventory.py")
     [exit code 0]  [+2 lines]
 
-Done! The bug was a typo on line 5: `len(value)` should have been `len(values)`. The script now runs successfully, outputting:
-- mean: 2.8
-- median: 3.0
-  [6 steps · context 2004 tok (1971 reused) · 636 out at 95.4 tok/s, 66% of drafts accepted · 6.7s]
+Both tests now pass. [...]
+  [5 steps · context 2912 tok (2871 reused) · 839 out at 26.4 tok/s, 82% of drafts accepted · 71.0s]
 ```
 
-(An actual run of the 4B model, first misstep included; its reasoning between the steps is left out.)
+(An actual run of Qwen3.8-27B on that Mac mini; the model's reasoning between the steps is left out.)
 
 It is a terminal agent (`raceline chat`), an OpenAI-compatible server
 (`raceline serve`) and a hardware probe (`raceline probe`) on top of a small
 engine written for one model family, Qwen3.5 / Qwen3.8.
-
-**Status.** Everything below is measured on Qwen3.5-4B. Qwen3.8-27B, the
-model this is aimed at, has the same architecture and takes the same code
-paths; converting it takes about two hours on this machine and its numbers
-are not in yet.
 
 ## Numbers
 
@@ -51,8 +53,28 @@ M6 Mac mini (12-core GPU, 24 GB), macOS 27.2, mlx-lm 0.32.2 on MLX 0.32.4. Both
 runtimes are measured back to back through the same Python interface, with
 nothing else on the GPU.
 
-Continuing Python source after a prompt of that length, greedy, 256 tokens
-(`bench/agent_bench.py`):
+**Qwen3.8-27B.** Continuing Python source after a prompt of that length,
+greedy, 128 tokens (`bench/agent_bench.py`):
+
+| Context | Runtime | Prompt processing | Decoding | Memory |
+|---|---|---|---|---|
+| 1,024 tokens | mlx-lm, MLX 4-bit weights | 275 tok/s | 8.6 tok/s | 18.2 GB |
+| | **raceline** | 240 tok/s | **40.8 tok/s** | 3.5 GB + 13.8 GB file mapped |
+| | raceline, drafts off | 244 tok/s | 9.4 tok/s | |
+| 4,096 tokens | mlx-lm, MLX 4-bit weights | 237 tok/s | 8.1 tok/s | 19.6 GB |
+| | **raceline** | 232 tok/s | **23.5 tok/s** | 3.5 GB + 13.8 GB file mapped |
+| | raceline, drafts off | 226 tok/s | 8.9 tok/s | |
+
+Chat answers, thinking off, three requests of up to 300 tokens
+(`bench/chat_bench.py`):
+
+| Sampling | mlx-lm | raceline | raceline, drafts off |
+|---|---|---|---|
+| greedy | 8.8 tok/s | **25.4 tok/s** | 9.1 tok/s |
+| temperature 0.7, top-p 0.8, top-k 20 | 8.8 tok/s | **23.6 tok/s** | 9.1 tok/s |
+| temperature 1.0, top-p 0.95, top-k 20 | 8.8 tok/s | **22.0 tok/s** | 9.2 tok/s |
+
+**Qwen3.5-4B.** The same two benchmarks, 256 tokens of source code:
 
 | Context | Runtime | Prompt processing | Decoding | Memory |
 |---|---|---|---|---|
@@ -63,9 +85,6 @@ Continuing Python source after a prompt of that length, greedy, 256 tokens
 | | **raceline** | 1568 tok/s | **112.2 tok/s** | 2.0 GB + 2.5 GB file mapped |
 | | raceline, drafts off | 1639 tok/s | 41.4 tok/s | |
 
-Chat answers, thinking off, three requests of up to 300 tokens
-(`bench/chat_bench.py`):
-
 | Sampling | mlx-lm | raceline | raceline, drafts off |
 |---|---|---|---|
 | greedy | 50.8 tok/s | **86.7 tok/s** | 47.5 tok/s |
@@ -73,9 +92,11 @@ Chat answers, thinking off, three requests of up to 300 tokens
 | temperature 1.0, top-p 0.95, top-k 20 | 49.0 tok/s | **81.5 tok/s** | 46.6 tok/s |
 
 How to read this. Without drafts the engine decodes at about MLX's speed, and
-it processes prompts at MLX's speed with or without them: there is no
-advantage there. The gain is the drafts, and it depends on how predictable
-the text is: large for source code, smaller for prose. Memory is the peak
+it processes prompts at about MLX's speed with or without them (13% slower
+for the 27B at 1,024 tokens): there is no advantage there. The gain is the
+drafts, and it depends on how predictable the text is: 2.9x to 4.7x for
+source code and 2.5x to 2.9x for prose on the 27B, less on the 4B, where a
+draft costs more relative to a pass. Memory is the peak
 footprint of the process; the model file is mapped read-only on top of that
 and its pages can be dropped and re-read by the system.
 
@@ -83,7 +104,7 @@ and its pages can be dropped and re-read by the system.
 
 A Mac generating text is limited by memory bandwidth: every weight is read
 once per pass, so 150 GB/s and 2.1 GB of weights allow about 70 passes per
-second, 13.6 GB about 11. `raceline probe` measures that ceiling on your
+second, 12.9 GB about 12. `raceline probe` measures that ceiling on your
 machine. The engine is built around getting more than one token out of a pass.
 
 1. **Drafts from the model's own head, checked in the same pass.** Qwen3.5 /
@@ -93,7 +114,7 @@ machine. The engine is built around getting more than one token out of a pass.
    and up to seven guesses through the model together; every guess the model
    confirms is a token that needed no pass of its own. On held-out text the
    first four guesses hold 79%, 71%, 64% and 59% of the time, each given the
-   ones before it.
+   ones before it (Qwen3.5-4B; the 27B's first guess holds 81.5%).
 2. **A pass costs about the same for 1 or 16 rows.** The linear-layer kernel
    hands packed 4-bit weights straight to the GPU's neural accelerators
    (Metal 4 `matmul2d` with FP4 operands) over a layout made for streaming.
@@ -108,12 +129,14 @@ machine. The engine is built around getting more than one token out of a pass.
    over the weights.
 4. **4.0 bits per weight that the hardware decodes itself.** Weights are
    stored as `row scale x column scale x FP4 code`, quantized with GPTQ one
-   layer at a time: the quality of MLX's 4-bit format, which needs 4.5 bits,
-   with 11% less to read per pass. The file is mapped, not loaded.
+   layer at a time, with 11% less to read per pass than MLX's 4-bit format
+   (4.5 bits). In held-out quality that is on par with MLX's format for the
+   4B model and behind it for the 27B; the tables are below. The file is
+   mapped, not loaded.
 5. **Nothing is recomputed between turns.** The runtime keeps the model where
    the last request left it and snapshots the recurrent state at the points a
    conversation can branch from, so a follow-up request only processes what
-   is new (1971 of 2004 context tokens reused in the run above).
+   is new (2871 of 2912 context tokens reused in the run above).
 
 MTP speculative decoding is not new on the Mac (llama.cpp and several MLX
 based servers have it). What this project adds is an engine in which the
@@ -136,6 +159,8 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 .venv/bin/raceline chat  qwen3.5-4b     # terminal agent in the current directory
 .venv/bin/raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
 .venv/bin/raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
+
+.venv/bin/raceline pull  qwen3.8-27b    # 13.8 GB; wants a Mac with 24 GB or more
 ```
 
 `raceline pull` downloads from this repository's releases, verifies checksums
@@ -149,7 +174,8 @@ and continues an interrupted download. To convert a checkpoint yourself:
 ```
 
 A checkpoint is processed a layer at a time, so it never has to fit in
-memory, and an interrupted conversion continues with `--resume`.
+memory (Qwen3.8-27B is 55 GB and takes about two hours on the M6), and an
+interrupted conversion continues with `--resume`.
 
 Any MLX model directory also runs, through the MLX backend and without the
 engine's speedups: `raceline chat models/Qwen3.5-4B-MLX-4bit`.
@@ -177,6 +203,22 @@ Responses carry `usage.prompt_tokens_details.cached_tokens` and a `timings`
 object, so a client can see what a request cost. One conversation is served
 at a time; this is a single-user runtime.
 
+## Configuration
+
+Environment variables, all optional:
+
+| Variable | Meaning |
+|---|---|
+| `RACELINE_MODEL` | Model used when a command names none. |
+| `RACELINE_CACHE` | Where pulled models and unpacked tokenizer files live (default `~/.cache/raceline`). |
+| `RACELINE_MTP` | `0` turns drafts off: one token per pass. |
+| `RACELINE_DRAFTS` | Most drafts per pass (default 6, at most 7). |
+| `RACELINE_MIN_CONFIDENCE` | Fixed threshold below which drafting stops, instead of the measured one. |
+| `RACELINE_DRAFT_VOCAB` | Token-id limit of a draft's vocabulary pass (`0` for the whole vocabulary; chosen from the context by default). |
+| `RACELINE_RELEASES` | Base URL `raceline pull` downloads from. |
+| `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
+| `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
+
 ## What is checked
 
 | Check | Result |
@@ -186,10 +228,13 @@ at a time; this is a single-user runtime.
 | MTP head against MLX on the same weights (`tests/verify_mtp.py`) | same draft, logits within 5e-3 relative |
 | A prompt fed in chunks of 96, 17 or 1 tokens | bit-identical logits |
 | Plain decoding against 1 to 7 drafts per pass (`raceline-engine spec`) | identical tokens |
-| Passes with wrong, partly right and right drafts, abandoned drafts, state save and load, against a clean run (`tests/verify_spec.py`) | bit-identical logits and drafts |
+| Passes with wrong, partly right and right drafts, abandoned drafts, state save and load, against a clean run (`tests/verify_spec.py`) | bit-identical logits and drafts, on both models |
 | Greedy and sampled text with and without drafts, through the runtime | identical |
 | Linear kernels against a double-precision CPU reference (`build/cmake/test_linear`) | pass |
-| Session reuse and snapshots, tool-call parsing, the sampler, resuming a conversion (`tests/test_runtime.py`, no GPU needed) | pass |
+| Session reuse and snapshots, tool-call parsing, the sampler, resuming a conversion, model downloads (`tests/test_runtime.py`, no GPU needed, run by CI) | pass |
+
+The comparisons with MLX in the first three rows are on Qwen3.5-4B: the float
+27B model does not fit in this machine's memory.
 
 Quantization quality against the float model on held-out text, Qwen3.5-4B,
 1152 positions (`tools/quantize.py` reports this for every conversion):
@@ -199,6 +244,19 @@ Quantization quality against the float model on held-out text, Qwen3.5-4B,
 | MLX affine 4-bit, groups of 64 | 4.5 | 0.072 | 3.465 | 88.5% |
 | **native FP4, GPTQ (this format)** | 4.0 | 0.083 | 3.379 | 88.6% |
 | native FP4, round to nearest | 4.0 | 0.103 | 3.478 | 88.9% |
+
+Qwen3.8-27B, same measurement:
+
+| Weights | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
+|---|---|---|---|---|
+| MLX affine 4-bit, groups of 64 | 4.5 | 0.105 | 1.861 | 92.2% |
+| **native FP4, GPTQ (the published file)** | 4.0 | 0.152 | 1.999 | 91.5% |
+
+For the 27B the native file is measurably further from the float model than
+MLX's format, so the speed tables compare weights of slightly different
+quality there. The speed-up itself does not come from the format (decoding
+without drafts is 9.4 against 8.6 tok/s); the quality gap is tracked in
+[#15](https://github.com/audenvenn/raceline/issues/15).
 
 ## How it works
 
@@ -265,10 +323,13 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 ## Limits
 
 - One model family: dense Qwen3.5 / Qwen3.8 text models. No MoE variants, no
-  vision input. Qwen3.8-27B is not measured in the native format yet.
+  vision input.
+- The 27B conversion loses more quality than MLX's 4-bit format does (KL
+  0.152 against 0.105 nats to the float model on held-out text).
 - Without drafts, decoding is at 66% of the bandwidth ceiling for the 4B
-  model: a pass is some 380 GPU dispatches, many of them small kernels.
-- Prompt processing is at MLX's speed. The accelerators run 8-bit activations
+  model and 81% for the 27B: a pass is some 380 to 760 GPU dispatches, many
+  of them small kernels.
+- Prompt processing is at MLX's speed or slightly below. The accelerators run 8-bit activations
   against 4-bit weights about 1.6x faster than half precision; that path is
   not built and its accuracy is not measured.
 - One conversation context. Alternating between different system prompts

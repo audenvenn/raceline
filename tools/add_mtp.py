@@ -154,7 +154,7 @@ def main():
     print(f"the head's top choice is the model's own choice: float head {100 * agree['float']:.1f}%, "
           f"{book} head {100 * agree['4-bit']:.1f}%  ({n_ev * (T - 2 - skip)} held-out positions)")
 
-    out, hdr = Writer.append(cli.rlm, drop_section="mtp")
+    out, hdr = Writer.append(cli.rlm, drop_from="mtp")
     out.begin("mtp")
     for name, w in (("mtp.in_norm", lw["input_layernorm.weight"]), ("mtp.post_norm", lw["post_attention_layernorm.weight"]),
                     ("mtp.attn.q_norm", lw["self_attn.q_norm.weight"]), ("mtp.attn.k_norm", lw["self_attn.k_norm.weight"]),
@@ -164,9 +164,12 @@ def main():
     for name, (parts, (codes, s, c)) in tensors.items():
         out.add_native(name, parts, codes, s, c, book)
     out.end()
+    if "tokenizer.json" not in out.files:      # older files, or dropped together with a previous head
+        out.add_files(cli.src)
     hdr["mtp"] = dict(gptq=gptq, agreement=agree["4-bit"], agreement_float=agree["float"])
     out.finish(hdr)
-    print(f"added the MTP head to {cli.rlm} ({out.sections[-1]['nbytes'] / 1e6:.0f} MB) in {time.time() - t_start:.0f}s")
+    mtp_bytes = next(sec["nbytes"] for sec in out.sections if sec["name"] == "mtp")
+    print(f"added the MTP head to {cli.rlm} ({mtp_bytes / 1e6:.0f} MB) in {time.time() - t_start:.0f}s")
 
 
 if __name__ == "__main__":

@@ -151,6 +151,11 @@ class Runtime:
     def _chat(self, messages, tools, sampling, max_tokens, thinking, stop, progress):
         tok = self.backend.tokenizer
         prompt, points, pin = self.render(messages, tools, thinking)
+        limit = self.backend.max_context
+        if limit is not None:
+            if len(prompt) + 8 > limit:
+                raise ValueError(f"the conversation is {len(prompt)} tokens; the context window holds {limit}")
+            max_tokens = min(max_tokens, limit - len(prompt) - 2)
         counters = dict(getattr(self.backend, "counters", {}))
         t0 = time.perf_counter()
         usage = self.session.sync(prompt, points, pin, progress)

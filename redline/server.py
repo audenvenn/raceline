@@ -100,6 +100,11 @@ def make_handler(runtime: Runtime, model_id: str):
                     self._complete(events)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the client went away; the session keeps whatever was generated
+            except ValueError as e:
+                try:
+                    self._error(400, str(e))
+                except Exception:
+                    pass
             except Exception as e:  # report instead of dropping the connection
                 try:
                     self._error(500, f"{type(e).__name__}: {e}")

@@ -6,9 +6,11 @@ writes) asks first, unless the user started the agent with --yes.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import time
@@ -40,7 +42,19 @@ TOOLS = [
         {"path": {"type": "string"}, "old_string": {"type": "string"}, "new_string": {"type": "string"}},
         ["path", "old_string", "new_string"]),
     _fn("list_dir", "List the entries of a directory.", {"path": {"type": "string"}}, ["path"]),
+    _fn("find_files", "Find files by name. Returns paths under the directory that match a glob pattern.",
+        {"pattern": {"type": "string", "description": "Glob for the file name, for example *.py or test_*."},
+         "path": {"type": "string", "description": "Directory to search. Default: the working directory."}},
+        ["pattern"]),
+    _fn("search", "Search file contents with a regular expression. Returns matching lines as path:line: text.",
+        {"pattern": {"type": "string", "description": "Regular expression (Python syntax)."},
+         "path": {"type": "string", "description": "File or directory to search. Default: the working directory."},
+         "glob": {"type": "string", "description": "Only search files whose name matches this glob, for example *.py."}},
+        ["pattern"]),
 ]
+
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist", ".mypy_cache", ".pytest_cache"}
+MAX_MATCHES = 200
 
 SYSTEM = """You are redline, an AI assistant running entirely on this Mac. You help with software and system tasks in the user's working directory.
 
@@ -49,7 +63,7 @@ Platform: macOS {release} ({machine})
 Date: {date}
 
 How to work:
-- Look before you answer: read files, list directories, run commands. Do not guess at file contents.
+- Look before you answer: list directories, find and search files, read them. Do not guess at file contents.
 - Make changes with edit_file or write_file. Keep them minimal and focused on the request.
 - Shell commands and file writes need the user's approval. If one is declined, do not retry it; ask what they want instead.
 - Be concise. When a task is done, say what you did in a few sentences."""
@@ -127,6 +141,40 @@ class Tools:
         entries = sorted(os.listdir(full))
         return "\n".join(e + ("/" if os.path.isdir(os.path.join(full, e)) else "") for e in entries) or "(empty)"
 
+    def _walk(self, path: str):
+        full = self._path(path)
+        if os.path.isfile(full):
+            yield full
+            return
+        for root, dirs, files in os.walk(full):
+            dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+            for name in sorted(files):
+                yield os.path.join(root, name)
+
+    def tool_find_files(self, pattern: str, path: str = ".") -> str:
+        hits = [os.path.relpath(f, self.cwd) for f in self._walk(path) if fnmatch.fnmatch(os.path.basename(f), pattern)]
+        more = f"\n[{len(hits) - MAX_MATCHES} more]" if len(hits) > MAX_MATCHES else ""
+        return ("\n".join(hits[:MAX_MATCHES]) + more) or "No files match."
+
+    def tool_search(self, pattern: str, path: str = ".", glob: str = "") -> str:
+        rx = re.compile(pattern)
+        hits = []
+        for f in self._walk(path):
+            if glob and not fnmatch.fnmatch(os.path.basename(f), glob):
+                continue
+            try:
+                if os.path.getsize(f) > 2_000_000:
+                    continue
+                with open(f, encoding="utf-8") as fh:
+                    for n, line in enumerate(fh, 1):
+                        if rx.search(line):
+                            hits.append(f"{os.path.relpath(f, self.cwd)}:{n}: {line.rstrip()[:240]}")
+                            if len(hits) > MAX_MATCHES:
+                                return "\n".join(hits[:MAX_MATCHES]) + "\n[more matches not shown: narrow the search]"
+            except (UnicodeDecodeError, OSError):
+                continue  # binary or unreadable
+        return "\n".join(hits) or "No matches."
+
 
 class Agent:
     def __init__(self, runtime: Runtime, cwd: str, auto_approve: bool = False, thinking: bool = True,
@@ -155,6 +203,22 @@ class Agent:
 
     def reset(self) -> None:
         del self.messages[1:]
+
+    def _make_room(self, used: int) -> None:
+        """When the context is three quarters full, drops the bodies of the
+        oldest tool results (the model can always run a tool again). What
+        precedes the first dropped body stays cached."""
+        limit = self.rt.backend.max_context
+        if limit is None or used < 0.75 * limit:
+            return
+        tok = self.rt.backend.tokenizer
+        excess = used - limit // 2
+        for m in self.messages[:-6]:
+            if excess <= 0:
+                break
+            if m["role"] == "tool" and len(m["content"]) > 200:
+                excess -= len(tok.encode(m["content"], add_special_tokens=False))
+                m["content"] = "[output dropped to save context; run the tool again if it is needed]"
 
     def turn(self, text: str) -> dict:
         """Runs one user request to completion (the model may take many tool steps)."""
@@ -188,6 +252,9 @@ class Agent:
                 out.write(self.c("33", "\n  [interrupted]\n"))
                 self.messages.append({"role": "assistant", "content": content})
                 break
+            except ValueError as e:      # the conversation no longer fits the context window
+                out.write(self.c("31", f"\n  {e}. /reset starts a new conversation.\n"))
+                break
             totals["seconds"] += time.perf_counter() - t0
             totals["steps"] += 1
             for k in ("prompt_tokens", "cached_tokens", "completion_tokens"):
@@ -201,6 +268,7 @@ class Agent:
                 message["tool_calls"] = [{"id": c["id"], "type": "function", "function": {
                     "name": c["name"], "arguments": json.dumps(c["arguments"], ensure_ascii=False)}} for c in calls]
             self.messages.append(message)
+            self._make_room(stats["prompt_tokens"] + stats["completion_tokens"])
             if not calls:
                 break
             for call in calls:

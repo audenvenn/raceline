@@ -10,11 +10,11 @@ import sys
 from .backends import Sampling, load_backend
 
 
-def _defaults(model: str) -> Sampling:
+def _defaults(model: str, backend) -> Sampling:
     """Sampling defaults: the model's generation_config.json where it has one."""
     s = Sampling()
-    for d in (model, os.path.dirname(model)):
-        path = os.path.join(d, "generation_config.json")
+    for d in (getattr(backend, "files_dir", None), model, os.path.dirname(model)):
+        path = os.path.join(d, "generation_config.json") if d else ""
         if os.path.isfile(path):
             cfg = json.load(open(path))
             for key in ("temperature", "top_p", "top_k", "repetition_penalty"):
@@ -28,7 +28,7 @@ def _runtime(args):
     from .chat import Runtime
 
     backend = load_backend(args.model, args.backend)
-    sampling = _defaults(args.model)
+    sampling = _defaults(args.model, backend)
     if args.temperature is not None:
         sampling.temperature = args.temperature
     return Runtime(backend, sampling)

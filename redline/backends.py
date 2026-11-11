@@ -42,6 +42,7 @@ class Backend:
 
     name = "backend"
     position = 0
+    max_context: Optional[int] = None   # tokens the context can hold, if bounded
     eos_ids: set = set()
     tokenizer = None    # a transformers tokenizer: encode, decode, apply_chat_template
 

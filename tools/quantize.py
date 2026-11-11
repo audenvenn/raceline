@@ -363,9 +363,12 @@ def main():
     if not write:
         return
     cfg["num_hidden_layers"] = n_layers
+    out.add_files(cli.src)
     out.finish(dict(format="redline", version=2, arch="qwen3_5", source=os.path.basename(os.path.normpath(cli.src)),
                     config=cfg, quant=dict(mode="native", bits=4, book=book, block=BLOCK, gptq=gptq), quality=quality))
     print(f"wrote {cli.dst}: {os.path.getsize(cli.dst) / 1e9:.2f} GB in {time.time() - t_start:.0f}s")
+    if "mtp.fc.weight" in src.st:
+        print(f"this checkpoint has an MTP head: tools/add_mtp.py {cli.src} {cli.dst} adds it (about 1.5x faster decoding)")
 
 
 if __name__ == "__main__":

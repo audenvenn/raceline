@@ -33,6 +33,8 @@ ALIGN = 128
 BLOCK = 256
 GROUP = 64
 MAGIC = b"RLM1"
+MODEL_FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "special_tokens_map.json",
+               "added_tokens.json", "generation_config.json")
 
 
 # --------------------------------------------------------------- safetensors
@@ -129,14 +131,15 @@ class Writer:
         self.header_room = 64 * PAGE          # 1 MiB; the header is patched in at the end
         self.f.write(b"\0" * self.header_room)
         self.tensors = {}
+        self.files = {}
         self.sections = []
         self._sec = None
 
     @classmethod
-    def append(cls, path, drop_section=None):
+    def append(cls, path, drop_from=None):
         """Reopens a finished file to add sections. Returns (writer, header
-        without its section and tensor tables). `drop_section` names a section
-        to discard first; it has to be the last one in the file."""
+        without its section, tensor and file tables). `drop_from` names a
+        section to discard first, together with everything after it."""
         with open(path, "rb") as f:
             if f.read(4) != MAGIC:
                 raise SystemExit(f"{path} is not a redline model file")
@@ -144,16 +147,16 @@ class Writer:
             hdr = json.loads(f.read(n))
         w = cls.__new__(cls)
         w.header_room = 64 * PAGE
-        w.tensors, w.sections, w._sec = hdr.pop("tensors"), hdr.pop("sections"), None
+        w.tensors, w.sections, w.files, w._sec = hdr.pop("tensors"), hdr.pop("sections"), hdr.pop("files", {}), None
         w.f = open(path, "r+b")
         names = [s["name"] for s in w.sections]
-        if drop_section in names:
-            idx = names.index(drop_section)
-            if idx != len(names) - 1:
-                raise SystemExit(f"section '{drop_section}' is not the last one in {path}")
-            w.f.truncate(w.sections[idx]["offset"])
-            w.tensors = {k: t for k, t in w.tensors.items() if t["section"] != idx}
-            w.sections.pop()
+        if drop_from in names:
+            idx = names.index(drop_from)
+            start = w.sections[idx]["offset"]
+            w.f.truncate(start)
+            w.tensors = {k: t for k, t in w.tensors.items() if t["section"] < idx}
+            w.files = {k: f for k, f in w.files.items() if f["offset"] < start}
+            del w.sections[idx:]
         w.f.seek(0, 2)
         return w, hdr
 
@@ -234,8 +237,21 @@ class Writer:
         self.tensors[name] = dict(kind="q4a_rows", section=len(self.sections), k=q.shape[1], n=q.shape[0],
                                   w=self.blob(w), s=self.blob(s16), b=self.blob(b16))
 
+    def add_files(self, src_dir):
+        """Embeds the tokenizer, chat template and sampling defaults of the
+        model directory, so that the file runs on its own."""
+        self.begin("files")
+        for name in MODEL_FILES:
+            path = os.path.join(src_dir, name)
+            if os.path.isfile(path):
+                data = np.fromfile(path, dtype=np.uint8)
+                self.files[name] = dict(offset=self.blob(data), nbytes=int(data.size))
+        self.end()
+        if "tokenizer.json" not in self.files:
+            raise SystemExit(f"{src_dir} has no tokenizer.json")
+
     def finish(self, meta):
-        meta = dict(meta, sections=self.sections, tensors=self.tensors)
+        meta = dict(meta, sections=self.sections, tensors=self.tensors, files=self.files)
         hdr = json.dumps(meta, separators=(",", ":")).encode()
         need = 16 + len(hdr)
         if need > self.header_room:
@@ -322,6 +338,7 @@ def main():
     head = P + "embed_tokens" if tied else "language_model.lm_head"
     out.add_blocked("lm_head", [("out", lin(head))])
     out.end()
+    out.add_files(args.src)
 
     out.finish(dict(format="redline", version=1, arch="qwen3_5", source=os.path.basename(os.path.normpath(args.src)),
                     config=cfg, quant=dict(bits=4, group=GROUP, block=BLOCK, mode="affine", scale_dtype="bf16")))

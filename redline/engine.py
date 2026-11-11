@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import ctypes
 import functools
+import hashlib
 import json
 import os
+import shutil
 import struct
 from typing import Optional
 
@@ -63,18 +65,43 @@ def _library() -> ctypes.CDLL:
 
 
 def _tokenizer_dir(model_path: str) -> str:
+    """Directory with the tokenizer and chat template for a .rlm file. Files
+    embedded in the model are unpacked once into the cache; older files fall
+    back to REDLINE_TOKENIZER or the model directory they were converted from."""
     with open(model_path, "rb") as f:
         if f.read(4) != b"RLM1":
             raise ValueError(f"{model_path} is not a redline model file")
         _, n = struct.unpack("<IQ", f.read(12))
-        source = json.loads(f.read(n)).get("source", "")
+        hdr = json.loads(f.read(n))
+        blobs = {}
+        for name, entry in (hdr.get("files") or {}).items():
+            f.seek(entry["offset"])
+            blobs[name] = f.read(entry["nbytes"])
+    override = os.environ.get("REDLINE_TOKENIZER")
+    if override:
+        return override
+    if "tokenizer.json" in blobs:
+        digest = hashlib.sha1(b"".join(k.encode() + v for k, v in sorted(blobs.items()))).hexdigest()[:16]
+        root = os.path.expanduser(os.environ.get("REDLINE_CACHE", "~/.cache/redline"))
+        out = os.path.join(root, "files", digest)
+        if not os.path.isdir(out):
+            tmp = f"{out}.{os.getpid()}.tmp"
+            os.makedirs(tmp, exist_ok=True)
+            for name, data in blobs.items():
+                with open(os.path.join(tmp, name), "wb") as g:
+                    g.write(data)
+            try:
+                os.rename(tmp, out)
+            except OSError:          # another process got there first
+                shutil.rmtree(tmp, ignore_errors=True)
+        return out
     folder = os.path.dirname(os.path.abspath(model_path))
-    stem = os.path.basename(model_path).rsplit(".rlm", 1)[0]
-    for d in (os.environ.get("REDLINE_TOKENIZER"), os.path.join(folder, stem), os.path.join(folder, source)):
-        if d and os.path.isfile(os.path.join(d, "tokenizer.json")):
+    stem, source = os.path.basename(model_path).rsplit(".rlm", 1)[0], hdr.get("source", "")
+    for d in (os.path.join(folder, stem), os.path.join(folder, source)):
+        if os.path.isfile(os.path.join(d, "tokenizer.json")):
             return d
-    raise RuntimeError(f"no tokenizer for {model_path}: set REDLINE_TOKENIZER to a directory with tokenizer.json "
-                       f"and the chat template (looked next to the model for '{stem}/' and '{source}/')")
+    raise RuntimeError(f"{model_path} carries no tokenizer: set REDLINE_TOKENIZER to a directory with tokenizer.json "
+                       f"and the chat template (also looked next to the model for '{stem}/' and '{source}/')")
 
 
 class RedlineBackend(Backend):
@@ -83,7 +110,8 @@ class RedlineBackend(Backend):
     def __init__(self, model_path: str, max_ctx: int = 32768, chunk: int = 1024, mtp: Optional[bool] = None):
         from transformers import AutoTokenizer
 
-        self.tokenizer = AutoTokenizer.from_pretrained(_tokenizer_dir(model_path))
+        self.files_dir = _tokenizer_dir(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.files_dir)
         self.eos_ids = {i for i in (self.tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>"))
                         if i is not None and i >= 0}
         self.model_id = os.path.basename(model_path)
@@ -91,6 +119,7 @@ class RedlineBackend(Backend):
         self._e = self._lib.rl_open(os.path.abspath(model_path).encode(), max_ctx, chunk)
         self._vocab = self._lib.rl_vocab(self._e)
         self._chunk, self._max_ctx = chunk, max_ctx
+        self.max_context = max_ctx
         self._logits = None
         self._open_draft = False
         if mtp is None:

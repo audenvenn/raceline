@@ -42,9 +42,9 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("model", nargs="?", default=os.environ.get("RACELINE_MODEL"),
+        p.add_argument("model", nargs="?",
                        help="a .rlm file, the name of a pulled model (qwen3.5-4b), or an MLX model directory "
-                            "(default: $RACELINE_MODEL)")
+                            "(default: $RACELINE_MODEL, or the pulled model if there is only one)")
         p.add_argument("--backend", choices=["mlx", "raceline"], help="default: by model type")
         p.add_argument("--temperature", type=float)
 
@@ -81,7 +81,10 @@ def main(argv=None):
         from .pull import resolve
         return run(resolve(args.model) if args.model else None, args.backend)
     if not args.model:
-        ap.error("no model given (and RACELINE_MODEL is not set)")
+        from .pull import default_model
+        args.model = default_model()
+    if not args.model:
+        ap.error("no model given: name one, set RACELINE_MODEL, or fetch one with `raceline pull qwen3.5-4b`")
     rt = _runtime(args)
 
     if args.command == "serve":

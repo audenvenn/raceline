@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test dependencies
+        run: pip install numpy
+      - name: Byte-compile all Python sources
+        run: python -m compileall -q raceline tools tests bench
+      - name: Runtime tests (no GPU, no model)
+        run: python tests/test_runtime.py
+      - name: Repository contains English only
+        run: python tools/check_english.py

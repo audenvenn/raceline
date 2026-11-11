@@ -43,6 +43,37 @@ class Engine {
   void save_state(void *dst) const;
   void load_state(const void *src, int position);
 
+  // ---- Speculative decoding with the model's own multi-token-prediction head
+  // (present in files extended by tools/add_mtp.py). The head guesses the
+  // token after next; feeding that guess along with the next token costs
+  // about the same pass over the weights as the next token alone, and when
+  // the guess is what the model then picks, two tokens are done in one pass.
+  // Results are bit-identical to feeding the tokens one at a time.
+  //
+  //   next = pick(logits)                         // not fed yet
+  //   draft = pick(draft_logits(next))
+  //   forward_draft(next, draft)                  // logits(0): after next
+  //   tok = pick(logits(0))
+  //   if (tok == draft) next = pick(logits(1));   // the draft row stands
+  //   else { reject_draft(); next = tok; }
+  bool has_mtp() const { return has_mtp_; }
+  // On by default when the file has a head. Only at position 0. When on, every
+  // forward also runs the head over the new positions (one extra layer).
+  void set_mtp(bool on);
+  // The head's logits for the token after `next`, the token about to be fed.
+  const float *draft_logits(int32_t next);
+  // Feeds `token` and, speculatively, `draft` after it.
+  const float *forward_draft(int32_t token, int32_t draft);
+  // Takes the draft row back. Only directly after forward_draft().
+  void reject_draft();
+  // Logits of the last forward: row 0, or row 1 after forward_draft().
+  const float *logits(int row = 0) const;
+  int argmax_of(const float *logits) const;
+
+  // Final hidden states [T][hidden] of the last forward(), before the final
+  // norm. Only meaningful with the head off (the head reuses the buffer).
+  const float *hidden() const { return (const float *)h_.contents; }
+
   // Differential profiling: every dispatch of the named kernel is repeated
   // `times` extra times. Repeats recompute the same outputs (or write to
   // scratch), so results are unchanged and the added GPU time is that
@@ -64,14 +95,26 @@ class Engine {
   struct AttnLayer;
 
   Tile tile_for(int rows) const;
+  // Tensor name of a layer's part; layer == config().layers is the MTP head's decoder layer.
+  std::string lname(int layer, const char *suffix) const;
+  bool is_linear(int layer) const { return layer < config().layers && config().is_linear_layer(layer); }
+  const float *run(const int32_t *tokens, int T, bool spec);
+  void fill_rope(id<MTLBuffer> buf, int pos0, int T);
+  void encode_embed(id<MTLBuffer> tok, int T);
   void encode_linear(const QTensor &w, int rows, id<MTLBuffer> out, size_t out_offset, int out_stride,
                      bool accum, const char *what);
   // which: 0 = a layer's input norm, 1 = its post-attention norm, 2 = the final norm.
   void encode_norm(int which, int layer, int rows, size_t in_offset);
+  void encode_rms(id<MTLBuffer> in, size_t in_offset, int in_stride, id<MTLBuffer> wgt, size_t wgt_offset,
+                  int rows, size_t out_offset);
   void bind_column_scale(const QTensor &consumer, int index);
   void encode_mlp(int layer, int T);
-  void encode_linear_attn(int layer, int T);
-  void encode_full_attn(int layer, int T);
+  void encode_linear_attn(int layer, int T, bool spec);
+  void encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope);
+  void encode_copy_hidden(int src_row, int dst_row, int rows);
+  // Runs the MTP head over n_carry rows of mtp_h_ followed by n_chunk rows of
+  // h_ (whose next tokens are in mtp_tok_), after saving row keep_row of h_.
+  void encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits);
   void begin();                 // opens a command buffer + compute encoder
   void flush(bool reopen);      // commits, waits, accumulates GPU time
   void run_threads(int w, int h);
@@ -108,6 +151,16 @@ class Engine {
 
   std::vector<std::shared_ptr<LinearLayer>> lin_;
   std::vector<std::shared_ptr<AttnLayer>> attn_;
+
+  // MTP head. Head position i pairs the hidden state of position i with token
+  // i+1, so a position can only be processed once its next token is known:
+  // positions mtp_pos_ .. pos_-1 are waiting, their hidden states parked in
+  // mtp_h_ and the tokens that followed all but the last in pend_tok_.
+  bool has_mtp_ = false, mtp_ = false, spec_open_ = false;
+  int mtp_pos_ = 0, draft_next_ = -1;
+  std::vector<int32_t> pend_tok_;
+  id<MTLBuffer> mtp_h_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
+  id<MTLBuffer> mtp_norm_e_ = nil, mtp_norm_h_ = nil, mtp_norm_out_ = nil;
 };
 
 }  // namespace rl

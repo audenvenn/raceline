@@ -14,11 +14,12 @@ struct LinearParams {
 
 struct EmbedParams { int T, K, G, h_stride; };
 struct NormParams { int T, D, in_stride, out_stride; float eps; };
-struct ConvParams { int T, C, in_stride, y_stride; };
+struct ConvParams { int T, C, in_stride, y_stride, spec; };  // spec: also emit the state one row earlier
 struct LinPrepParams { int T, Hk, Dk, Hv, y_stride, qk_stride, proj_stride, off_b, off_a, bg_stride; };
-struct DeltaParams { int T, Hk, Dk, Hv, Dv, qk_stride, y_stride, v_off, bg_stride, yo_stride; };
+struct DeltaParams { int T, Hk, Dk, Hv, Dv, qk_stride, y_stride, v_off, bg_stride, yo_stride, spec; };
 struct OutNormParams { int T, Hv, Dv, yo_stride, proj_stride, off_z, out_stride; float eps; };
 struct SwigluParams { int T, I, in_stride, out_stride; };
+struct CopyParams { int T, D; };
 struct AttnParams {
   int T, H, KVH, D;          // rows, query heads, key/value heads, head dim
   int proj_stride, off_k, off_v;

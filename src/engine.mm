@@ -12,18 +12,24 @@
 namespace rl {
 
 struct Engine::LinearLayer {
-  id<MTLBuffer> conv[2];  // ping-pong conv state, [3][conv_dim] float
-  int cur = 0;
+  id<MTLBuffer> conv[3];  // conv state, [3][conv_dim] float: current, next, and (speculation) one token back
+  int cur = 0, prev = 0;
   id<MTLBuffer> S;        // DeltaNet state, [Hv][Dv][Dk] float
+  id<MTLBuffer> S_prev;   // the state before a speculative last token
 };
+
+namespace {
+struct MtpState {  // the head's bookkeeping, as saved by save_state
+  int32_t mtp_pos, n_tok, tok[4], draft_next, pad;
+};
+constexpr int kMtpRows = 4;  // hidden states that can wait for their next token
+}  // namespace
 
 struct Engine::AttnLayer {
   id<MTLBuffer> K, V;     // [KVH][max_ctx][head_dim] half
 };
 
 namespace {
-
-std::string lname(int layer, const char *suffix) { return "layers." + std::to_string(layer) + "." + suffix; }
 
 template <typename P>
 void set_params(id<MTLComputeCommandEncoder> enc, const P &p, int index) {
@@ -39,12 +45,16 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       c.block != 256 || c.lin_v_dim % 8 != 0)
     fatal("unsupported model geometry (kernels assume Dk=128, head_dim=256, 64 rotary dims, 4 conv taps)");
 
-  rows_cap_ = (int)Metal::round_up((size_t)max_chunk_, 128);
-  x_stride_ = std::max({c.hidden, c.intermediate, c.lin_value_dim(), c.attn_dim()});
+  has_mtp_ = mtp_ = c.native && model_->has("mtp.fc");
+  const int n_layers = c.layers + (has_mtp_ ? 1 : 0);  // the head's decoder layer is layer c.layers
+
+  // A head pass can carry up to two parked rows on top of a chunk.
+  rows_cap_ = (int)Metal::round_up((size_t)max_chunk_ + (has_mtp_ ? 2 : 0), 128);
+  x_stride_ = std::max({c.hidden, c.intermediate, c.lin_value_dim(), c.attn_dim(), has_mtp_ ? 2 * c.hidden : 0});
   proj_stride_ = 0;
-  for (int i = 0; i < c.layers; i++) {
+  for (int i = 0; i < n_layers; i++) {
     proj_stride_ = std::max(proj_stride_, model_->q(lname(i, "mlp.gate_up")).n_pad);
-    proj_stride_ = std::max(proj_stride_, model_->q(lname(i, c.is_linear_layer(i) ? "lin.in_proj" : "attn.qkv")).n_pad);
+    proj_stride_ = std::max(proj_stride_, model_->q(lname(i, is_linear(i) ? "lin.in_proj" : "attn.qkv")).n_pad);
   }
 
   const size_t R = (size_t)rows_cap_;
@@ -65,29 +75,39 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   std::fill_n((float *)ones_.contents, x_stride_, 1.0f);
   if (c.native) {
     if (c.book != "fp4" && c.book != "int15") fatal("codebook '%s' is not supported by this build", c.book.c_str());
-    auto fold = [&](const FTensor &norm, const QTensor &consumer) {
+    // Norm weights times the column scales (from column col0 on) of the matrix they feed.
+    auto fold = [&](const FTensor &norm, const QTensor &consumer, int col0 = 0) {
       id<MTLBuffer> b = mt_.alloc((size_t)c.hidden * sizeof(float));
-      const float *cs = (const float *)((const char *)consumer.buf.contents + consumer.c);
+      const float *cs = consumer.native ? (const float *)((const char *)consumer.buf.contents + consumer.c) + col0 : nullptr;
       float *o = (float *)b.contents;
-      for (int k = 0; k < c.hidden; k++) o[k] = norm.data[k] * cs[k];
+      for (int k = 0; k < c.hidden; k++) o[k] = norm.data[k] * (cs ? cs[k] : 1.0f);
       return b;
     };
-    for (int i = 0; i < c.layers; i++) {
+    for (int i = 0; i < n_layers; i++) {
       norm_in_.push_back(fold(model_->f(lname(i, "in_norm")),
-                              model_->q(lname(i, c.is_linear_layer(i) ? "lin.in_proj" : "attn.qkv"))));
+                              model_->q(lname(i, is_linear(i) ? "lin.in_proj" : "attn.qkv"))));
       norm_post_.push_back(fold(model_->f(lname(i, "post_norm")), model_->q(lname(i, "mlp.gate_up"))));
     }
     norm_final_ = fold(model_->f("final_norm"), model_->q("lm_head"));
+    if (has_mtp_) {
+      mtp_norm_e_ = fold(model_->f("mtp.norm_e"), model_->q("mtp.fc"), 0);
+      mtp_norm_h_ = fold(model_->f("mtp.norm_h"), model_->q("mtp.fc"), c.hidden);
+      mtp_norm_out_ = fold(model_->f("mtp.norm"), model_->q("lm_head"));
+      mtp_h_ = mt_.alloc((size_t)kMtpRows * c.hidden * sizeof(float));
+      mtp_tok_ = mt_.alloc(R * sizeof(int32_t));
+      mtp_rope_ = mt_.alloc(R * 64 * sizeof(float));
+      mtp_logits_ = mt_.alloc((size_t)16 * model_->q("lm_head").n_pad * sizeof(float));
+    }
   }
 
-  lin_.resize(c.layers);
-  attn_.resize(c.layers);
-  for (int i = 0; i < c.layers; i++) {
-    if (c.is_linear_layer(i)) {
+  lin_.resize(n_layers);
+  attn_.resize(n_layers);
+  for (int i = 0; i < n_layers; i++) {
+    if (is_linear(i)) {
       auto L = std::make_shared<LinearLayer>();
-      L->conv[0] = mt_.alloc((size_t)3 * c.lin_conv_dim() * sizeof(float));
-      L->conv[1] = mt_.alloc((size_t)3 * c.lin_conv_dim() * sizeof(float));
+      for (auto &b : L->conv) b = mt_.alloc((size_t)3 * c.lin_conv_dim() * sizeof(float));
       L->S = mt_.alloc((size_t)c.lin_v_heads * c.lin_v_dim * c.lin_k_dim * sizeof(float));
+      L->S_prev = has_mtp_ ? mt_.alloc(L->S.length) : L->S;  // only written by speculative passes
       lin_[i] = L;
     } else {
       auto A = std::make_shared<AttnLayer>();
@@ -99,19 +119,36 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   }
 }
 
+std::string Engine::lname(int layer, const char *suffix) const {
+  if (layer == config().layers) return std::string("mtp.") + suffix;
+  return "layers." + std::to_string(layer) + "." + suffix;
+}
+
 void Engine::reset() {
   pos_ = 0;
   for (auto &L : lin_) {
     if (!L) continue;
-    memset(L->conv[0].contents, 0, L->conv[0].length);
-    memset(L->conv[1].contents, 0, L->conv[1].length);
+    for (auto &b : L->conv) memset(b.contents, 0, b.length);
     memset(L->S.contents, 0, L->S.length);
-    L->cur = 0;
+    L->cur = L->prev = 0;
   }
+  mtp_pos_ = 0;
+  draft_next_ = -1;
+  pend_tok_.clear();
+  spec_open_ = false;
+}
+
+void Engine::set_mtp(bool on) {
+  if (on && !has_mtp_) fatal("set_mtp: this model file has no MTP head (tools/add_mtp.py adds one)");
+  if (pos_ != 0) fatal("set_mtp: only at position 0");
+  mtp_ = on;
+  mtp_pos_ = 0;
+  draft_next_ = -1;
+  pend_tok_.clear();
 }
 
 size_t Engine::state_bytes() const {
-  size_t n = 0;
+  size_t n = has_mtp_ ? sizeof(MtpState) + mtp_h_.length : 0;
   for (const auto &L : lin_)
     if (L) n += L->conv[0].length + L->S.length;
   return n;
@@ -126,6 +163,15 @@ void Engine::save_state(void *dst) const {
     memcpy(p, L->S.contents, L->S.length);
     p += L->S.length;
   }
+  if (has_mtp_) {
+    MtpState st{};
+    st.mtp_pos = mtp_pos_;
+    st.n_tok = (int32_t)pend_tok_.size();
+    for (size_t i = 0; i < pend_tok_.size() && i < 4; i++) st.tok[i] = pend_tok_[i];
+    st.draft_next = draft_next_;
+    memcpy(p, &st, sizeof st);
+    memcpy(p + sizeof st, mtp_h_.contents, mtp_h_.length);
+  }
 }
 
 void Engine::load_state(const void *src, int position) {
@@ -138,7 +184,32 @@ void Engine::load_state(const void *src, int position) {
     memcpy(L->S.contents, p, L->S.length);
     p += L->S.length;
   }
+  if (has_mtp_) {
+    MtpState st;
+    memcpy(&st, p, sizeof st);
+    memcpy(mtp_h_.contents, p + sizeof st, mtp_h_.length);
+    mtp_pos_ = mtp_ ? st.mtp_pos : 0;
+    pend_tok_.assign(st.tok, st.tok + st.n_tok);
+    draft_next_ = st.draft_next;
+  }
   pos_ = position;
+  spec_open_ = false;
+}
+
+void Engine::reject_draft() {
+  if (!spec_open_) fatal("reject_draft: the last call was not forward_draft");
+  spec_open_ = false;
+  for (auto &L : lin_) {
+    if (!L) continue;
+    L->cur = L->prev;
+    std::swap(L->S, L->S_prev);
+  }
+  pos_ -= 1;         // the attention entries of the draft row are overwritten by the next token
+  pend_tok_.clear();  // one hidden state is waiting again, its next token unknown
+}
+
+const float *Engine::logits(int row) const {
+  return (const float *)logits_.contents + (size_t)row * model_->q("lm_head").n_pad;
 }
 
 Engine::Tile Engine::tile_for(int rows) const {
@@ -153,6 +224,19 @@ void Engine::encode_linear(const QTensor &w, int rows, id<MTLBuffer> out, size_t
                            bool accum, const char *what) {
   const Tile t = tile_for(rows);
   const int M = (rows + t.tm - 1) / t.tm * t.tm;
+
+  if (w.dense) {
+    const Macros mac = {{"TM", std::to_string(t.tm)}, {"TN", std::to_string(t.tn)}, {"NSG", std::to_string(t.nsg)},
+                        {"GROUP", "64"}, {"BLOCK", "256"}, {"OUT_T", "float"}, {"ACCUM", accum ? "1" : "0"}};
+    [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_f16", mac)];
+    [enc_ setBuffer:xn_ offset:0 atIndex:0];
+    [enc_ setBuffer:w.buf offset:w.w atIndex:1];
+    [enc_ setBuffer:out offset:out_offset atIndex:4];
+    set_params(enc_, LinearParams{M, w.k, w.n_pad, x_stride_, out_stride, 0}, 5);
+    run_groups(w.n_pad / t.tn, M / t.tm, 32 * t.nsg);
+    mark(what);
+    return;
+  }
 
   if (w.native) {
     // One hardware matmul over the whole input, row scale applied in registers.
@@ -214,24 +298,28 @@ void Engine::encode_linear(const QTensor &w, int rows, id<MTLBuffer> out, size_t
 
 void Engine::encode_norm(int which, int layer, int rows, size_t in_offset) {
   const Config &c = config();
-  id<MTLBuffer> wgt;
-  size_t wgt_offset = 0;
   if (c.native) {
-    wgt = which == 0 ? norm_in_[layer] : which == 1 ? norm_post_[layer] : norm_final_;
+    encode_rms(h_, in_offset, c.hidden, which == 0 ? norm_in_[layer] : which == 1 ? norm_post_[layer] : norm_final_, 0,
+               rows, 0);
   } else {
     const FTensor &f = which == 2 ? model_->f("final_norm") : model_->f(lname(layer, which == 0 ? "in_norm" : "post_norm"));
-    wgt = f.buf;
-    wgt_offset = f.offset;
+    encode_rms(h_, in_offset, c.hidden, f.buf, f.offset, rows, 0);
   }
+}
+
+// Weighted RMS norm of `rows` rows of hidden floats into xn_ (from byte out_offset on).
+void Engine::encode_rms(id<MTLBuffer> in, size_t in_offset, int in_stride, id<MTLBuffer> wgt, size_t wgt_offset,
+                        int rows, size_t out_offset) {
+  const Config &c = config();
   // A decode step pays for per-kernel latency, so the row is spread over 16
   // SIMD-groups; a prefill chunk has enough rows to fill the GPU with one
   // SIMD-group each, and launching 16x the threads only costs time there.
   const int sg = rows <= 16 ? 16 : 1;
   [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rms_norm_rows", {{"NORM_SG", std::to_string(sg)}})];
-  [enc_ setBuffer:h_ offset:in_offset atIndex:0];
+  [enc_ setBuffer:in offset:in_offset atIndex:0];
   [enc_ setBuffer:wgt offset:wgt_offset atIndex:1];
-  [enc_ setBuffer:xn_ offset:0 atIndex:2];
-  set_params(enc_, NormParams{rows, c.hidden, c.hidden, x_stride_, c.norm_eps}, 3);
+  [enc_ setBuffer:xn_ offset:out_offset atIndex:2];
+  set_params(enc_, NormParams{rows, c.hidden, in_stride, x_stride_, c.norm_eps}, 3);
   run_groups(1, rows, 32 * sg);
   mark("rms_norm");
 }
@@ -257,7 +345,7 @@ void Engine::encode_mlp(int layer, int T) {
   encode_linear(model_->q(lname(layer, "mlp.down")), T, h_, 0, c.hidden, true, "linear:down");
 }
 
-void Engine::encode_linear_attn(int layer, int T) {
+void Engine::encode_linear_attn(int layer, int T, bool spec) {
   const Config &c = config();
   LinearLayer &L = *lin_[layer];
   const QTensor &in_proj = model_->q(lname(layer, "lin.in_proj"));
@@ -273,11 +361,13 @@ void Engine::encode_linear_attn(int layer, int T) {
   [enc_ setBuffer:L.conv[L.cur] offset:0 atIndex:1];
   [enc_ setBuffer:cw.buf offset:cw.offset atIndex:2];
   [enc_ setBuffer:y_ offset:0 atIndex:3];
-  [enc_ setBuffer:L.conv[1 - L.cur] offset:0 atIndex:4];
-  set_params(enc_, ConvParams{T, C, proj_stride_, C}, 5);
-  run_threads(C, T + 3);
+  [enc_ setBuffer:L.conv[(L.cur + 1) % 3] offset:0 atIndex:4];
+  [enc_ setBuffer:L.conv[(L.cur + 2) % 3] offset:0 atIndex:6];
+  set_params(enc_, ConvParams{T, C, proj_stride_, C, spec ? 1 : 0}, 5);
+  run_threads(C, T + 3 + (spec ? 3 : 0));
   mark("lin_conv");
-  L.cur = 1 - L.cur;
+  L.prev = (L.cur + 2) % 3;
+  L.cur = (L.cur + 1) % 3;
 
   const LinPrepParams pp{T, Hk, Dk, Hv, C, 2 * kd, proj_stride_, in_proj.part_offset("b"),
                          in_proj.part_offset("a"), 2 * Hv};
@@ -305,7 +395,8 @@ void Engine::encode_linear_attn(int layer, int T) {
   [enc_ setBuffer:bg_ offset:0 atIndex:2];
   [enc_ setBuffer:L.S offset:0 atIndex:3];
   [enc_ setBuffer:yo_ offset:0 atIndex:4];
-  set_params(enc_, DeltaParams{T, Hk, Dk, Hv, Dv, 2 * kd, C, 2 * kd, 2 * Hv, vd}, 5);
+  [enc_ setBuffer:L.S_prev offset:0 atIndex:6];
+  set_params(enc_, DeltaParams{T, Hk, Dk, Hv, Dv, 2 * kd, C, 2 * kd, 2 * Hv, vd, spec ? 1 : 0}, 5);
   run_groups(Dv / 8, Hv);
   if (repeating("gated_delta")) {  // the recurrence updates its state in place: repeat on scratch
     if (!scratch_state_) {
@@ -331,7 +422,7 @@ void Engine::encode_linear_attn(int layer, int T) {
   encode_linear(model_->q(lname(layer, "lin.out_proj")), T, h_, 0, c.hidden, true, "linear:lin_out");
 }
 
-void Engine::encode_full_attn(int layer, int T) {
+void Engine::encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope) {
   const Config &c = config();
   AttnLayer &A = *attn_[layer];
   const QTensor &qkv = model_->q(lname(layer, "attn.qkv"));
@@ -340,7 +431,7 @@ void Engine::encode_full_attn(int layer, int T) {
   encode_linear(qkv, T, proj_, 0, proj_stride_, false, "linear:attn_qkv");
 
   const AttnParams ap{T, c.heads, c.kv_heads, c.head_dim, proj_stride_, qkv.part_offset("k"),
-                      qkv.part_offset("v"), c.attn_dim(), x_stride_, pos_, max_ctx_, c.norm_eps,
+                      qkv.part_offset("v"), c.attn_dim(), x_stride_, pos0, max_ctx_, c.norm_eps,
                       1.0f / sqrtf((float)c.head_dim)};
   const FTensor &qw = model_->f(lname(layer, "attn.q_norm"));
   const FTensor &kw = model_->f(lname(layer, "attn.k_norm"));
@@ -348,7 +439,7 @@ void Engine::encode_full_attn(int layer, int T) {
   [enc_ setBuffer:proj_ offset:0 atIndex:0];
   [enc_ setBuffer:qw.buf offset:qw.offset atIndex:1];
   [enc_ setBuffer:kw.buf offset:kw.offset atIndex:2];
-  [enc_ setBuffer:rope_ offset:0 atIndex:3];
+  [enc_ setBuffer:rope offset:0 atIndex:3];
   [enc_ setBuffer:qn_ offset:0 atIndex:4];
   [enc_ setBuffer:A.K offset:0 atIndex:5];
   [enc_ setBuffer:A.V offset:0 atIndex:6];
@@ -408,45 +499,144 @@ void Engine::flush(bool reopen) {
   if (reopen) begin();
 }
 
-const float *Engine::forward(const int32_t *tokens, int T) {
-  const Config &c = config();
-  if (T < 1 || T > max_chunk_) fatal("forward: %d tokens, chunk limit is %d", T, max_chunk_);
-  if (pos_ + T > max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
-  gpu_seconds_ = 0;
-
-  memcpy(tok_.contents, tokens, (size_t)T * sizeof(int32_t));
-  // Rotary angles in double precision: position * theta^(-i/32).
-  float *rope = (float *)rope_.contents;
+// Rotary angles in double precision: position * theta^(-i/32).
+void Engine::fill_rope(id<MTLBuffer> buf, int pos0, int T) {
+  float *rope = (float *)buf.contents;
   for (int t = 0; t < T; t++) {
     for (int i = 0; i < 32; i++) {
-      const double ang = (double)(pos_ + t) * pow(c.rope_theta, -(double)i / 32.0);
+      const double ang = (double)(pos0 + t) * pow(config().rope_theta, -(double)i / 32.0);
       rope[t * 64 + i] = (float)cos(ang);
       rope[t * 64 + 32 + i] = (float)sin(ang);
     }
   }
+}
+
+// h_[t] = row tok[t] of the token table.
+void Engine::encode_embed(id<MTLBuffer> tok, int T) {
+  const Config &c = config();
+  const QTensor &emb = model_->q("embed");
+  if (emb.native) {
+    const char *levels = c.book == "fp4" ? "0,0.5,1,1.5,2,3,4,6,-0.0,-0.5,-1,-1.5,-2,-3,-4,-6"
+                                         : "0,1,2,3,4,5,6,7,-8,-7,-6,-5,-4,-3,-2,-1";
+    [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "embed_rows_native", {{"BOOK_LEVELS", levels}})];
+  } else {
+    [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "embed_rows")];
+  }
+  [enc_ setBuffer:tok offset:0 atIndex:0];
+  [enc_ setBuffer:emb.buf offset:emb.w atIndex:1];
+  [enc_ setBuffer:emb.buf offset:emb.s atIndex:2];
+  [enc_ setBuffer:emb.buf offset:(emb.native ? emb.c : emb.b) atIndex:3];
+  [enc_ setBuffer:h_ offset:0 atIndex:4];
+  set_params(enc_, EmbedParams{T, c.hidden, c.hidden / 64, c.hidden}, 5);
+  run_threads(c.hidden / 8, T);
+  mark("embed");
+}
+
+void Engine::encode_copy_hidden(int src_row, int dst_row, int rows) {
+  const size_t row_bytes = (size_t)config().hidden * sizeof(float);
+  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "copy_rows")];
+  [enc_ setBuffer:h_ offset:src_row * row_bytes atIndex:0];
+  [enc_ setBuffer:mtp_h_ offset:dst_row * row_bytes atIndex:1];
+  set_params(enc_, CopyParams{rows, config().hidden}, 2);
+  run_threads(config().hidden, rows);
+  mark("copy_rows");
+}
+
+void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {
+  const Config &c = config();
+  const int H = c.hidden, M = n_carry + n_chunk;
+  const FTensor &fn = model_->f("final_norm");
+  // Hidden half of the head's input: rows of `src` -> xn_[first_row ..][H .. 2H).
+  auto hidden_half = [&](id<MTLBuffer> src, int rows, int first_row) {
+    if (rows <= 0) return;
+    [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rms_norm2_rows")];
+    [enc_ setBuffer:src offset:0 atIndex:0];
+    [enc_ setBuffer:fn.buf offset:fn.offset atIndex:1];
+    [enc_ setBuffer:mtp_norm_h_ offset:0 atIndex:2];
+    [enc_ setBuffer:xn_ offset:((size_t)first_row * x_stride_ + H) * sizeof(_Float16) atIndex:3];
+    set_params(enc_, NormParams{rows, H, H, x_stride_, c.norm_eps}, 4);
+    run_groups(1, rows);
+    mark("mtp_norm");
+  };
+  hidden_half(mtp_h_, n_carry, 0);
+  hidden_half(h_, n_chunk, n_carry);
+  if (keep_row >= 0) encode_copy_hidden(keep_row, 0, 1);
+  if (M == 0) return;
+
+  // From here on h_ is the head's own residual stream.
+  encode_embed(mtp_tok_, M);
+  encode_rms(h_, 0, H, mtp_norm_e_, 0, M, 0);
+  encode_linear(model_->q("mtp.fc"), M, h_, 0, H, false, "linear:mtp_fc");
+  encode_full_attn(c.layers, M, mtp_pos_, mtp_rope_);
+  encode_mlp(c.layers, M);
+  if (logits) {
+    encode_rms(h_, (size_t)(M - 1) * H * sizeof(float), H, mtp_norm_out_, 0, 1, 0);
+    const QTensor &head = model_->q("lm_head");
+    encode_linear(head, 1, mtp_logits_, 0, head.n_pad, false, "linear:lm_head");
+  }
+}
+
+const float *Engine::forward(const int32_t *tokens, int T) { return run(tokens, T, false); }
+
+const float *Engine::forward_draft(int32_t token, int32_t draft) {
+  if (!mtp_) fatal("forward_draft: the model has no MTP head, or it is off");
+  const int32_t two[2] = {token, draft};
+  return run(two, 2, true);
+}
+
+const float *Engine::draft_logits(int32_t next) {
+  if (!mtp_) fatal("draft_logits: the model has no MTP head, or it is off");
+  const int n = pos_ - mtp_pos_;
+  if (n < 1) fatal("draft_logits: no position is waiting for its next token");
+  spec_open_ = false;  // a draft row that was not rejected stands
+  gpu_seconds_ = 0;
+
+  int32_t *succ = (int32_t *)mtp_tok_.contents;
+  int j = 0;
+  for (int32_t t : pend_tok_) succ[j++] = t;
+  succ[j++] = next;
+  fill_rope(mtp_rope_, mtp_pos_, n);
+  @autoreleasepool {
+    begin();
+    encode_mtp(n, 0, -1, true);
+    flush(false);
+  }
+  mtp_pos_ += n;
+  pend_tok_.clear();
+  draft_next_ = next;
+  return (const float *)mtp_logits_.contents;
+}
+
+const float *Engine::run(const int32_t *tokens, int T, bool spec) {
+  const Config &c = config();
+  if (T < 1 || T > max_chunk_) fatal("forward: %d tokens, chunk limit is %d", T, max_chunk_);
+  if (pos_ + T > max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
+  const int n_carry = mtp_ ? pos_ - mtp_pos_ : 0;  // hidden states waiting for their next token
+  if (mtp_ && n_carry == 0 && pos_ > 0 && tokens[0] != draft_next_)
+    fatal("forward: token %d follows draft_logits(%d)", tokens[0], draft_next_);
+  if (spec && n_carry != 0) fatal("forward_draft: call draft_logits first");
+  spec_open_ = false;
+  gpu_seconds_ = 0;
+
+  memcpy(tok_.contents, tokens, (size_t)T * sizeof(int32_t));
+  fill_rope(rope_, pos_, T);
+  // Head positions whose next token this call supplies: the waiting ones and
+  // all rows of this chunk but the last.
+  const int head_rows = mtp_ && !spec ? n_carry + T - 1 : 0;
+  if (head_rows > 0) {
+    int32_t *succ = (int32_t *)mtp_tok_.contents;
+    int j = 0;
+    for (int32_t t : pend_tok_) succ[j++] = t;
+    for (int t = n_carry > 0 ? 0 : 1; t < T; t++) succ[j++] = tokens[t];
+    fill_rope(mtp_rope_, mtp_pos_, head_rows);
+  }
 
   @autoreleasepool {
     begin();
-    const QTensor &emb = model_->q("embed");
-    if (emb.native) {
-      const char *levels = c.book == "fp4" ? "0,0.5,1,1.5,2,3,4,6,-0.0,-0.5,-1,-1.5,-2,-3,-4,-6"
-                                           : "0,1,2,3,4,5,6,7,-8,-7,-6,-5,-4,-3,-2,-1";
-      [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "embed_rows_native", {{"BOOK_LEVELS", levels}})];
-    } else {
-      [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "embed_rows")];
-    }
-    [enc_ setBuffer:tok_ offset:0 atIndex:0];
-    [enc_ setBuffer:emb.buf offset:emb.w atIndex:1];
-    [enc_ setBuffer:emb.buf offset:emb.s atIndex:2];
-    [enc_ setBuffer:emb.buf offset:(emb.native ? emb.c : emb.b) atIndex:3];
-    [enc_ setBuffer:h_ offset:0 atIndex:4];
-    set_params(enc_, EmbedParams{T, c.hidden, c.hidden / 64, c.hidden}, 5);
-    run_threads(c.hidden / 8, T);
-    mark("embed");
-
+    encode_embed(tok_, T);
     for (int i = 0; i < c.layers; i++) {
-      if (c.is_linear_layer(i)) encode_linear_attn(i, T);
-      else encode_full_attn(i, T);
+      if (c.is_linear_layer(i)) encode_linear_attn(i, T, spec);
+      else encode_full_attn(i, T, pos_, rope_);
       encode_mlp(i, T);
       if (!dump_dir_.empty()) {
         flush(true);
@@ -459,13 +649,26 @@ const float *Engine::forward(const int32_t *tokens, int T) {
       }
     }
 
-    encode_norm(2, 0, 1, (size_t)(T - 1) * c.hidden * sizeof(float));
+    // Logits for the last row, or for both rows of a speculative pair.
+    const int out_rows = spec ? 2 : 1;
+    encode_norm(2, 0, out_rows, (size_t)(T - out_rows) * c.hidden * sizeof(float));
     const QTensor &head = model_->q("lm_head");
-    encode_linear(head, 1, logits_, 0, head.n_pad, false, "linear:lm_head");
+    encode_linear(head, out_rows, logits_, 0, head.n_pad, false, "linear:lm_head");
+    if (mtp_) {
+      if (spec) encode_copy_hidden(0, 0, 2);
+      else encode_mtp(n_carry, T - 1, T - 1, false);
+    }
     flush(false);
   }
 
   pos_ += T;
+  if (mtp_) {
+    mtp_pos_ += head_rows;
+    pend_tok_.clear();
+    if (spec) pend_tok_.push_back(tokens[1]);
+    draft_next_ = -1;
+  }
+  spec_open_ = spec;
   if (!dump_dir_.empty()) {
     FILE *f = fopen((dump_dir_ + "/logits.f32").c_str(), "wb");
     if (!f) fatal("cannot write logits dump");
@@ -475,10 +678,12 @@ const float *Engine::forward(const int32_t *tokens, int T) {
   return (const float *)logits_.contents;
 }
 
-int Engine::argmax() const {
+int Engine::argmax() const { return argmax_of((const float *)logits_.contents); }
+
+int Engine::argmax_of(const float *logits) const {
   float best;
   vDSP_Length idx;
-  vDSP_maxvi((const float *)logits_.contents, 1, &best, &idx, (vDSP_Length)config().vocab);
+  vDSP_maxvi(logits, 1, &best, &idx, (vDSP_Length)config().vocab);
   return (int)idx;
 }
 

@@ -132,6 +132,31 @@ class Writer:
         self.sections = []
         self._sec = None
 
+    @classmethod
+    def append(cls, path, drop_section=None):
+        """Reopens a finished file to add sections. Returns (writer, header
+        without its section and tensor tables). `drop_section` names a section
+        to discard first; it has to be the last one in the file."""
+        with open(path, "rb") as f:
+            if f.read(4) != MAGIC:
+                raise SystemExit(f"{path} is not a redline model file")
+            _, n = struct.unpack("<IQ", f.read(12))
+            hdr = json.loads(f.read(n))
+        w = cls.__new__(cls)
+        w.header_room = 64 * PAGE
+        w.tensors, w.sections, w._sec = hdr.pop("tensors"), hdr.pop("sections"), None
+        w.f = open(path, "r+b")
+        names = [s["name"] for s in w.sections]
+        if drop_section in names:
+            idx = names.index(drop_section)
+            if idx != len(names) - 1:
+                raise SystemExit(f"section '{drop_section}' is not the last one in {path}")
+            w.f.truncate(w.sections[idx]["offset"])
+            w.tensors = {k: t for k, t in w.tensors.items() if t["section"] != idx}
+            w.sections.pop()
+        w.f.seek(0, 2)
+        return w, hdr
+
     def _pad(self, align):
         pos = self.f.tell()
         pad = (-pos) % align
@@ -186,6 +211,16 @@ class Writer:
             off += rows
         self.tensors[name] = dict(kind="q4n", section=len(self.sections), book=book, k=k, n=n, n_pad=n_pad,
                                   w=self.blob(w), s=self.blob(s_pad), c=self.blob(c.astype(np.float32)), parts=parts)
+
+    def add_dense(self, name, W):
+        """Half-precision matrix [N][K] in the kernel's blocked layout, rows padded with zeros."""
+        n, k = W.shape
+        n_pad = -(-n // BLOCK) * BLOCK
+        full = np.zeros((n_pad, k), dtype=np.float16)
+        full[:n] = W
+        w = np.ascontiguousarray(full.reshape(n_pad // BLOCK, BLOCK, k).transpose(0, 2, 1))
+        self.tensors[name] = dict(kind="f16b", section=len(self.sections), k=k, n=n, n_pad=n_pad, w=self.blob(w),
+                                  parts={"out": dict(offset=0, n=n)})
 
     def add_native_rows(self, name, codes, s, c, book):
         """Row-major variant for row lookups (token embeddings)."""

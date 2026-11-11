@@ -1,8 +1,11 @@
-// redline command line (development build).
+// redline-engine: the engine's development command line.
 //
-//   redline dump   <model.rlm> <tokens.i32> <outdir>          per-layer activations for verification
-//   redline logits <model.rlm> <tokens.i32> <out.f32> [--chunk N]
-//   redline bench  <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--chunk N] [--ctx N]
+//   dump    <model.rlm> <tokens.i32> <outdir>          per-layer activations for verification
+//   logits  <model.rlm> <tokens.i32> <out.f32> [--chunk N]
+//   draft   <model.rlm> <tokens.i32> <out.f32>         MTP head logits for the token after the last one
+//   bench   <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--chunk N] [--ctx N] [--mtp 0|1]
+//   spec    <model.rlm> <tokens.i32> [--prompt N] [--gen N]   speculative vs plain decoding: same tokens?
+//   profile <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--times N]
 //
 // Token files are raw little-endian int32. Tokenization lives outside the
 // engine for now.
@@ -41,9 +44,42 @@ static int flag(int argc, char **argv, const char *name, int def) {
   return def;
 }
 
+// Greedy generation of n tokens after whatever has been fed. With `spec`, the
+// model's MTP head drafts one token ahead and a pass over the weights checks
+// two tokens at once. Counts those passes and the GPU time.
+static std::vector<int32_t> generate(Engine &e, int n, bool spec, int *passes, double *gpu) {
+  std::vector<int32_t> out;
+  int32_t next = e.argmax();
+  while ((int)out.size() < n) {
+    if (!spec || (int)out.size() + 1 >= n) {
+      e.forward(&next, 1);
+      *gpu += e.last_gpu_seconds();
+      ++*passes;
+      out.push_back(next);
+      next = e.argmax();
+      continue;
+    }
+    const int32_t draft = e.argmax_of(e.draft_logits(next));
+    *gpu += e.last_gpu_seconds();
+    e.forward_draft(next, draft);
+    *gpu += e.last_gpu_seconds();
+    ++*passes;
+    out.push_back(next);
+    const int32_t tok = e.argmax_of(e.logits(0));
+    if (tok == draft) {
+      out.push_back(tok);
+      next = e.argmax_of(e.logits(1));
+    } else {
+      e.reject_draft();
+      next = tok;
+    }
+  }
+  return out;
+}
+
 int main(int argc, char **argv) {
   if (argc < 4) {
-    fprintf(stderr, "usage: redline dump|logits|bench <model.rlm> <tokens.i32> ...\n");
+    fprintf(stderr, "usage: redline-engine dump|logits|draft|bench|spec|profile <model.rlm> <tokens.i32> ...\n");
     return 2;
   }
   const std::string cmd = argv[1];
@@ -73,6 +109,52 @@ int main(int argc, char **argv) {
     return 0;
   }
 
+  if (cmd == "draft") {
+    if (argc < 5) rl::fatal("draft needs an output file");
+    const int n = (int)toks.size();
+    Engine e(argv[2], 8192, n);
+    if (!e.has_mtp()) rl::fatal("this model file has no MTP head");
+    e.forward(toks.data(), n - 1);
+    const float *lg = e.draft_logits(toks[n - 1]);
+    FILE *f = fopen(argv[4], "wb");
+    if (!f) rl::fatal("cannot write %s", argv[4]);
+    fwrite(lg, sizeof(float), (size_t)e.config().vocab, f);
+    fclose(f);
+    printf("draft for the token after the last one = %d\n", e.argmax_of(lg));
+    return 0;
+  }
+
+  if (cmd == "spec") {
+    const int n_prompt = std::min(flag(argc, argv, "--prompt", 512), (int)toks.size());
+    const int n_gen = flag(argc, argv, "--gen", 256);
+    const int chunk = flag(argc, argv, "--chunk", 1024);
+    Engine e(argv[2], n_prompt + n_gen + 16, chunk);
+    if (!e.has_mtp()) rl::fatal("this model file has no MTP head");
+    std::vector<int32_t> out[2];
+    for (int mode = 0; mode < 2; mode++) {
+      for (int rep = 0; rep < 2; rep++) {  // the first run warms pipelines and pages in the weights
+        e.reset();
+        e.set_mtp(mode == 1);
+        double t0 = now();
+        for (int i = 0; i < n_prompt; i += chunk) e.forward(toks.data() + i, std::min(chunk, n_prompt - i));
+        const double t_prefill = now() - t0;
+        int passes = 0;
+        double gpu = 0;
+        t0 = now();
+        out[mode] = generate(e, n_gen, mode == 1, &passes, &gpu);
+        const double dt = now() - t0;
+        if (!rep) continue;
+        printf("%-12s prefill %7.1f tok/s   decode %d tokens in %d passes, %.3fs = %.1f tok/s", mode ? "speculative:" : "plain:",
+               n_prompt / t_prefill, n_gen, passes, dt, n_gen / dt);
+        if (mode) printf("   (drafts accepted: %.1f%%)", 100.0 * (n_gen - passes) / std::max(1, passes - 1));
+        printf("\n");
+      }
+    }
+    const bool same = out[0] == out[1];
+    printf("generated tokens: %s\n", same ? "identical" : "DIFFERENT");
+    return same ? 0 : 1;
+  }
+
   if (cmd == "bench") {
     const int n_prompt = std::min(flag(argc, argv, "--prompt", 1024), (int)toks.size());
     const int n_gen = flag(argc, argv, "--gen", 128);
@@ -81,6 +163,9 @@ int main(int argc, char **argv) {
     double t0 = now();
     Engine e(argv[2], ctx, chunk);
     printf("load %.2fs\n", now() - t0);
+    const bool mtp = e.has_mtp() && flag(argc, argv, "--mtp", 1) != 0;
+    e.set_mtp(mtp);
+    if (e.has_mtp()) printf("MTP head: %s\n", mtp ? "on (speculative decoding)" : "off");
 
     for (int rep = 0; rep < 2; rep++) {  // first pass warms pipelines and pages in the weights
       e.reset();
@@ -94,19 +179,13 @@ int main(int argc, char **argv) {
       printf("%s prefill: %d tokens in %.3fs = %.1f tok/s (GPU time %.3fs = %.1f tok/s)\n",
              rep ? "warm" : "cold", n_prompt, dt, n_prompt / dt, gpu, n_prompt / gpu);
 
-      std::vector<int32_t> out;
       gpu = 0;
+      int passes = 0;
       t0 = now();
-      int32_t next = e.argmax();
-      for (int i = 0; i < n_gen; i++) {
-        out.push_back(next);
-        e.forward(&next, 1);
-        gpu += e.last_gpu_seconds();
-        next = e.argmax();
-      }
+      const std::vector<int32_t> out = generate(e, n_gen, mtp, &passes, &gpu);
       dt = now() - t0;
-      printf("%s decode:  %d tokens in %.3fs = %.1f tok/s (GPU time %.3fs = %.1f tok/s)\n",
-             rep ? "warm" : "cold", n_gen, dt, n_gen / dt, gpu, n_gen / gpu);
+      printf("%s decode:  %d tokens in %.3fs = %.1f tok/s (GPU time %.3fs = %.1f tok/s; %d passes)\n",
+             rep ? "warm" : "cold", n_gen, dt, n_gen / dt, gpu, n_gen / gpu, passes);
       if (rep) {
         printf("tokens:");
         for (size_t i = 0; i < out.size() && i < 24; i++) printf(" %d", out[i]);
@@ -122,6 +201,7 @@ int main(int argc, char **argv) {
     const int chunk = flag(argc, argv, "--chunk", 1024);
     const int times = flag(argc, argv, "--times", 4);
     Engine e(argv[2], n_prompt + n_gen + 16, chunk);
+    if (e.has_mtp()) e.set_mtp(false);  // one token per pass: the head is profiled separately
     // Returns {prefill GPU s, decode GPU s}, best of two runs each.
     auto measure = [&]() {
       double best_p = 1e30, best_d = 1e30;

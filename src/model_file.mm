@@ -91,11 +91,14 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
       QTensor qt;
       qt.buf = bufs[sec];
       qt.native = [kind hasPrefix:@"q4n"];
-      qt.blocked = [kind isEqualToString:@"q4a"] || [kind isEqualToString:@"q4n"];
+      qt.dense = [kind isEqualToString:@"f16b"];
+      qt.blocked = qt.dense || [kind isEqualToString:@"q4a"] || [kind isEqualToString:@"q4n"];
       qt.w = [t[@"w"] unsignedLongLongValue] - sec_off[sec];
-      qt.s = [t[@"s"] unsignedLongLongValue] - sec_off[sec];
-      if (qt.native) qt.c = [t[@"c"] unsignedLongLongValue] - sec_off[sec];
-      else qt.b = [t[@"b"] unsignedLongLongValue] - sec_off[sec];
+      if (!qt.dense) {
+        qt.s = [t[@"s"] unsignedLongLongValue] - sec_off[sec];
+        if (qt.native) qt.c = [t[@"c"] unsignedLongLongValue] - sec_off[sec];
+        else qt.b = [t[@"b"] unsignedLongLongValue] - sec_off[sec];
+      }
       qt.k = geti(t, @"k");
       qt.n = geti(t, @"n");
       qt.n_pad = qt.blocked ? geti(t, @"n_pad") : qt.n;

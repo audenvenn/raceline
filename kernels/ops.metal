@@ -111,19 +111,64 @@ kernel void rms_norm_rows(device const float *x [[buffer(0)]],
   }
 }
 
+// The model's final norm followed by a second weighted RMS norm of the result,
+// in one pass over the row (the hidden-state half of the MTP head's input):
+//   t = x * w1 * rsqrt(mean(x^2) + eps);   out = t * w2 * rsqrt(mean(t^2) + eps)
+kernel void rms_norm2_rows(device const float *x [[buffer(0)]],
+                           device const float *w1 [[buffer(1)]],
+                           device const float *w2 [[buffer(2)]],
+                           device half *out [[buffer(3)]],
+                           constant NormParams &p [[buffer(4)]],
+                           uint3 tg [[threadgroup_position_in_grid]],
+                           uint lane [[thread_index_in_simdgroup]])
+{
+  const device float *row = x + size_t(tg.y) * p.in_stride;
+  float a = 0.0f, b = 0.0f;
+  for (int i = int(lane); i < p.D; i += 32) {
+    const float v = row[i], u = v * w1[i];
+    a += v * v;
+    b += u * u;
+  }
+  a = simd_sum(a);
+  b = simd_sum(b);
+  const float inv1 = rsqrt(a / float(p.D) + p.eps);
+  const float inv2 = rsqrt(b * inv1 * inv1 / float(p.D) + p.eps);
+  device half *o = out + size_t(tg.y) * p.out_stride;
+  for (int i = int(lane); i < p.D; i += 32) o[i] = half(row[i] * w1[i] * inv1 * inv2 * w2[i]);
+}
+
+// dst[t][i] = src[t][i] for T rows of D floats.
+kernel void copy_rows(device const float *src [[buffer(0)]],
+                      device float *dst [[buffer(1)]],
+                      constant CopyParams &p [[buffer(2)]],
+                      uint2 tid [[thread_position_in_grid]])
+{
+  if (int(tid.x) >= p.D || int(tid.y) >= p.T) return;
+  const size_t i = size_t(tid.y) * p.D + tid.x;
+  dst[i] = src[i];
+}
+
 // ---------------------------------------------------- Gated DeltaNet pieces
 // Depthwise causal conv (4 taps) + SiLU over the q|k|v channels. Rows T..T+2
 // of the grid write the next conv state (the last three pre-conv inputs).
+// With p.spec set, rows T+3..T+5 also write the state as it was before the
+// last token, so a speculative last token can be taken back.
 kernel void lin_conv(device const float *proj [[buffer(0)]],
                      device const float *st_in [[buffer(1)]],
                      device const float *cw [[buffer(2)]],
                      device float *y [[buffer(3)]],
                      device float *st_out [[buffer(4)]],
                      constant ConvParams &p [[buffer(5)]],
+                     device float *st_prev [[buffer(6)]],
                      uint2 tid [[thread_position_in_grid]])
 {
   const int c = int(tid.x), r = int(tid.y);
-  if (c >= p.C || r >= p.T + 3) return;
+  if (c >= p.C || r >= p.T + 3 + 3 * p.spec) return;
+  if (r >= p.T + 3) {
+    const int j = r - p.T - 3, tau = p.T - 4 + j;
+    st_prev[j * p.C + c] = tau >= 0 ? proj[size_t(tau) * p.in_stride + c] : st_in[(3 + tau) * p.C + c];
+    return;
+  }
   if (r < p.T) {
     float acc = 0.0f;
     for (int j = 0; j < 4; ++j) {
@@ -181,12 +226,14 @@ kernel void lin_gates(device const float *proj [[buffer(0)]],
 // Rows of S are independent, so a SIMD-group carries 8 rows: 4 lanes per row,
 // each lane holding 32 state values in registers for the whole token loop
 // (the packing MLX's Gated DeltaNet kernel introduced). Requires Dk == 128.
+// With p.spec set, the state before the last token is also written, to S_prev.
 kernel void gated_delta(device const float *qk [[buffer(0)]],
                         device const float *y [[buffer(1)]],
                         device const float *bg [[buffer(2)]],
                         device float *S [[buffer(3)]],
                         device float *yo [[buffer(4)]],
                         constant DeltaParams &p [[buffer(5)]],
+                        device float *S_prev [[buffer(6)]],
                         uint3 tg [[threadgroup_position_in_grid]],
                         uint lane [[thread_index_in_simdgroup]])
 {
@@ -206,6 +253,10 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
   device float *op = yo + hv * p.Dv + row;
 
   for (int t = 0; t < p.T; ++t) {
+    if (p.spec != 0 && t == p.T - 1) {
+      device float *prev = S_prev + (size_t(hv) * p.Dv + row) * p.Dk + part * E;
+      for (int e = 0; e < E; ++e) prev[e] = state[e];
+    }
     const float beta = bg[size_t(t) * p.bg_stride + hv];
     const float g = bg[size_t(t) * p.bg_stride + p.Hv + hv];
     const device float *k = kp + size_t(t) * p.qk_stride;

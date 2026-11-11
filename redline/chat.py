@@ -151,6 +151,7 @@ class Runtime:
     def _chat(self, messages, tools, sampling, max_tokens, thinking, stop, progress):
         tok = self.backend.tokenizer
         prompt, points, pin = self.render(messages, tools, thinking)
+        counters = dict(getattr(self.backend, "counters", {}))
         t0 = time.perf_counter()
         usage = self.session.sync(prompt, points, pin, progress)
         t_prefill = time.perf_counter() - t0
@@ -224,7 +225,9 @@ class Runtime:
 
         t_decode = time.perf_counter() - t1
         fed = usage["prompt_tokens"] - usage["cached_tokens"]
+        drafts = {k: v - counters[k] for k, v in getattr(self.backend, "counters", {}).items() if k != "passes"}
         yield ("done", dict(
+            **({"drafts": drafts["drafts"], "drafts_accepted": drafts["accepted"]} if drafts.get("drafts") else {}),
             finish_reason=finish, prompt_tokens=usage["prompt_tokens"], cached_tokens=usage["cached_tokens"],
             completion_tokens=n_out, prefill_seconds=t_prefill, decode_seconds=t_decode,
             time_to_first_token=t_first if t_first is not None else t_prefill,

@@ -183,6 +183,47 @@ kernel void linear_q4n(device half *a [[buffer(0)]],
   }
 }
 
+// Dense half-precision weights in the same blocked layout ([K][BLOCK] values
+// per block): C[M][N] = A[M][K] * W[N][K]^T. For the rare small matrix that
+// does not survive 4-bit storage (the MTP head's input projection).
+kernel void linear_f16(device half *a [[buffer(0)]],
+                       device half *w [[buffer(1)]],
+                       device OUT_T *c [[buffer(4)]],
+                       constant LinearParams &p [[buffer(5)]],
+                       uint3 tgid [[threadgroup_position_in_grid]])
+{
+  const int n0 = int(tgid.x) * TN;
+  const int m0 = int(tgid.y) * TM;
+  constexpr auto desc = matmul2d_descriptor(TM, TN, static_cast<int>(dynamic_extent), false, false, true,
+                                            matmul2d_descriptor::mode::multiply);
+  matmul2d<desc, execution_simdgroups<NSG>> op;
+
+  array<int, 2> a_str = {1, p.a_stride};
+  array<int, 2> w_str = {1, BLOCK};
+  tensor<device half, dextents<int, 2>, tensor_inline> A(a, dextents<int, 2>(p.K, p.M), a_str);
+  tensor<device half, dextents<int, 2>, tensor_inline> W(
+      w + size_t(n0 / BLOCK) * size_t(p.K) * BLOCK, dextents<int, 2>(BLOCK, p.K), w_str);
+
+  auto tA = A.slice(0, m0);
+  auto tW = W.slice(n0 % BLOCK, 0);
+  auto acc = op.get_destination_cooperative_tensor<decltype(tA), decltype(tW), float>();
+  op.run(tA, tW, acc);
+
+  device OUT_T *out = c + size_t(m0) * p.c_stride + n0;
+#pragma clang loop unroll(full)
+  for (ushort i = 0; i < acc.get_capacity(); ++i) {
+    if (acc.is_valid_element(i)) {
+      auto idx = acc.get_multidimensional_index(i);
+      device OUT_T *dst = out + size_t(idx[1]) * p.c_stride + idx[0];
+#if ACCUM
+      *dst = OUT_T(float(*dst) + acc[i]);
+#else
+      *dst = OUT_T(acc[i]);
+#endif
+    }
+  }
+}
+
 // Same product without the row scale, written straight to memory by the
 // accelerator op: C[M][N] = A[M][K] * L(q[N][K])^T. Kept to measure what the
 // in-register epilogue of linear_q4n costs.

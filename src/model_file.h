@@ -40,6 +40,7 @@ struct QTensor {
   int k = 0, n = 0, n_pad = 0;
   bool blocked = true;
   bool native = false;
+  bool dense = false;  // half-precision values instead of 4-bit codes (kind "f16b"): no scales
   std::map<std::string, std::pair<int, int>> parts;  // name -> (first row, rows)
 
   int part_offset(const std::string &name) const;
@@ -61,6 +62,7 @@ class ModelFile {
   const Config &config() const { return cfg_; }
   const QTensor &q(const std::string &name) const;
   const FTensor &f(const std::string &name) const;
+  bool has(const std::string &name) const { return q_.count(name) || f_.count(name); }
   size_t file_bytes() const { return size_; }
 
  private:

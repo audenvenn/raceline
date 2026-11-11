@@ -31,6 +31,20 @@ size_t rl_state_bytes(const rl_engine *e);
 void rl_save_state(const rl_engine *e, void *dst);
 void rl_load_state(rl_engine *e, const void *src, int position);
 
+// Speculative decoding with the model's MTP head; see Engine in engine.h.
+// rl_forward_draft returns the logits after `token`; those after `draft`
+// follow rl_logits_stride() floats later.
+int rl_has_mtp(const rl_engine *e);
+void rl_set_mtp(rl_engine *e, int on);
+const float *rl_draft_logits(rl_engine *e, int32_t next_token);
+const float *rl_forward_draft(rl_engine *e, int32_t token, int32_t draft);
+void rl_reject_draft(rl_engine *e);
+size_t rl_logits_stride(const rl_engine *e);
+
+// Final hidden states of the last rl_forward, [n][hidden] floats (MTP off).
+const float *rl_hidden(const rl_engine *e);
+int rl_hidden_size(const rl_engine *e);
+
 #ifdef __cplusplus
 }
 #endif

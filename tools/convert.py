@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert an MLX 4-bit Qwen3.5 / Qwen3.8 model into a redline model file (.rlm).
+"""Convert an MLX 4-bit Qwen3.5 / Qwen3.8 model into a raceline model file (.rlm).
 
 The quantized values are carried over unchanged (affine 4-bit, groups of 64:
 w = scale * q + bias), so the converted model is numerically the same model MLX
@@ -142,7 +142,7 @@ class Writer:
         section to discard first, together with everything after it."""
         with open(path, "rb") as f:
             if f.read(4) != MAGIC:
-                raise SystemExit(f"{path} is not a redline model file")
+                raise SystemExit(f"{path} is not a raceline model file")
             _, n = struct.unpack("<IQ", f.read(12))
             hdr = json.loads(f.read(n))
         w = cls.__new__(cls)
@@ -375,7 +375,7 @@ def main():
     out.end()
     out.add_files(args.src)
 
-    out.finish(dict(format="redline", version=1, arch="qwen3_5", source=os.path.basename(os.path.normpath(args.src)),
+    out.finish(dict(format="raceline", version=1, arch="qwen3_5", source=os.path.basename(os.path.normpath(args.src)),
                     config=cfg, quant=dict(bits=4, group=GROUP, block=BLOCK, mode="affine", scale_dtype="bf16")))
     size = os.path.getsize(args.dst)
     print(f"wrote {args.dst}: {size / 1e9:.2f} GB in {time.time() - t0:.0f}s")

@@ -8,15 +8,15 @@ companion of bench/agent_bench.py. One backend per run:
 
   bench/chat_bench.py models/qwen3.5-4b.rlm
   bench/chat_bench.py models/Qwen3.5-4B-MLX-4bit
-  REDLINE_MTP=0 bench/chat_bench.py models/qwen3.5-4b.rlm      # the engine without drafts
+  RACELINE_MTP=0 bench/chat_bench.py models/qwen3.5-4b.rlm      # the engine without drafts
 """
 
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from redline.backends import Sampling, load_backend  # noqa: E402
-from redline.chat import Runtime  # noqa: E402
+from raceline.backends import Sampling, load_backend  # noqa: E402
+from raceline.chat import Runtime  # noqa: E402
 
 PROMPTS = [
     "Write a Python function that merges two sorted lists, then explain how it works in a short paragraph.",

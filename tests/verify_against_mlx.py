@@ -59,7 +59,7 @@ def main():
     ap.add_argument("mlx_model")
     ap.add_argument("rlm_model")
     ap.add_argument("tokens")
-    ap.add_argument("--redline", default="build/cmake/redline-engine")
+    ap.add_argument("--raceline", default="build/cmake/raceline-engine")
     ap.add_argument("--tol", type=float, default=2e-2, help="max relative error allowed on any layer")
     args = ap.parse_args()
 
@@ -76,7 +76,7 @@ def main():
     mx.clear_cache()
 
     with tempfile.TemporaryDirectory() as d:
-        r = subprocess.run([args.redline, "dump", args.rlm_model, args.tokens, d], capture_output=True, text=True)
+        r = subprocess.run([args.raceline, "dump", args.rlm_model, args.tokens, d], capture_output=True, text=True)
         if r.returncode:
             sys.exit(f"engine failed:\n{r.stdout}\n{r.stderr}")
         eng_h = [np.fromfile(os.path.join(d, f"layer_{i:02d}.f32"), dtype=np.float32).reshape(-1, hidden)

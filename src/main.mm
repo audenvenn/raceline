@@ -1,4 +1,4 @@
-// redline-engine: the engine's development command line.
+// raceline-engine: the engine's development command line.
 //
 //   dump    <model.rlm> <tokens.i32> <outdir>          per-layer activations for verification
 //   logits  <model.rlm> <tokens.i32> <out.f32> [--chunk N]
@@ -86,7 +86,7 @@ static std::vector<int32_t> generate(Engine &e, int n, int drafts, int *passes, 
 
 int main(int argc, char **argv) {
   if (argc < 4) {
-    fprintf(stderr, "usage: redline-engine dump|logits|draft|bench|spec|profile <model.rlm> <tokens.i32> ...\n");
+    fprintf(stderr, "usage: raceline-engine dump|logits|draft|bench|spec|profile <model.rlm> <tokens.i32> ...\n");
     return 2;
   }
   const std::string cmd = argv[1];

@@ -1,4 +1,4 @@
-"""Command line: redline chat | serve | probe."""
+"""Command line: raceline chat | serve | probe | pull."""
 
 from __future__ import annotations
 
@@ -27,6 +27,9 @@ def _defaults(model: str, backend) -> Sampling:
 def _runtime(args):
     from .chat import Runtime
 
+    from .pull import resolve
+
+    args.model = resolve(args.model)
     backend = load_backend(args.model, args.backend)
     sampling = _defaults(args.model, backend)
     if args.temperature is not None:
@@ -35,13 +38,14 @@ def _runtime(args):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="redline", description="A local agent runtime for Apple Silicon.")
+    ap = argparse.ArgumentParser(prog="raceline", description="A local agent runtime for Apple Silicon.")
     sub = ap.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("model", nargs="?", default=os.environ.get("REDLINE_MODEL"),
-                       help="a redline .rlm file, or an MLX model directory (default: $REDLINE_MODEL)")
-        p.add_argument("--backend", choices=["mlx", "redline"], help="default: by model type")
+        p.add_argument("model", nargs="?", default=os.environ.get("RACELINE_MODEL"),
+                       help="a .rlm file, the name of a pulled model (qwen3.5-4b), or an MLX model directory "
+                            "(default: $RACELINE_MODEL)")
+        p.add_argument("--backend", choices=["mlx", "raceline"], help="default: by model type")
         p.add_argument("--temperature", type=float)
 
     p = sub.add_parser("serve", help="OpenAI-compatible API on localhost")
@@ -61,14 +65,23 @@ def main(argv=None):
 
     p = sub.add_parser("probe", help="measure this Mac's limits for local inference (and a model against them)")
     p.add_argument("model", nargs="?", help="optional: a model to measure against the limits")
-    p.add_argument("--backend", choices=["mlx", "redline"])
+    p.add_argument("--backend", choices=["mlx", "raceline"])
+
+    p = sub.add_parser("pull", help="download a converted model: " + ", ".join(sorted(__import__("raceline.pull", fromlist=["MODELS"]).MODELS)))
+    p.add_argument("model")
+    p.add_argument("--dest", help="file or directory to save to (default: the raceline cache)")
 
     args = ap.parse_args(argv)
+    if args.command == "pull":
+        from .pull import pull
+        pull(args.model, args.dest)
+        return
     if args.command == "probe":
         from .probe import run
-        return run(args.model, args.backend)
+        from .pull import resolve
+        return run(resolve(args.model) if args.model else None, args.backend)
     if not args.model:
-        ap.error("no model given (and REDLINE_MODEL is not set)")
+        ap.error("no model given (and RACELINE_MODEL is not set)")
     rt = _runtime(args)
 
     if args.command == "serve":

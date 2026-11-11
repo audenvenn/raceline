@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quantize an original Qwen3.5 / Qwen3.8 checkpoint into redline's native format.
+"""Quantize an original Qwen3.5 / Qwen3.8 checkpoint into raceline's native format.
 
 Native format: every weight matrix is  s[n] * c[k] * L[q[n][k]]  with q a 4-bit
 code the GPU accelerators decode themselves, a scale per output row and a
@@ -449,7 +449,7 @@ def main():
         return
     cfg["num_hidden_layers"] = n_layers
     out.add_files(cli.src)
-    out.finish(dict(format="redline", version=2, arch="qwen3_5", source=os.path.basename(os.path.normpath(cli.src)),
+    out.finish(dict(format="raceline", version=2, arch="qwen3_5", source=os.path.basename(os.path.normpath(cli.src)),
                     config=cfg, quant=dict(mode="native", bits=4, book=book, block=BLOCK, gptq=gptq), quality=quality))
     print(f"wrote {cli.dst}: {os.path.getsize(cli.dst) / 1e9:.2f} GB in {time.time() - t_start:.0f}s")
     if "mtp.fc.weight" in src.st:

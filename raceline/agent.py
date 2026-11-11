@@ -56,7 +56,7 @@ TOOLS = [
 SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "build", "dist", ".mypy_cache", ".pytest_cache"}
 MAX_MATCHES = 200
 
-SYSTEM = """You are redline, an AI assistant running entirely on this Mac. You help with software and system tasks in the user's working directory.
+SYSTEM = """You are raceline, an AI assistant running entirely on this Mac. You help with software and system tasks in the user's working directory.
 
 Working directory: {cwd}
 Platform: macOS {release} ({machine})
@@ -311,7 +311,7 @@ def repl(agent: Agent) -> None:
     except ImportError:
         pass
     b = agent.rt.backend
-    print(agent.c("1", "redline") + f" · {getattr(b, 'model_id', '')} · {b.name} backend"
+    print(agent.c("1", "raceline") + f" · {getattr(b, 'model_id', '')} · {b.name} backend"
           + (" · speculative decoding" if getattr(b, "mtp", False) else "") + f" · {agent.cwd}")
     print(agent.c("2", "  /reset clears the conversation, /exit quits, Ctrl-C interrupts a reply."))
     while True:

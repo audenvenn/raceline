@@ -1,4 +1,4 @@
-# redline
+# raceline
 
 A local agent runtime for Apple Silicon with its own inference engine, built
 to get as much out of one Mac, for one user, as the hardware allows.
@@ -9,7 +9,7 @@ the same quality in less memory. The text it produces is bit-for-bit what
 decoding one token at a time produces, at any sampling temperature.
 
 ```
-$ redline chat models/qwen3.5-4b.rlm --yes -p "python3 stats.py 3 1 4 1 5 crashes. Find the bug, fix it, and run it again to confirm."
+$ raceline chat models/qwen3.5-4b.rlm --yes -p "python3 stats.py 3 1 4 1 5 crashes. Find the bug, fix it, and run it again to confirm."
 
   > bash(command="find_files \"*.py\"")
     [exit code 127]  [+2 lines]
@@ -34,8 +34,8 @@ successfully, outputting:
 
 (An actual run of the 4B model, first misstep included; its reasoning between the steps is left out.)
 
-It is a terminal agent (`redline chat`), an OpenAI-compatible server
-(`redline serve`) and a hardware probe (`redline probe`) on top of a small
+It is a terminal agent (`raceline chat`), an OpenAI-compatible server
+(`raceline serve`) and a hardware probe (`raceline probe`) on top of a small
 engine written for one model family, Qwen3.5 / Qwen3.8.
 
 **Status.** Everything below is measured on Qwen3.5-4B. Qwen3.8-27B, the
@@ -55,16 +55,16 @@ Continuing Python source after a prompt of that length, greedy, 256 tokens
 | Context | Runtime | Prompt processing | Decoding | Memory |
 |---|---|---|---|---|
 | 1,024 tokens | mlx-lm, MLX 4-bit weights | 1665 tok/s | 51.3 tok/s | 4.7 GB |
-| | **redline** | 1795 tok/s | **163.4 tok/s** | 2.0 GB + 2.5 GB file mapped |
-| | redline, drafts off | 1852 tok/s | 47.0 tok/s | |
+| | **raceline** | 1795 tok/s | **163.4 tok/s** | 2.0 GB + 2.5 GB file mapped |
+| | raceline, drafts off | 1852 tok/s | 47.0 tok/s | |
 | 8,192 tokens | mlx-lm, MLX 4-bit weights | 1576 tok/s | 47.1 tok/s | 6.0 GB |
-| | **redline** | 1568 tok/s | **112.2 tok/s** | 2.0 GB + 2.5 GB file mapped |
-| | redline, drafts off | 1639 tok/s | 41.4 tok/s | |
+| | **raceline** | 1568 tok/s | **112.2 tok/s** | 2.0 GB + 2.5 GB file mapped |
+| | raceline, drafts off | 1639 tok/s | 41.4 tok/s | |
 
 Chat answers, thinking off, three requests of up to 300 tokens
 (`bench/chat_bench.py`):
 
-| Sampling | mlx-lm | redline | redline, drafts off |
+| Sampling | mlx-lm | raceline | raceline, drafts off |
 |---|---|---|---|
 | greedy | 50.8 tok/s | **86.7 tok/s** | 47.5 tok/s |
 | temperature 0.7, top-p 0.8, top-k 20 | 49.1 tok/s | **83.2 tok/s** | 47.0 tok/s |
@@ -81,7 +81,7 @@ and its pages can be dropped and re-read by the system.
 
 A Mac generating text is limited by memory bandwidth: every weight is read
 once per pass, so 150 GB/s and 2.1 GB of weights allow about 70 passes per
-second, 13.6 GB about 11. `redline probe` measures that ceiling on your
+second, 13.6 GB about 11. `raceline probe` measures that ceiling on your
 machine. The engine is built around getting more than one token out of a pass.
 
 1. **Drafts from the model's own head, checked in the same pass.** Qwen3.5 /
@@ -126,30 +126,35 @@ line tools, CMake, Ninja and Python 3.10 or later. It has been run on one
 machine, the M6 Mac mini above.
 
 ```sh
-git clone https://github.com/OWNER/redline && cd redline
+git clone https://github.com/audenvenn/raceline && cd raceline
 cmake -S . -B build/cmake -G Ninja && cmake --build build/cmake
 python3 -m venv .venv && .venv/bin/pip install -e .
 
-# Convert a model once: original checkpoint -> one self-contained .rlm file.
+.venv/bin/raceline pull  qwen3.5-4b     # 2.5 GB, converted and ready to run
+.venv/bin/raceline chat  qwen3.5-4b     # terminal agent in the current directory
+.venv/bin/raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
+.venv/bin/raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
+```
+
+`raceline pull` downloads from this repository's releases, verifies checksums
+and continues an interrupted download. To convert a checkpoint yourself:
+
+```sh
 .venv/bin/python tools/fetch_model.py Qwen/Qwen3.5-4B                         # 9 GB, into models/
 .venv/bin/python tools/quantize.py models/Qwen3.5-4B models/qwen3.5-4b.rlm    # tens of minutes
 .venv/bin/python tools/add_mtp.py  models/Qwen3.5-4B models/qwen3.5-4b.rlm    # about a minute
-
-.venv/bin/redline chat  models/qwen3.5-4b.rlm     # terminal agent in the current directory
-.venv/bin/redline serve models/qwen3.5-4b.rlm     # OpenAI-compatible API on localhost:8080
-.venv/bin/redline probe models/qwen3.5-4b.rlm     # this Mac's limits, and what the model reaches
+.venv/bin/raceline chat models/qwen3.5-4b.rlm
 ```
 
-Larger checkpoints convert the same way, a layer at a time, so they never
-have to fit in memory; an interrupted conversion continues with `--resume`.
-There are no pre-converted downloads yet.
+A checkpoint is processed a layer at a time, so it never has to fit in
+memory, and an interrupted conversion continues with `--resume`.
 
 Any MLX model directory also runs, through the MLX backend and without the
-engine's speedups: `redline chat models/Qwen3.5-4B-MLX-4bit`.
+engine's speedups: `raceline chat models/Qwen3.5-4B-MLX-4bit`.
 
 ## The agent
 
-`redline chat` gives the model seven tools. `read_file`, `list_dir`,
+`raceline chat` gives the model seven tools. `read_file`, `list_dir`,
 `find_files` and `search` run freely; `bash`, `write_file` and `edit_file`
 ask first (`--yes` approves everything, answering `a` approves the rest of
 the session). The line after each turn shows the size of the context, how
@@ -157,7 +162,7 @@ much of it was reused, and the decoding speed. `--no-think` skips the model's
 reasoning phase; `--effort` sets the reasoning effort for models whose chat
 template has one (Qwen3.8).
 
-`redline serve` speaks the OpenAI chat-completions protocol, streaming or not,
+`raceline serve` speaks the OpenAI chat-completions protocol, streaming or not,
 with tool calls and the model's reasoning as `reasoning_content`:
 
 ```sh
@@ -178,7 +183,7 @@ at a time; this is a single-user runtime.
 | Engine on a native file against MLX running the decoded weights (`tests/verify_native.py`) | same top token, logits within 1.6e-2 relative (the reference holds the weights in float16) |
 | MTP head against MLX on the same weights (`tests/verify_mtp.py`) | same draft, logits within 5e-3 relative |
 | A prompt fed in chunks of 96, 17 or 1 tokens | bit-identical logits |
-| Plain decoding against 1 to 7 drafts per pass (`redline-engine spec`) | identical tokens |
+| Plain decoding against 1 to 7 drafts per pass (`raceline-engine spec`) | identical tokens |
 | Passes with wrong, partly right and right drafts, abandoned drafts, state save and load, against a clean run (`tests/verify_spec.py`) | bit-identical logits and drafts |
 | Greedy and sampled text with and without drafts, through the runtime | identical |
 | Linear kernels against a double-precision CPU reference (`build/cmake/test_linear`) | pass |
@@ -228,7 +233,7 @@ own distribution; they coincide whenever the two distributions are close.
 far holds (the product of the drafts' probabilities under the head) is above
 a threshold that follows the measured cost of a draft relative to a token.
 
-**Hardware limits.** `redline probe` prints them for your Mac:
+**Hardware limits.** `raceline probe` prints them for your Mac:
 
 ```
 Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
@@ -249,7 +254,7 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 
 | Path | What it is |
 |---|---|
-| `redline/` | The runtime: backends (engine, MLX), session reuse and snapshots, chat rendering and tool-call parsing, OpenAI-compatible server, terminal agent, probe. |
+| `raceline/` | The runtime: backends (engine, MLX), session reuse and snapshots, chat rendering and tool-call parsing, OpenAI-compatible server, terminal agent, probe. |
 | `src/`, `kernels/` | The engine: Metal runtime, model file reader, forward pass, speculative decoding. Kernels are compiled at run time. C API in `src/capi.h`. |
 | `tools/quantize.py`, `tools/add_mtp.py` | Original checkpoint to native `.rlm`; adds the MTP head. `tools/convert.py` repacks an MLX 4-bit model instead (MLX's exact values, no drafts). |
 | `tools/mtp_study.py`, `tools/quant_study.py` | The measurements behind the design choices above. |
@@ -268,7 +273,8 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
   reprocesses the prompt each time.
 - Run on a single M6 machine. Engine errors (an unsupported model geometry,
   misuse of the C API) end the process with a message.
-- Models have to be converted locally.
+- Converted files are published for the models named above; anything else
+  has to be converted locally from the original checkpoint.
 
 ## License
 

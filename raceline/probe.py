@@ -1,4 +1,4 @@
-"""`redline probe`: what this Mac can do for a local LLM, measured in a few seconds.
+"""`raceline probe`: what this Mac can do for a local LLM, measured in a few seconds.
 
 Two numbers bound single-user inference on Apple Silicon:
 
@@ -79,7 +79,7 @@ def gpu_bandwidth(gib: float = 1.0) -> float:
     n_words -= n_words % (32 * 4096)
     w = mx.random.randint(0, 1 << 30, shape=(n_words,), dtype=mx.uint32)
     mx.eval(w)
-    kernel = mx.fast.metal_kernel(name="redline_probe_read", input_names=["w"], output_names=["out"], source=READ_SRC)
+    kernel = mx.fast.metal_kernel(name="raceline_probe_read", input_names=["w"], output_names=["out"], source=READ_SRC)
     best = 0.0
     for ch in (256, 1024, 4096):
         def run():
@@ -152,7 +152,7 @@ def run(model=None, backend=None) -> None:
         fits = "yes" if nbytes / 2**30 + 3 < m["ram_gb"] else "no"
         print(f"  {label:8s} {nbytes / GB:7.1f} GB {fits:>6s} {bw * GB / nbytes:10.1f} tok/s {tf * 1e12 / (2 * params * 1e9):11.0f} tok/s")
     print("\n  The decode ceiling is for one token per pass over the weights. A draft that is")
-    print("  verified in the same pass (redline uses the model's own MTP head) goes above it.")
+    print("  verified in the same pass (raceline uses the model's own MTP head) goes above it.")
     if not model:
         return
     print(f"\n  Measuring {model} ...")

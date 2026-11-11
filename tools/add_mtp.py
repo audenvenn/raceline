@@ -53,7 +53,7 @@ def mtp_weights(src: Source):
 
 def engine_hiddens(rlm: str, seqs, hidden: int) -> np.ndarray:
     """Final hidden states (before the final norm) of every position, from the engine."""
-    from redline.engine import _library
+    from raceline.engine import _library
 
     lib = _library()
     e = lib.rl_open(os.path.abspath(rlm).encode(), T, T)

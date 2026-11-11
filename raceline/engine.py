@@ -1,15 +1,15 @@
-"""Backend for the redline engine (.rlm models), through its C API.
+"""Backend for the raceline engine (.rlm models), through its C API.
 
 The engine returns logits; sampling happens here in numpy. The tokenizer and
-chat template are not part of a .rlm file: they are read from REDLINE_TOKENIZER,
+chat template are not part of a .rlm file: they are read from RACELINE_TOKENIZER,
 or from the model directory the file was converted from if it sits next to it.
 
 When the file carries the model's multi-token-prediction head, generation is
 speculative: the head drafts the tokens that follow the next one, the engine
 checks the next token and the drafts in one pass over the weights, and every
 draft the model confirms is a token that cost no pass of its own. The output
-is exactly what one-token-at-a-time decoding produces. REDLINE_MTP=0 turns
-this off; REDLINE_DRAFTS sets the most drafts per pass.
+is exactly what one-token-at-a-time decoding produces. RACELINE_MTP=0 turns
+this off; RACELINE_DRAFTS sets the most drafts per pass.
 """
 
 from __future__ import annotations
@@ -32,15 +32,15 @@ from .backends import Backend, Sampling, Snapshot
 @functools.lru_cache(maxsize=1)
 def _library() -> ctypes.CDLL:
     here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.environ.get("REDLINE_LIB"), os.path.join(here, "libredline.dylib"),
-                  os.path.join(here, "..", "build", "cmake", "libredline.dylib")]
+    candidates = [os.environ.get("RACELINE_LIB"), os.path.join(here, "libraceline.dylib"),
+                  os.path.join(here, "..", "build", "cmake", "libraceline.dylib")]
     for path in candidates:
         if path and os.path.isfile(path):
             lib = ctypes.CDLL(path)
             break
     else:
-        raise RuntimeError("libredline.dylib not found: build it with `cmake --build build/cmake` "
-                           "or point REDLINE_LIB at it")
+        raise RuntimeError("libraceline.dylib not found: build it with `cmake --build build/cmake` "
+                           "or point RACELINE_LIB at it")
     lib.rl_open.restype = ctypes.c_void_p
     lib.rl_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
     lib.rl_forward.restype = ctypes.POINTER(ctypes.c_float)
@@ -72,22 +72,22 @@ def _library() -> ctypes.CDLL:
 def _tokenizer_dir(model_path: str) -> str:
     """Directory with the tokenizer and chat template for a .rlm file. Files
     embedded in the model are unpacked once into the cache; older files fall
-    back to REDLINE_TOKENIZER or the model directory they were converted from."""
+    back to RACELINE_TOKENIZER or the model directory they were converted from."""
     with open(model_path, "rb") as f:
         if f.read(4) != b"RLM1":
-            raise ValueError(f"{model_path} is not a redline model file")
+            raise ValueError(f"{model_path} is not a raceline model file")
         _, n = struct.unpack("<IQ", f.read(12))
         hdr = json.loads(f.read(n))
         blobs = {}
         for name, entry in (hdr.get("files") or {}).items():
             f.seek(entry["offset"])
             blobs[name] = f.read(entry["nbytes"])
-    override = os.environ.get("REDLINE_TOKENIZER")
+    override = os.environ.get("RACELINE_TOKENIZER")
     if override:
         return override
     if "tokenizer.json" in blobs:
         digest = hashlib.sha1(b"".join(k.encode() + v for k, v in sorted(blobs.items()))).hexdigest()[:16]
-        root = os.path.expanduser(os.environ.get("REDLINE_CACHE", "~/.cache/redline"))
+        root = os.path.expanduser(os.environ.get("RACELINE_CACHE", "~/.cache/raceline"))
         out = os.path.join(root, "files", digest)
         if not os.path.isdir(out):
             tmp = f"{out}.{os.getpid()}.tmp"
@@ -105,12 +105,12 @@ def _tokenizer_dir(model_path: str) -> str:
     for d in (os.path.join(folder, stem), os.path.join(folder, source)):
         if os.path.isfile(os.path.join(d, "tokenizer.json")):
             return d
-    raise RuntimeError(f"{model_path} carries no tokenizer: set REDLINE_TOKENIZER to a directory with tokenizer.json "
+    raise RuntimeError(f"{model_path} carries no tokenizer: set RACELINE_TOKENIZER to a directory with tokenizer.json "
                        f"and the chat template (also looked next to the model for '{stem}/' and '{source}/')")
 
 
-class RedlineBackend(Backend):
-    name = "redline"
+class RacelineBackend(Backend):
+    name = "raceline"
 
     def __init__(self, model_path: str, max_ctx: int = 32768, chunk: int = 1024, mtp: Optional[bool] = None):
         from transformers import AutoTokenizer
@@ -128,7 +128,7 @@ class RedlineBackend(Backend):
         self._logits = None
         self._open = None                # [rows fed, rows known to stand] of a speculative pass not settled yet
         if mtp is None:
-            mtp = os.environ.get("REDLINE_MTP", "1") != "0"
+            mtp = os.environ.get("RACELINE_MTP", "1") != "0"
         self.mtp = bool(self._lib.rl_has_mtp(self._e)) and mtp
         if self._lib.rl_has_mtp(self._e):
             self._lib.rl_set_mtp(self._e, int(self.mtp))
@@ -136,15 +136,15 @@ class RedlineBackend(Backend):
         # frequent ones: its pass over the output matrix covers ids below 64k
         # (98% of English and code), 128k (99% of Chinese too) or everything,
         # whichever the recent context calls for.
-        self.draft_vocab = int(os.environ.get("REDLINE_DRAFT_VOCAB", "-1"))     # -1: choose per generation
+        self.draft_vocab = int(os.environ.get("RACELINE_DRAFT_VOCAB", "-1"))     # -1: choose per generation
         # Drafting stops early once the chance that the drafts so far all hold
         # (the product of their probabilities under the head) falls below a
         # threshold. Another draft pays off when that chance exceeds what the
         # draft costs relative to a token, so the threshold follows the measured
         # times: three times (time per draft / time per token), which allows
-        # for the head being overconfident. REDLINE_MIN_CONFIDENCE fixes it.
-        self.max_drafts = min(int(os.environ.get("REDLINE_DRAFTS", "6")), self._lib.rl_max_drafts(self._e))
-        fixed = os.environ.get("REDLINE_MIN_CONFIDENCE")
+        # for the head being overconfident. RACELINE_MIN_CONFIDENCE fixes it.
+        self.max_drafts = min(int(os.environ.get("RACELINE_DRAFTS", "6")), self._lib.rl_max_drafts(self._e))
+        fixed = os.environ.get("RACELINE_MIN_CONFIDENCE")
         self.min_confidence = float(fixed) if fixed else None
         self._t_draft = self._t_token = None      # running averages, seconds
         self._stride = self._lib.rl_logits_stride(self._e)

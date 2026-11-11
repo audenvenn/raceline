@@ -22,7 +22,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from redline.engine import _library  # noqa: E402
+from raceline.engine import _library  # noqa: E402
 
 
 class Eng:

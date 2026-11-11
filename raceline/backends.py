@@ -3,7 +3,7 @@
 A backend is a stateful, token-level model: tokens go in, the context grows,
 and the next-token distribution comes out. Everything above it (prompt reuse,
 chat formatting, tools, the HTTP API) is backend independent, so the same agent
-runs on MLX today and on the redline engine where that is faster.
+runs on MLX today and on the raceline engine where that is faster.
 
 The one capability that matters beyond "append and sample" is `snapshot` /
 `restore`. Qwen3.5 / Qwen3.8 are three quarters recurrent layers, whose state
@@ -167,11 +167,11 @@ class MLXBackend(Backend):
 
 def load_backend(model: str, backend: Optional[str] = None) -> Backend:
     """`model` is an MLX model directory or a .rlm file (with tokenizer files
-    next to it or in the directory given by REDLINE_TOKENIZER)."""
-    kind = backend or ("redline" if model.endswith(".rlm") else "mlx")
+    next to it or in the directory given by RACELINE_TOKENIZER)."""
+    kind = backend or ("raceline" if model.endswith(".rlm") else "mlx")
     if kind == "mlx":
         return MLXBackend(model)
-    if kind == "redline":
-        from .engine import RedlineBackend
-        return RedlineBackend(model)
+    if kind == "raceline":
+        from .engine import RacelineBackend
+        return RacelineBackend(model)
     raise ValueError(f"unknown backend '{kind}'")

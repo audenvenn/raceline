@@ -20,7 +20,7 @@ class Native:
         if hdr is None:
             with open(path, "rb") as f:
                 if f.read(4) != MAGIC:
-                    raise SystemExit(f"{path} is not a redline model file")
+                    raise SystemExit(f"{path} is not a raceline model file")
                 _, n = struct.unpack("<IQ", f.read(12))
                 hdr = json.loads(f.read(n))
         self.hdr = hdr

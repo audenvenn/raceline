@@ -10,9 +10,9 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from redline.backends import Backend, Sampling, Snapshot  # noqa: E402
-from redline.chat import normalize_messages, parse_tool_call  # noqa: E402
-from redline.session import Session  # noqa: E402
+from raceline.backends import Backend, Sampling, Snapshot  # noqa: E402
+from raceline.chat import normalize_messages, parse_tool_call  # noqa: E402
+from raceline.session import Session  # noqa: E402
 
 
 class FakeBackend(Backend):
@@ -127,7 +127,7 @@ def test_messages_are_normalized_for_the_template():
 
 def test_sampler_matches_its_distribution_and_couples():
     try:
-        from redline.engine import _library, _sample
+        from raceline.engine import _library, _sample
         _library()
     except Exception as e:  # the engine library is not built
         print(f"  (skipped: {e})")

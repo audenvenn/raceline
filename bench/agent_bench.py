@@ -6,7 +6,7 @@ through the same `Backend` interface the agent uses: a prompt of real source
 code cut to an exact token count, then greedy decoding that continues it.
 
   bench/agent_bench.py models/qwen3.5-4b.fp4.rlm models/Qwen3.5-4B-MLX-4bit --prompt 1024 8192
-  REDLINE_MTP=0 bench/agent_bench.py models/qwen3.5-4b.fp4.rlm        # without speculative decoding
+  RACELINE_MTP=0 bench/agent_bench.py models/qwen3.5-4b.fp4.rlm        # without speculative decoding
 
 Compare engines back to back, with nothing else using the GPU.
 """
@@ -37,7 +37,7 @@ def corpus_tokens(tokenizer, n):
 
 def one(model, prompt_tokens, gen_tokens):
     sys.path.insert(0, ROOT)
-    from redline.backends import Sampling, load_backend
+    from raceline.backends import Sampling, load_backend
 
     t0 = time.perf_counter()
     b = load_backend(model)

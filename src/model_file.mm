@@ -31,7 +31,7 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   if (map_ == MAP_FAILED) fatal("cannot mmap %s", path.c_str());
 
   const uint8_t *base = (const uint8_t *)map_;
-  if (size_ < 16 || memcmp(base, "RLM1", 4) != 0) fatal("%s is not a redline model file", path.c_str());
+  if (size_ < 16 || memcmp(base, "RLM1", 4) != 0) fatal("%s is not a raceline model file", path.c_str());
   uint64_t hdr_len;
   memcpy(&hdr_len, base + 8, 8);
   NSData *json = [NSData dataWithBytesNoCopy:(void *)(base + 16) length:hdr_len freeWhenDone:NO];

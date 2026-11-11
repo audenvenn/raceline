@@ -82,7 +82,7 @@ def make_handler(runtime: Runtime, model_id: str):
         def do_GET(self):
             if self.path in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [
-                    {"id": model_id, "object": "model", "created": 0, "owned_by": "redline"}]})
+                    {"id": model_id, "object": "model", "created": 0, "owned_by": "raceline"}]})
             elif self.path == "/health":
                 self._json(200, {"status": "ok", "backend": runtime.backend.name, "model": model_id})
             else:
@@ -200,7 +200,7 @@ def make_handler(runtime: Runtime, model_id: str):
 
 def serve(runtime: Runtime, model_id: str, host: str = "127.0.0.1", port: int = 8080):
     server = ThreadingHTTPServer((host, port), make_handler(runtime, model_id))
-    print(f"redline: {model_id} on the {runtime.backend.name} backend")
+    print(f"raceline: {model_id} on the {runtime.backend.name} backend")
     print(f"OpenAI-compatible API at http://{host}:{port}/v1  (Ctrl-C to stop)", flush=True)
     try:
         server.serve_forever()

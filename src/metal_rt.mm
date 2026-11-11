@@ -16,7 +16,7 @@ namespace rl {
 void fatal(const char *fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
-  fprintf(stderr, "redline: fatal: ");
+  fprintf(stderr, "raceline: fatal: ");
   vfprintf(stderr, fmt, ap);
   fprintf(stderr, "\n");
   va_end(ap);

@@ -35,7 +35,7 @@ def main():
     ap.add_argument("float_model")
     ap.add_argument("rlm")
     ap.add_argument("tokens")
-    ap.add_argument("--redline", default="build/cmake/redline-engine")
+    ap.add_argument("--raceline", default="build/cmake/raceline-engine")
     args = ap.parse_args()
 
     nat = Native(args.rlm)
@@ -79,7 +79,7 @@ def main():
     mx.clear_cache()
 
     with tempfile.NamedTemporaryFile(suffix=".f32") as tmp:
-        r = subprocess.run([args.redline, "draft", args.rlm, args.tokens, tmp.name], capture_output=True, text=True)
+        r = subprocess.run([args.raceline, "draft", args.rlm, args.tokens, tmp.name], capture_output=True, text=True)
         if r.returncode:
             sys.exit(f"engine failed:\n{r.stdout}\n{r.stderr}")
         eng = np.fromfile(tmp.name, dtype=np.float32)

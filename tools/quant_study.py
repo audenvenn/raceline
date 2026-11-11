@@ -233,8 +233,8 @@ def lib_rtn(book, alphas=(0.0,), betas=(0.0,)):
     def fn(W, h):
         Wn = np.array(W)
         hn = None if h is None else np.array(h)
-        L, sc, c = quantlib.quantize_rtn(Wn, hn, book, alphas, betas)
-        return mx.array(L * sc[:, None] * c[None, :]), 4 + 16 / Wn.shape[1] + 16 / Wn.shape[0]
+        codes, sc, c = quantlib.quantize_rtn(Wn, hn, book, alphas, betas)
+        return mx.array(quantlib.dequant(codes, sc, c, book)), 4 + 16 / Wn.shape[1] + 16 / Wn.shape[0]
     return fn
 
 
@@ -255,8 +255,8 @@ def run_gptq(model, cal_seqs, original, book, alphas, betas, workers=6):
         def one(item):
             name, mod = item
             W = np.array(original(name))
-            L, sc, c = quantlib.quantize_gptq(W, hess[id(mod)], book, alphas, betas)
-            return mod, (L * sc[:, None] * c[None, :]).astype(np.float16), W.shape
+            codes, sc, c = quantlib.quantize_gptq(W, hess[id(mod)], book, alphas, betas)
+            return mod, quantlib.dequant(codes, sc, c, book).astype(np.float16), W.shape
         with ThreadPoolExecutor(workers) as ex:
             for mod, Wq, shape in ex.map(one, mods.items()):
                 mod.weight = mx.array(Wq)
@@ -298,8 +298,8 @@ def run_gptq(model, cal_seqs, original, book, alphas, betas, workers=6):
     if not lm.args.tie_word_embeddings:  # the lookup table is only ever read row by row
         emb = "language_model.model.embed_tokens.weight"
         W = np.array(original(emb))
-        L, sc, c = quantlib.quantize_rtn(W, None, book)
-        tm.embed_tokens.weight = mx.array((L * sc[:, None] * c[None, :]).astype(np.float16))
+        codes, sc, c = quantlib.quantize_rtn(W, None, book)
+        tm.embed_tokens.weight = mx.array(quantlib.dequant(codes, sc, c, book).astype(np.float16))
     return bits / n
 
 

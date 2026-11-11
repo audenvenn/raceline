@@ -169,14 +169,12 @@ def affine4(W, group=64):
 
 
 def quantize_matrix(W, H, book, gptq):
-    """-> (dequantized W, (levels, s, c) or None for the baseline format)."""
+    """-> (dequantized W, None) for the baseline format, else (None, (codes, s, c))."""
     if book == "mlx-affine4":
         return affine4(W), None
     if gptq and H is not None:
-        L, s, c = quantlib.quantize_gptq(W, H, book, A_GRID, B_GRID)
-    else:
-        L, s, c = quantlib.quantize_rtn(W, None if H is None else np.diag(H).copy(), book, A_GRID, B_GRID)
-    return None, (L, s, c)
+        return None, quantlib.quantize_gptq(W, H, book, A_GRID, B_GRID)
+    return None, quantlib.quantize_rtn(W, None if H is None else np.diag(H).copy(), book, A_GRID, B_GRID)
 
 
 def quantize_stack(parts, H, book, gptq):
@@ -248,8 +246,8 @@ def main():
     def rows(Wq, q, ids):  # dequantized rows of a quantized matrix for token ids
         if q is None:
             return mx.array(Wq[ids])
-        L, s, c = q
-        return mx.array(L[ids] * s[ids][..., None] * c)
+        codes, s, c = q
+        return mx.array(quantlib.dequant(codes[ids], s[ids], c, book))
 
     # The token lookup table. When it is tied to the output head it has to be
     # quantized before anything else (the quantized stream starts from it), so
@@ -273,7 +271,7 @@ def main():
     mx.eval(hc, hq, hr)
     if write:
         out.begin("embed")
-        out.add_native_rows("embed", quantlib.encode(emb_q[0], book), emb_q[1], emb_q[2], book)
+        out.add_native_rows("embed", emb_q[0], emb_q[1], emb_q[2], book)
         out.end()
     del emb, emb_wq, emb_q
 
@@ -301,11 +299,11 @@ def main():
                 out.add_float(f"layers.{i}.attn.k_norm", weights["self_attn.k_norm.weight"])
         for (name, parts), (Wq, q) in zip(stacks, results):
             if q is not None:
-                L, s, c = q
+                codes, s, c = q
                 if write:
                     out.add_native(f"layers.{i}.{name}", [(pn, m.weight.shape[0]) for pn, m in parts],
-                                   quantlib.encode(L, book), s, c, book)
-                Wq = L * s[:, None] * c[None, :]
+                                   codes, s, c, book)
+                Wq = quantlib.dequant(codes, s, c, book)
             row = 0
             for _, m in parts:
                 m.weight = mx.array(Wq[row:row + m.weight.shape[0]])
@@ -322,23 +320,37 @@ def main():
     if not tied:
         head_float = src.get("lm_head.weight")
         head_wq, head_q = quantize_matrix(head_float, second_moment(hc), book, gptq)
-    if head_q is not None:
-        L, s, c = head_q
-        head_wq = L * s[:, None] * c[None, :]
-        if write:
-            out.begin("head")
-            out.add_float("final_norm", final_norm)
-            out.add_native("lm_head", [("out", L.shape[0])], quantlib.encode(L, book), s, c, book)
-            out.end()
+    if head_q is not None and write:
+        out.begin("head")
+        out.add_float("final_norm", final_norm)
+        out.add_native("lm_head", [("out", head_q[0].shape[0])], head_q[0], head_q[1], head_q[2], book)
+        out.end()
 
-    # Quality on held-out text: float model vs quantized model, last EVAL_POS positions.
+    # Quality on held-out text: float model vs quantized model, last EVAL_POS
+    # positions. The head is applied a slice of the vocabulary at a time: at
+    # 27B scale the two head matrices would not fit in memory as float32.
+    V = head_float.shape[0]
+
+    def head_rows(v0, v1, quantized):
+        if not quantized:
+            return head_float[v0:v1]
+        if head_q is None:
+            return head_wq[v0:v1]
+        codes, s, c = head_q
+        return quantlib.dequant(codes[v0:v1], s[v0:v1], c, book)
+
+    def log_probs(x, quantized):
+        parts = []
+        for v0 in range(0, V, 32768):
+            parts.append(x @ mx.array(head_rows(v0, min(V, v0 + 32768), quantized)).T)
+            mx.eval(parts[-1])
+        return log_softmax(mx.concatenate(parts, axis=1))
+
     sl = slice(T - EVAL_POS - 1, T - 1)
-    Wq = mx.array(head_wq)
-    Wr = mx.array(head_float)
     kl = ce = agree = 0.0
     for j in range(len(ev)):
-        lr = log_softmax(final(hr[j, sl]) @ Wr.T)
-        lq = log_softmax(final(hq[j, sl]) @ Wq.T)
+        lr = log_probs(final(hr[j, sl]), False)
+        lq = log_probs(final(hq[j, sl]), True)
         tgt = ev_ids[j, T - EVAL_POS:T]
         kl += mx.sum(mx.exp(lr) * (lr - lq)).item()
         ce += -mx.sum(mx.take_along_axis(lq, tgt[:, None], axis=-1)).item()

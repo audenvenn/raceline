@@ -14,3 +14,7 @@ models/
 # working notes from the initial landscape research
 research_notes/
 reports/
+
+# python packaging
+*.egg-info/
+dist/

@@ -1,5 +1,8 @@
 # raceline
 
+[![CI](https://github.com/audenvenn/raceline/actions/workflows/ci.yml/badge.svg)](https://github.com/audenvenn/raceline/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 A local agent runtime for Apple Silicon with its own inference engine, built
 to get as much out of one Mac, for one user, as the hardware allows.
 
@@ -274,6 +277,15 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
   misuse of the C API) end the process with a message.
 - Converted files are published for the models named above; anything else
   has to be converted locally from the original checkpoint.
+
+## Contributing
+
+Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has
+the ground rules and the test matrix, [CHANGELOG.md](CHANGELOG.md) what
+changed. The most useful thing right now is a
+[benchmark from another Mac](https://github.com/audenvenn/raceline/issues/2):
+everything above was measured on one machine. Security problems go through
+[SECURITY.md](SECURITY.md).
 
 ## License
 

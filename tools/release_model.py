@@ -8,6 +8,10 @@ described by a manifest with sizes and SHA-256 sums:
   gh release upload models-v1 dist/qwen3.5-4b.rlm.*
 
 Writes <name>.json and <name>.part-00, <name>.part-01, ... into the directory.
+With --card BASE_MODEL it also writes the model card (README.md), so the
+directory can be uploaded to Hugging Face as it is:
+
+  tools/release_model.py models/qwen3.5-4b.rlm dist/ --name qwen3.5-4b.rlm --card Qwen/Qwen3.5-4B
 """
 
 import argparse
@@ -52,14 +56,83 @@ def cut(model, outdir, name=None, part_size=PART):
     return manifest
 
 
+CARD = """---
+license: apache-2.0
+base_model: {base}
+base_model_relation: quantized
+pipeline_tag: text-generation
+tags:
+- raceline
+- apple-silicon
+- metal
+- speculative-decoding
+- mtp
+- fp4
+---
+
+# {title} for raceline
+
+[{base}](https://huggingface.co/{base}) converted for [raceline](https://github.com/audenvenn/raceline),
+a local agent runtime with its own inference engine for Apple Silicon Macs whose GPU has neural
+accelerators (M5 and M6 families).
+
+The model file is the engine's native format: 4-bit FP4 weights with a scale per row and per
+column ({bits} bits per weight), quantized with GPTQ after a {rotation}; the model's
+multi-token-prediction head, which raceline uses for exact speculative decoding; and the tokenizer
+and chat template. It is split into parts of under 2 GB described by `{name}.json`. It needs
+raceline 0.2.0 or later and is not usable with other runtimes.
+
+## Use
+
+```sh
+raceline pull {alias} --source huggingface    # or without --source: the GitHub release
+raceline chat {alias}
+```
+
+See the [raceline README](https://github.com/audenvenn/raceline#quick-start) for installation and for
+speed measurements against mlx-lm.
+
+## Quality
+
+Measured at conversion time against the float model on held-out text ({positions} positions):
+KL divergence {kl:.3f} nats, perplexity {ppl:.3f}, top-1 agreement {top1:.1f}%.
+The draft head's top choice is the model's own next-but-one token {agree:.1f}% of the time.
+
+| File | Size | SHA-256 |
+|---|---|---|
+| `{name}` (assembled) | {size:.2f} GB | `{sha}` |
+
+## License
+
+Apache-2.0, as the original model.
+"""
+
+
+def write_card(outdir, manifest, base, alias):
+    q, m, quant = manifest["quality"], manifest.get("mtp") or {}, manifest["quant"]
+    rot = (quant.get("rotation") or {}).get("kind")
+    title = base.split("/")[-1]
+    text = CARD.format(base=base, title=title, alias=alias, name=manifest["name"], bits=f"{quant['bits']:.1f}",
+                       rotation=("Hadamard rotation of the residual stream that is folded into the weights"
+                                 if rot else "search of the row and column scales"),
+                       positions=q["positions"], kl=q["kl"], ppl=q["ppl"], top1=100 * q["top1"],
+                       agree=100 * m.get("agreement", float("nan")), size=manifest["size"] / 1e9,
+                       sha=manifest["sha256"])
+    with open(os.path.join(outdir, "README.md"), "w") as f:
+        f.write(text)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("model", help=".rlm file")
     ap.add_argument("outdir")
     ap.add_argument("--name", help="file name users will get (default: the model's own)")
     ap.add_argument("--part-size", type=int, default=PART)
+    ap.add_argument("--card", metavar="BASE_MODEL", help="also write a model card for this base model (e.g. Qwen/Qwen3.5-4B)")
     args = ap.parse_args()
     manifest = cut(args.model, args.outdir, args.name, args.part_size)
+    if args.card:
+        write_card(args.outdir, manifest, args.card, manifest["name"].rsplit(".rlm", 1)[0])
     for part in manifest["parts"]:
         print(f"  {part['name']}  {part['size'] / 1e9:.2f} GB")
     print(f"{manifest['name']}: {manifest['size'] / 1e9:.2f} GB in {len(manifest['parts'])} parts, "

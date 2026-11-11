@@ -1,9 +1,11 @@
-"""`raceline pull`: fetch a converted model from the project's releases.
+"""`raceline pull`: fetch a converted model.
 
 A model is published as a small manifest plus parts of under 2 GB (the size
-limit of a release asset). Parts are written straight into place and checked
-against their SHA-256, so an interrupted download continues with the first
-part that is not complete, and nothing needs twice the disk space.
+limit of a GitHub release asset), the same files on both sources: the
+project's GitHub releases and Hugging Face. Parts are written
+straight into place and checked against their SHA-256, so an interrupted
+download continues with the first part that is not complete, and nothing
+needs twice the disk space.
 """
 
 from __future__ import annotations
@@ -15,11 +17,15 @@ import sys
 import time
 import urllib.request
 
-RELEASES = os.environ.get("RACELINE_RELEASES", "https://github.com/audenvenn/raceline/releases/download/models-v1")
 MODELS = {  # alias -> file name in the release
     "qwen3.5-4b": "qwen3.5-4b.rlm",
     "qwen3.8-27b": "qwen3.8-27b.rlm",
 }
+SOURCES = {  # where the files of model {alias} are, by source
+    "github": "https://github.com/audenvenn/raceline/releases/download/models-v2",
+    "huggingface": "https://huggingface.co/audenvenn/raceline-{alias}/resolve/main",
+}
+RELEASES = os.environ.get("RACELINE_RELEASES")  # a base URL that overrides the sources
 CHUNK = 1 << 20
 
 
@@ -53,9 +59,20 @@ def _open(url: str):
     return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "raceline"}), timeout=60)
 
 
-def pull(model: str, dest: str | None = None) -> str:
+def base_url(model: str, source: str | None = None) -> str:
+    if RELEASES:
+        return RELEASES.rstrip("/")
+    source = source or os.environ.get("RACELINE_SOURCE", "github")
+    if source not in SOURCES:
+        raise SystemExit(f"unknown source '{source}': {', '.join(SOURCES)}")
+    alias = next((a for a, n in MODELS.items() if n == model or a == model.lower()), model)
+    return SOURCES[source].format(alias=alias)
+
+
+def pull(model: str, dest: str | None = None, source: str | None = None) -> str:
     name = MODELS.get(model.lower(), model)
-    with _open(f"{RELEASES}/{name}.json") as r:
+    base = base_url(model, source)
+    with _open(f"{base}/{name}.json") as r:
         manifest = json.load(r)
     out = dest or os.path.join(models_dir(), manifest["name"])
     if os.path.isdir(out):
@@ -78,7 +95,7 @@ def pull(model: str, dest: str | None = None) -> str:
                     f.seek(offset)
                     digest, n = hashlib.sha256(), 0
                     try:
-                        with _open(f"{RELEASES}/{part['name']}") as r:
+                        with _open(f"{base}/{part['name']}") as r:
                             while True:
                                 block = r.read(CHUNK)
                                 if not block:

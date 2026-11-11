@@ -70,11 +70,13 @@ def main(argv=None):
     p = sub.add_parser("pull", help="download a converted model: " + ", ".join(sorted(__import__("raceline.pull", fromlist=["MODELS"]).MODELS)))
     p.add_argument("model")
     p.add_argument("--dest", help="file or directory to save to (default: the raceline cache)")
+    p.add_argument("--source", choices=["github", "huggingface"],
+                   help="where to download from (default: github, or $RACELINE_SOURCE)")
 
     args = ap.parse_args(argv)
     if args.command == "pull":
         from .pull import pull
-        pull(args.model, args.dest)
+        pull(args.model, args.dest, args.source)
         return
     if args.command == "probe":
         from .probe import run

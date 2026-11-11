@@ -51,6 +51,7 @@ from rlmfile import Native  # noqa: E402
 T = 512
 EVAL_POS = 96
 A_GRID, B_GRID = (0.0, 0.25, 0.5, 0.75), (0.0, 0.5, 1.0)
+ACT_ORDER = os.environ.get("RACELINE_ACT_ORDER", "0") == "1"   # GPTQ column order; measured no gain on Qwen3.8-27B
 NORM_KEYS = ("input_layernorm.weight", "post_attention_layernorm.weight", "q_norm.weight", "k_norm.weight")
 
 
@@ -179,7 +180,7 @@ def quantize_matrix(W, H, book, gptq):
     if book == "mlx-affine4":
         return affine4(W), None
     if gptq and H is not None:
-        return None, quantlib.quantize_gptq(W, H, book, A_GRID, B_GRID)
+        return None, quantlib.quantize_gptq(W, H, book, A_GRID, B_GRID, act_order=ACT_ORDER)
     return None, quantlib.quantize_rtn(W, None if H is None else np.diag(H).copy(), book, A_GRID, B_GRID)
 
 
@@ -187,6 +188,90 @@ def quantize_stack(parts, H, book, gptq):
     """Quantizes the row-stacked matrices jointly: they share the input, hence c."""
     W = np.concatenate([np.array(m.weight.astype(mx.float32)) for _, m in parts], axis=0)
     return quantize_matrix(W, H, book, gptq)
+
+
+# ------------------------------------------------------------- rotation
+#
+# With --rotate the residual stream is rotated by an orthogonal matrix Q
+# (x -> x Q; random signs times blocks of Hadamard matrices, see rotation())
+# before anything is quantized. The model computes exactly the same
+# function: every RMS norm's weight is first folded into the matrices that read
+# its output (the norm itself is then unweighted, and an unweighted RMS norm
+# does not change under rotation), every matrix that reads the residual stream
+# is multiplied by Q from the right, every matrix that writes it by Q^T from
+# the left, and the token table by Q. What changes is the weights: rotated rows
+# are spread far more evenly, which is what a format with one scale per row
+# and per column, and none per group, needs (the idea of QuaRot and QuIP).
+# The rotation is folded into the weights: it costs nothing at run time.
+
+READS_NORM = {"input_layernorm.weight": ("linear_attn.in_proj_qkv.weight", "linear_attn.in_proj_z.weight",
+                                         "linear_attn.in_proj_b.weight", "linear_attn.in_proj_a.weight",
+                                         "self_attn.q_proj.weight", "self_attn.k_proj.weight",
+                                         "self_attn.v_proj.weight"),
+              "post_attention_layernorm.weight": ("mlp.gate_proj.weight", "mlp.up_proj.weight")}
+WRITES_RESIDUAL = ("linear_attn.out_proj.weight", "self_attn.o_proj.weight", "mlp.down_proj.weight")
+
+
+def hadamard_block(n: int) -> int:
+    """Block size of the rotation for width n: the largest power of two dividing n, at most 1024."""
+    b = n & -n
+    return min(b, 1024)
+
+
+def rotation_signs(n: int, seed: int = 0) -> np.ndarray:
+    return np.where(np.random.default_rng(seed).random(n) < 0.5, -1.0, 1.0).astype(np.float32)
+
+
+def rotation(n: int, seed: int = 0, kind: str = "hadamard") -> np.ndarray:
+    """An orthogonal n x n matrix Q for the residual stream (x -> x Q).
+
+    "hadamard": diag(random signs) times a block-diagonal of normalized
+    Sylvester-Hadamard matrices. Applying it, or its inverse, to a vector is a
+    sign flip and a fast Walsh-Hadamard transform per block, which is what the
+    engine does where the rotation cannot be folded into a weight (the
+    draft head's inputs and output). "orthogonal": a uniformly random
+    orthogonal matrix, for comparison.
+    """
+    if kind == "orthogonal":
+        A = np.random.default_rng(seed).standard_normal((n, n))
+        Qm, R = np.linalg.qr(A)
+        return (Qm * np.sign(np.diag(R))[None, :]).astype(np.float32)
+    b = hadamard_block(n)
+    Hb = np.ones((1, 1), dtype=np.float64)
+    while Hb.shape[0] < b:
+        Hb = np.block([[Hb, Hb], [Hb, -Hb]])
+    Hb /= np.sqrt(b)
+    Q = np.zeros((n, n), dtype=np.float64)
+    for i in range(0, n, b):
+        Q[i:i + b, i:i + b] = Hb
+    return (rotation_signs(n, seed)[:, None] * Q).astype(np.float32)
+
+
+def rotate_layer(weights: dict, Q: np.ndarray) -> dict:
+    """A layer's weights for the rotated residual stream (norm weights folded in, then set to one)."""
+    w = dict(weights)
+    for norm, readers in READS_NORM.items():
+        g = w[norm]
+        for name in readers:
+            if name in w:
+                w[name] = (w[name] * g[None, :]) @ Q
+        w[norm] = np.ones_like(g)
+    for name in WRITES_RESIDUAL:
+        if name in w:
+            w[name] = Q.T @ w[name]
+    return w
+
+
+def rotate_rows(M: np.ndarray, Q: np.ndarray, scale=None, chunk: int = 16384) -> np.ndarray:
+    """M <- (M * scale) @ Q, in place and a slice at a time (for the vocabulary-sized matrices)."""
+    Qm = mx.array(Q)
+    sc = None if scale is None else mx.array(scale)[None, :]
+    for i in range(0, M.shape[0], chunk):
+        part = mx.array(M[i:i + chunk])
+        if sc is not None:
+            part = part * sc
+        M[i:i + chunk] = np.array(part @ Qm)
+    return M
 
 
 def emit_layer(out, i, layer, weights, stacks, results, book):
@@ -220,6 +305,12 @@ def log_softmax(z):
     return z - mx.logsumexp(z, axis=-1, keepdims=True)
 
 
+def drift(hq, hr) -> float:
+    """How far the quantized model's hidden states have moved from the float model's on the
+    held-out sequences, relative to their size. Printed per layer: it shows where quality is lost."""
+    return (mx.linalg.norm((hq - hr).reshape(-1)) / mx.linalg.norm(hr.reshape(-1))).item()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("src", help="original (unquantized) model directory")
@@ -233,6 +324,8 @@ def main():
     ap.add_argument("--no-gptq", action="store_true", help="round to nearest (fast, less accurate)")
     ap.add_argument("--layers", type=int, help="stop after this many layers (debugging)")
     ap.add_argument("--resume", action="store_true", help="continue an interrupted conversion of the same checkpoint")
+    ap.add_argument("--rotate", action="store_true",
+                    help="rotate the residual stream before quantizing (see 'rotation' above; same function, better weights)")
     cli = ap.parse_args()
 
     # Freed buffers are kept for reuse up to this much; without a bound the pool
@@ -290,6 +383,15 @@ def main():
         w.f.seek(plan.pos)
         return w
     final_norm = src.get("norm.weight")
+    rot_kind = os.environ.get("RACELINE_ROTATION", "hadamard")
+    if cli.rotate and rot_kind != "hadamard" and write:
+        raise SystemExit("only the Hadamard rotation can be written: the engine undoes it at run time for the draft head")
+    Q = rotation(args.hidden_size, kind=rot_kind) if cli.rotate else None
+    final_norm_orig = final_norm
+    if Q is not None:
+        final_norm = np.ones_like(final_norm)                  # folded into the head below
+    # A tied head stops being the token table once the final norm is folded into it.
+    separate_head = not tied or Q is not None
     cal_np, ev_np = np.asarray(cal), np.asarray(ev)
     ev_ids = mx.array(ev)
 
@@ -311,6 +413,8 @@ def main():
     # the head's input statistics come from one float pass over the
     # calibration set. Untied, it is only ever read row by row: round to nearest.
     emb = src.get("embed_tokens.weight")                       # [V, H] float32
+    if Q is not None:
+        rotate_rows(emb, Q)
     hr = mx.array(emb[ev_np])                                  # evaluation stream, float model
     if plan is not None:                                       # the table is the first thing in the file
         plan.begin("embed")
@@ -323,9 +427,9 @@ def main():
                     / np.linalg.norm(emb[:4096]))
         if not err < 0.5:
             raise SystemExit(f"{cli.dst} does not look like a conversion of {cli.src} (token table off by {err:.2f})")
-        head_wq, head_q, head_float = (None, emb_q, emb) if tied else (None, None, None)
+        head_wq, head_q, head_float = (None, emb_q, emb) if not separate_head else (None, None, None)
         print(f"  resuming: token table read back from {cli.dst}")
-    elif tied:
+    elif not separate_head:
         h = mx.array(emb[cal_np])
         for i in range(n_layers):
             h = run_layer(build_layer(args, i, src.layer_weights(i)), h)
@@ -348,6 +452,8 @@ def main():
     for i in range(n_layers):
         t0 = time.time()
         weights = src.layer_weights(i)
+        if Q is not None:
+            weights = rotate_layer(weights, Q)
         layer = build_layer(args, i, weights)
         hr = run_layer(layer, hr)
         stacks = stacks_of(layer)
@@ -372,7 +478,7 @@ def main():
                 hc = run_layer(layer, hc)
                 hq = run_layer(layer, hq)
                 print(f"  layer {i + 1}/{n_layers} read back from the file (largest deviation from float {worst:.2f}) "
-                      f"{time.time() - t0:.0f}s", flush=True)
+                      f"{time.time() - t0:.0f}s  drift {drift(hq, hr):.4f}", flush=True)
                 del layer
                 mx.clear_cache()
                 continue
@@ -396,18 +502,24 @@ def main():
         mx.eval(layer.parameters())
         hc = run_layer(layer, hc)
         hq = run_layer(layer, hq)
-        print(f"  layer {i + 1}/{n_layers} ({'linear' if layer.is_linear else 'attn'}) {time.time() - t0:.0f}s", flush=True)
+        print(f"  layer {i + 1}/{n_layers} ({'linear' if layer.is_linear else 'attn'}) {time.time() - t0:.0f}s  "
+              f"drift {drift(hq, hr):.4f}", flush=True)
         del layer, moments, results
         mx.clear_cache()
 
     if write and out is None:          # every layer was already in the file
         out = reopen()
-    if not tied:
-        head_float = src.get("lm_head.weight")
+    if separate_head:
+        head_float = src.get("lm_head.weight" if not tied else "embed_tokens.weight")
+        if Q is not None:
+            rotate_rows(head_float, Q, final_norm_orig)
         head_wq, head_q = quantize_matrix(head_float, second_moment(hc), book, gptq)
     if head_q is not None and write:
         out.begin("head")
         out.add_float("final_norm", final_norm)
+        if Q is not None:      # what the draft head needs to undo the rotation (tools/add_mtp.py, the engine)
+            out.add_float("final_norm.unfolded", final_norm_orig)
+            out.add_float("rotation.signs", rotation_signs(args.hidden_size))
         out.add_native("lm_head", [("out", head_q[0].shape[0])], head_q[0], head_q[1], head_q[2], book)
         out.end()
 
@@ -450,7 +562,10 @@ def main():
     cfg["num_hidden_layers"] = n_layers
     out.add_files(cli.src)
     out.finish(dict(format="raceline", version=2, arch="qwen3_5", source=os.path.basename(os.path.normpath(cli.src)),
-                    config=cfg, quant=dict(mode="native", bits=4, book=book, block=BLOCK, gptq=gptq), quality=quality))
+                    config=cfg, quant=dict(mode="native", bits=4, book=book, block=BLOCK, gptq=gptq,
+                              **({"rotation": dict(kind="signed-block-hadamard", block=hadamard_block(args.hidden_size),
+                                                   seed=0)} if Q is not None else {})),
+                    quality=quality))
     print(f"wrote {cli.dst}: {os.path.getsize(cli.dst) / 1e9:.2f} GB in {time.time() - t_start:.0f}s")
     if "mtp.fc.weight" in src.st:
         print(f"this checkpoint has an MTP head: tools/add_mtp.py {cli.src} {cli.dst} adds it (about 1.5x faster decoding)")

@@ -203,13 +203,18 @@ def _block_step(book: str):
 
 
 def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=(0.0,),
-                  damp: float = 0.01, block: int = 128, chunk: int = 32768):
-    """GPTQ on the fixed grid s[n] * c[k] * L: columns are rounded left to
-    right and each rounding error is pushed onto the not-yet-rounded columns,
+                  damp: float = 0.01, block: int = 128, chunk: int = 32768, act_order: bool = True):
+    """GPTQ on the fixed grid s[n] * c[k] * L: columns are rounded one at a
+    time and each rounding error is pushed onto the not-yet-rounded columns,
     using the inverse Hessian of the layer's input (H = E[x x^T]).
 
     Scales come from the round-to-nearest search and stay fixed; only the
-    choice of level per weight changes. Returns (codes, s, c).
+    choice of level per weight changes. With `act_order` the columns are
+    rounded in order of decreasing input energy, so the inputs that matter
+    most are rounded while the most columns are left to absorb their error.
+    In a format with per-group scales that order costs a lookup table at run
+    time; here the scales do not depend on the order, so it is free.
+    Returns (codes, s, c).
     """
     N, K = W.shape
     h, c = search_scales(W, np.diag(H).astype(np.float32).copy(), book, alphas, betas)
@@ -219,13 +224,18 @@ def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=
     Hc = (H.astype(np.float32) * c[None, :]) * c[:, None]
     dead = np.diag(Hc) <= 0                       # inputs that never fire: their weights do not matter
     Hc[dead, dead] = 1.0
+    perm = np.argsort(-np.diag(Hc), kind="stable") if act_order else np.arange(K)
+    if act_order:
+        Hc = Hc[np.ix_(perm, perm)]
     U = mx.array(gptq_factor(Hc, damp))
+    del Hc
     step = _block_step(book)
-    cm, live = mx.array(c), mx.array((~dead).astype(np.float32))
+    cm, live = mx.array(c[perm]), mx.array((~dead[perm]).astype(np.float32))
 
     codes = np.empty((N, K), dtype=np.uint8)
     for r0 in range(0, N, chunk):
-        rest = mx.array(W[r0:r0 + chunk]) / cm * live     # columns not yet rounded
+        rows = W[r0:r0 + chunk]
+        rest = mx.array(rows[:, perm] if act_order else rows) / cm * live     # columns not yet rounded
         sr = mx.array(s[r0:r0 + chunk, None])
         for i1 in range(0, K, block):
             i2 = min(i1 + block, K)
@@ -235,5 +245,5 @@ def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=
                 mx.eval(lev, rest)
             else:
                 mx.eval(lev)
-            codes[r0:r0 + chunk, i1:i2] = encode(np.array(lev), book)
+            codes[r0:r0 + chunk, perm[i1:i2]] = encode(np.array(lev), book)
     return codes, s, c

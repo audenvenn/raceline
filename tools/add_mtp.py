@@ -134,7 +134,7 @@ def main():
     seqs = token_sequences(tok, cal_files, cli.calib_seqs) + token_sequences(tok, ev_files, cli.eval_seqs)
     n_cal = min(cli.calib_seqs, len(seqs) - 1)
     ids = np.asarray(seqs)
-    # A file converted with --rotate has a rotated residual stream (x Q) and its
+    # A file converted with rotation (the default) has a rotated residual stream (x Q) and its
     # final norm folded into the output head. The head is calibrated in the
     # original coordinates, so the hidden states and token rows are rotated back.
     rot = nat.hdr["quant"].get("rotation")

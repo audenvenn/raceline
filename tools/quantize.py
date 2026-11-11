@@ -192,7 +192,7 @@ def quantize_stack(parts, H, book, gptq):
 
 # ------------------------------------------------------------- rotation
 #
-# With --rotate the residual stream is rotated by an orthogonal matrix Q
+# Unless --no-rotate is given, the residual stream is rotated by an orthogonal matrix Q
 # (x -> x Q; random signs times blocks of Hadamard matrices, see rotation())
 # before anything is quantized. The model computes exactly the same
 # function: every RMS norm's weight is first folded into the matrices that read
@@ -324,8 +324,9 @@ def main():
     ap.add_argument("--no-gptq", action="store_true", help="round to nearest (fast, less accurate)")
     ap.add_argument("--layers", type=int, help="stop after this many layers (debugging)")
     ap.add_argument("--resume", action="store_true", help="continue an interrupted conversion of the same checkpoint")
-    ap.add_argument("--rotate", action="store_true",
-                    help="rotate the residual stream before quantizing (see 'rotation' above; same function, better weights)")
+    ap.add_argument("--no-rotate", dest="rotate", action="store_false",
+                    help="do not rotate the residual stream (see 'rotation' above; rotating is the default: same "
+                         "function, better weights)")
     cli = ap.parse_args()
 
     # Freed buffers are kept for reuse up to this much; without a bound the pool

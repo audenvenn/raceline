@@ -35,7 +35,7 @@ PARTS = {  # file tensor -> {part: module path below the layer}
 
 def load_decoded(float_model, rlm, check=False):
     """The original model in MLX with every tensor replaced by what the file holds: quantized
-    matrices decoded to float, norm weights as stored. For a file converted with --rotate that
+    matrices decoded to float, norm weights as stored. For a file converted with rotation that
     is the rotated model, which computes the same function in other coordinates."""
     import mlx.nn as nn
 

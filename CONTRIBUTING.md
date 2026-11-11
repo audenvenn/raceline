@@ -66,9 +66,14 @@ which of them you ran and on what machine.
   in `pyproject.toml` and `raceline/__init__.py`.
 - A release is a tag `vX.Y.Z` on `main` with the matching `CHANGELOG.md`
   section as its notes.
-- Converted models live in the `models-v1` release, separate from code
-  versions. `tools/release_model.py` cuts a `.rlm` file into parts of under
-  2 GB and writes the manifest that `raceline pull` reads.
+- Converted models are published separately from code versions, in a GitHub
+  release (`models-v2` holds the files raceline 0.2.0 reads; 0.1.0 reads
+  `models-v1`) and on Hugging Face (`audenvenn/raceline-<model>`).
+  `tools/release_model.py --card <base model>` cuts a `.rlm` file into parts
+  of under 2 GB and writes the manifest that `raceline pull` reads and the
+  model card; `tools/publish_model.py --github --huggingface` uploads them.
+- A model file that changes is a new models release, never a replacement of
+  the assets of an existing one: older versions of raceline keep working.
 
 ## Reporting numbers from your machine
 

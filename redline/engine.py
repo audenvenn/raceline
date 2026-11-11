@@ -21,6 +21,7 @@ import json
 import os
 import shutil
 import struct
+import time
 from typing import Optional
 
 import numpy as np
@@ -131,16 +132,21 @@ class RedlineBackend(Backend):
         self.mtp = bool(self._lib.rl_has_mtp(self._e)) and mtp
         if self._lib.rl_has_mtp(self._e):
             self._lib.rl_set_mtp(self._e, int(self.mtp))
-        # Drafting stops early once the chance that the drafts so far all hold
-        # (the product of their probabilities under the head) falls below this:
-        # a draft costs about a twentieth to a tenth of a pass over the weights.
         # A draft only has to find likely tokens, and low token ids are the
         # frequent ones: its pass over the output matrix covers ids below 64k
         # (98% of English and code), 128k (99% of Chinese too) or everything,
         # whichever the recent context calls for.
         self.draft_vocab = int(os.environ.get("REDLINE_DRAFT_VOCAB", "-1"))     # -1: choose per generation
+        # Drafting stops early once the chance that the drafts so far all hold
+        # (the product of their probabilities under the head) falls below a
+        # threshold. Another draft pays off when that chance exceeds what the
+        # draft costs relative to a token, so the threshold follows the measured
+        # times: three times (time per draft / time per token), which allows
+        # for the head being overconfident. REDLINE_MIN_CONFIDENCE fixes it.
         self.max_drafts = min(int(os.environ.get("REDLINE_DRAFTS", "6")), self._lib.rl_max_drafts(self._e))
-        self.min_confidence = float(os.environ.get("REDLINE_MIN_CONFIDENCE", "0.3"))
+        fixed = os.environ.get("REDLINE_MIN_CONFIDENCE")
+        self.min_confidence = float(fixed) if fixed else None
+        self._t_draft = self._t_token = None      # running averages, seconds
         self._stride = self._lib.rl_logits_stride(self._e)
         self.gpu_seconds = 0.0
         self.counters = dict(passes=0, drafts=0, accepted=0)
@@ -212,6 +218,10 @@ class RedlineBackend(Backend):
 
                 # The head's guesses for the tokens after `token`, each drawn with
                 # the random numbers the model's own choice at that position will use.
+                t_cycle = time.perf_counter()
+                threshold = self.min_confidence
+                if threshold is None:
+                    threshold = 0.3 if self._t_token is None else min(0.8, max(0.1, 3.0 * self._t_draft / self._t_token))
                 row, seen, confidence = [token], recent + [token], 1.0
                 guess = np.ctypeslib.as_array(lib.rl_draft_logits(e, token), shape=(D,))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
@@ -220,10 +230,11 @@ class RedlineBackend(Backend):
                     confidence *= p
                     row.append(draft)
                     seen.append(draft)
-                    if len(row) > k or draft in self.eos_ids or confidence < self.min_confidence:
+                    if len(row) > k or draft in self.eos_ids or confidence < threshold:
                         break
                     guess = np.ctypeslib.as_array(lib.rl_draft_more(e, draft), shape=(D,))
                     self.gpu_seconds += lib.rl_last_gpu_seconds(e)
+                t_drafts = time.perf_counter() - t_cycle
 
                 n = len(row)
                 rows = np.ctypeslib.as_array(lib.rl_forward_draft(e, (ctypes.c_int32 * n)(*row), n),
@@ -251,6 +262,11 @@ class RedlineBackend(Backend):
                     nxt = _sample(rows[accepted, :V], sampling, recent, seed, pos)
                 self._settle()
                 token = nxt
+                # What a draft and a token cost here, for the next cycles' threshold
+                # (time the consumer spends between yields is counted too; it is small).
+                per_draft, per_token = t_drafts / (n - 1), (time.perf_counter() - t_cycle) / (accepted + 1)
+                self._t_draft = per_draft if self._t_draft is None else 0.9 * self._t_draft + 0.1 * per_draft
+                self._t_token = per_token if self._t_token is None else 0.9 * self._t_token + 0.1 * per_token
         finally:
             self._settle()
 

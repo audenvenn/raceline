@@ -137,6 +137,113 @@ kernel void rms_norm2_rows(device const float *x [[buffer(0)]],
   for (int i = int(lane); i < p.D; i += 32) o[i] = half(row[i] * w1[i] * inv1 * inv2 * w2[i]);
 }
 
+// ----------------------------------------------------------------- rotation
+// A model converted with --rotate (tools/quantize.py) has its residual stream
+// rotated, x -> x Q with Q = diag(s) * blockdiag(H, ..., H): random signs s
+// and normalized Sylvester-Hadamard blocks of ROT_BLOCK values. The rotation
+// is folded into every weight of the model itself; only the draft head needs
+// it at run time, where a norm sits between the residual stream and a weight.
+// Applying Q or its inverse is a sign flip and a fast Walsh-Hadamard transform
+// per block. One threadgroup holds one row of ROT_D values.
+#if defined(ROT_D) && defined(ROT_BLOCK)
+#define ROT_THREADS 256
+
+// In-place, unnormalized Walsh-Hadamard transform of every block of x.
+static void fwht_blocks(threadgroup float *x, uint tid)
+{
+  for (int len = 1; len < ROT_BLOCK; len <<= 1) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (int q = int(tid); q < ROT_D / 2; q += ROT_THREADS) {
+      const int blk = q / (ROT_BLOCK / 2), j = q % (ROT_BLOCK / 2);
+      const int i = blk * ROT_BLOCK + (j / len) * 2 * len + (j % len);
+      const float a = x[i], b = x[i + len];
+      x[i] = a + b;
+      x[i + len] = a - b;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// Sum over the threadgroup, in a fixed order (the same bits every time).
+static float tg_total(float v, threadgroup float *part, uint sg, uint lane)
+{
+  v = simd_sum(v);
+  if (lane == 0) part[sg] = v;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float t = 0.0f;
+  for (int i = 0; i < ROT_THREADS / 32; ++i) t += part[i];
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  return t;
+}
+
+// The hidden-state half of the draft head's input, from rows h' of the
+// rotated residual stream: undo the rotation, then the model's final norm and
+// the head's own input norm (what rms_norm2_rows does for an unrotated model):
+//   h = FWHT(h') * s;   z = wf * h / rms(h);   out = z * w2 / rms(z)
+// w1 = wf * s / sqrt(ROT_BLOCK) carries the signs and the normalization.
+kernel void mtp_hidden_rot(device const float *x [[buffer(0)]],
+                           device const float *w1 [[buffer(1)]],
+                           device const float *w2 [[buffer(2)]],
+                           device half *out [[buffer(3)]],
+                           constant RotNormParams &p [[buffer(4)]],
+                           uint3 tg [[threadgroup_position_in_grid]],
+                           uint tid [[thread_index_in_threadgroup]],
+                           uint sg [[simdgroup_index_in_threadgroup]],
+                           uint lane [[thread_index_in_simdgroup]])
+{
+  threadgroup float v[ROT_D];
+  threadgroup float part[ROT_THREADS / 32];
+  const device float *row = x + size_t(tg.y) * p.in_stride;
+  float ss = 0.0f;
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) {
+    const float a = row[k];
+    v[k] = a;
+    ss += a * a;
+  }
+  const float inv1 = rsqrt(tg_total(ss, part, sg, lane) / float(ROT_D) + p.eps);
+  fwht_blocks(v, tid);
+  float zz = 0.0f;
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) {
+    const float z = v[k] * w1[k] * inv1;
+    v[k] = z;
+    zz += z * z;
+  }
+  const float inv2 = rsqrt(tg_total(zz, part, sg, lane) / float(ROT_D) + p.eps);
+  device half *o = out + size_t(tg.y) * p.out_stride;
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) o[k] = half(v[k] * w2[k] * inv2);
+}
+
+// The draft head's output on its way into the model's output head, which
+// expects the rotated stream with the final norm folded in:
+//   out = FWHT((u / rms(u)) * g) * c,   g = (wm / wf) * s / sqrt(ROT_BLOCK)
+// (wm: the head's own final norm, wf: the model's, c: the output head's
+// column scales).
+kernel void mtp_out_rot(device const float *x [[buffer(0)]],
+                        device const float *g [[buffer(1)]],
+                        device const float *c [[buffer(2)]],
+                        device half *out [[buffer(3)]],
+                        constant RotNormParams &p [[buffer(4)]],
+                        uint3 tg [[threadgroup_position_in_grid]],
+                        uint tid [[thread_index_in_threadgroup]],
+                        uint sg [[simdgroup_index_in_threadgroup]],
+                        uint lane [[thread_index_in_simdgroup]])
+{
+  threadgroup float v[ROT_D];
+  threadgroup float part[ROT_THREADS / 32];
+  const device float *row = x + size_t(tg.y) * p.in_stride;
+  float ss = 0.0f;
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) {
+    const float a = row[k];
+    v[k] = a * g[k];
+    ss += a * a;
+  }
+  const float inv = rsqrt(tg_total(ss, part, sg, lane) / float(ROT_D) + p.eps);
+  fwht_blocks(v, tid);
+  device half *o = out + size_t(tg.y) * p.out_stride;
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) o[k] = half(v[k] * inv * c[k]);
+}
+#endif
+
 // dst[t][i] = src[t][i] for T rows of D floats.
 kernel void copy_rows(device const float *src [[buffer(0)]],
                       device float *dst [[buffer(1)]],

@@ -1,0 +1,29 @@
+[
+ {
+  "model": "models/Qwen3.5-4B-MLX-4bit",
+  "backend": "mlx",
+  "mtp": false,
+  "sampling": "greedy",
+  "tokens": 770,
+  "decode_tps": 54.4696666309714,
+  "drafts_accepted": null
+ },
+ {
+  "model": "models/Qwen3.5-4B-MLX-4bit",
+  "backend": "mlx",
+  "mtp": false,
+  "sampling": "temperature 0.7, top_p 0.8, top_k 20",
+  "tokens": 756,
+  "decode_tps": 52.828211774462474,
+  "drafts_accepted": null
+ },
+ {
+  "model": "models/Qwen3.5-4B-MLX-4bit",
+  "backend": "mlx",
+  "mtp": false,
+  "sampling": "temperature 1.0, top_p 0.95, top_k 20",
+  "tokens": 791,
+  "decode_tps": 52.4485145875522,
+  "drafts_accepted": null
+ }
+]

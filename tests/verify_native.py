@@ -34,7 +34,11 @@ PARTS = {  # file tensor -> {part: module path below the layer}
 
 
 def load_decoded(float_model, rlm, check=False):
-    """The original model in MLX with every quantized matrix replaced by what the file holds."""
+    """The original model in MLX with every tensor replaced by what the file holds: quantized
+    matrices decoded to float, norm weights as stored. For a file converted with rotation that
+    is the rotated model, which computes the same function in other coordinates."""
+    import mlx.nn as nn
+
     nat = Native(rlm)
     hdr = nat.hdr
     model, _ = load(float_model)
@@ -52,12 +56,21 @@ def load_decoded(float_model, rlm, check=False):
                     mod = getattr(mod, attr)
                 p = t["parts"][part]
                 mod.weight = mx.array(W[p["offset"]:p["offset"] + p["n"]].astype(np.float16))
+        layer.input_layernorm.weight = mx.array(nat.floats(f"layers.{i}.in_norm"))
+        layer.post_attention_layernorm.weight = mx.array(nat.floats(f"layers.{i}.post_norm"))
+    tm.norm.weight = mx.array(nat.floats("final_norm"))
     emb = nat.matrix("embed")
     tm.embed_tokens.weight = mx.array(emb.astype(np.float16))
+    head = nat.matrix("lm_head")
     if not lm.args.tie_word_embeddings:
-        lm.lm_head.weight = mx.array(nat.matrix("lm_head").astype(np.float16))
+        lm.lm_head.weight = mx.array(head.astype(np.float16))
+    elif hdr["quant"].get("rotation"):
+        # Folding the final norm into the head unties it from the token table.
+        lm.args.tie_word_embeddings = False
+        lm.lm_head = nn.Linear(head.shape[1], head.shape[0], bias=False)
+        lm.lm_head.weight = mx.array(head.astype(np.float16))
     elif check:  # one matrix in two layouts: they must decode to the same values
-        print("tied head and lookup table identical:", bool(np.array_equal(nat.matrix("lm_head"), emb)))
+        print("tied head and lookup table identical:", bool(np.array_equal(head, emb)))
     return model
 
 

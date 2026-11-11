@@ -186,6 +186,11 @@ class Engine {
   std::vector<int32_t> pend_tok_;
   id<MTLBuffer> mtp_h_ = nil, mtp_out_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
   id<MTLBuffer> mtp_norm_e_ = nil, mtp_norm_h_ = nil, mtp_norm_out_ = nil;
+  // Rotated models (Config::rot_block): weights of the draft head's
+  // unrotate-and-normalize step and of its output rotation (kernels/ops.metal).
+  id<MTLBuffer> mtp_rot_w1_ = nil, mtp_rot_g_ = nil;
+  void encode_rot(const char *kernel, id<MTLBuffer> src, size_t src_offset, id<MTLBuffer> w1, id<MTLBuffer> w2,
+                  size_t w2_offset, int rows, size_t out_offset);
 };
 
 }  // namespace rl

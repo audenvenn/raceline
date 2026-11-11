@@ -1,0 +1,30 @@
+name: Wheel (macOS)
+
+# Builds the engine library and the wheel on a hosted macOS arm64 runner. Run by hand:
+# those runners were not available when this was added (issue #3), and a job that waits
+# for one should not hold up pull requests.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Show the toolchain
+        run: sw_vers && xcodebuild -version && xcrun --show-sdk-version
+      - name: Build the wheel (compiles libraceline.dylib)
+        run: pip wheel . --no-deps -w dist
+      - name: Check its contents
+        run: python -c "import glob, zipfile; n = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); assert 'raceline/libraceline.dylib' in n and 'raceline/kernels/ops.metal' in n, n; print(glob.glob('dist/*.whl'))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel
+          path: dist/*.whl

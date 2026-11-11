@@ -146,36 +146,42 @@ numbers to check both.
 ## Quick start
 
 Requirements: an Apple Silicon Mac whose GPU has neural accelerators (M5 / M6
-families), a recent macOS with Metal 4 (developed on 27.2), Xcode command
-line tools, CMake, Ninja and Python 3.10 or later. It has been run on one
-machine, the M6 Mac mini above.
+families), macOS 27 or later, the Xcode command line tools and Python 3.10 or
+later. It has been run on one machine, the M6 Mac mini above.
+
+```sh
+python3 -m venv ~/.raceline && source ~/.raceline/bin/activate
+pip install git+https://github.com/audenvenn/raceline    # compiles the engine, about a minute
+
+raceline pull  qwen3.5-4b     # 2.5 GB, converted and ready to run
+raceline chat  qwen3.5-4b     # terminal agent in the current directory
+raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
+raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
+
+raceline pull  qwen3.8-27b    # 13.8 GB; wants a Mac with 24 GB or more
+```
+
+`raceline pull` downloads from this repository's releases (`--source
+huggingface` takes the same files from
+[Hugging Face](https://huggingface.co/audenvenn)), verifies checksums and
+continues an interrupted download.
+
+To work on raceline itself, or to convert a checkpoint yourself:
 
 ```sh
 git clone https://github.com/audenvenn/raceline && cd raceline
 cmake -S . -B build/cmake -G Ninja && cmake --build build/cmake
 python3 -m venv .venv && .venv/bin/pip install -e .
 
-.venv/bin/raceline pull  qwen3.5-4b     # 2.5 GB, converted and ready to run
-.venv/bin/raceline chat  qwen3.5-4b     # terminal agent in the current directory
-.venv/bin/raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
-.venv/bin/raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
-
-.venv/bin/raceline pull  qwen3.8-27b    # 13.8 GB; wants a Mac with 24 GB or more
-```
-
-`raceline pull` downloads from this repository's releases, verifies checksums
-and continues an interrupted download. To convert a checkpoint yourself:
-
-```sh
 .venv/bin/python tools/fetch_model.py Qwen/Qwen3.5-4B                         # 9 GB, into models/
-.venv/bin/python tools/quantize.py models/Qwen3.5-4B models/qwen3.5-4b.rlm    # tens of minutes
+.venv/bin/python tools/quantize.py models/Qwen3.5-4B models/qwen3.5-4b.rlm    # about ten minutes
 .venv/bin/python tools/add_mtp.py  models/Qwen3.5-4B models/qwen3.5-4b.rlm    # about a minute
 .venv/bin/raceline chat models/qwen3.5-4b.rlm
 ```
 
 A checkpoint is processed a layer at a time, so it never has to fit in
-memory (Qwen3.8-27B is 55 GB and takes about two hours on the M6), and an
-interrupted conversion continues with `--resume`.
+memory (Qwen3.8-27B is 55 GB and takes about an hour and a half on the M6),
+and an interrupted conversion continues with `--resume`.
 
 Any MLX model directory also runs, through the MLX backend and without the
 engine's speedups: `raceline chat models/Qwen3.5-4B-MLX-4bit`.
@@ -215,7 +221,8 @@ Environment variables, all optional:
 | `RACELINE_DRAFTS` | Most drafts per pass (default 6, at most 7). |
 | `RACELINE_MIN_CONFIDENCE` | Fixed threshold below which drafting stops, instead of the measured one. |
 | `RACELINE_DRAFT_VOCAB` | Token-id limit of a draft's vocabulary pass (`0` for the whole vocabulary; chosen from the context by default). |
-| `RACELINE_RELEASES` | Base URL `raceline pull` downloads from. |
+| `RACELINE_SOURCE` | Where `raceline pull` downloads from by default: `github` or `huggingface`. |
+| `RACELINE_RELEASES` | A base URL `raceline pull` downloads from instead. |
 | `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 
@@ -270,6 +277,29 @@ inner product itself is a single hardware matmul over raw 4-bit codes. Output
 rows are stored in blocks of 256 as `[input][256 codes]`, which makes each
 threadgroup read one contiguous stream.
 
+**Rotation.** One scale per row and one per column, and none per group, is
+what lets the accelerators read raw codes, but it handles uneven weights
+badly: on Qwen3.8-27B the hidden states of a model converted that way drifted
+from the float model's twice as fast per layer as with MLX's 4-bit format,
+which has a scale and an offset for every 64 weights. So before quantizing,
+the conversion rotates the residual stream by an orthogonal matrix `Q` (random
+signs times Hadamard blocks): every norm's weight is folded into the matrices
+that read it, those are multiplied by `Q`, the matrices that write the stream
+by `Q^T`, the token table and output head accordingly. The model computes
+the same function in other coordinates, and its weights become far more even
+(the idea of QuaRot and QuIP). The rotation lives in the weights and costs
+nothing at run time, except at the draft head, where a norm sits between the
+stream and a weight: there the engine undoes it with a sign flip and a fast
+Walsh-Hadamard transform, reading no weights. Relative drift of the hidden
+states over the first layers of Qwen3.8-27B (`tools/quantize.py` prints it
+for every layer):
+
+| Layer | FP4, no rotation | MLX affine 4-bit (4.5 bits) | FP4, rotated (4.0 bits) |
+|---|---|---|---|
+| 1 | 0.071 | 0.035 | 0.025 |
+| 3 | 0.084 | 0.048 | 0.046 |
+| 6 | 0.085 | 0.046 | 0.045 |
+
 **The MTP head.** `tools/mtp_study.py` measured what it is worth before any
 engine work. Its top choice is the model's own next-next token 81% of the
 time. It needs its attention history (56% without). Only its input projection
@@ -317,6 +347,8 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 | `raceline/` | The runtime: backends (engine, MLX), session reuse and snapshots, chat rendering and tool-call parsing, OpenAI-compatible server, terminal agent, probe. |
 | `src/`, `kernels/` | The engine: Metal runtime, model file reader, forward pass, speculative decoding. Kernels are compiled at run time. C API in `src/capi.h`. |
 | `tools/quantize.py`, `tools/add_mtp.py` | Original checkpoint to native `.rlm`; adds the MTP head. `tools/convert.py` repacks an MLX 4-bit model instead (MLX's exact values, no drafts). |
+| `tools/release_model.py`, `tools/publish_model.py` | Cut a model file into release parts with a model card; upload them to the GitHub release and Hugging Face. |
+| `setup.py` | Builds the engine into the Python package on `pip install`. |
 | `tools/mtp_study.py`, `tools/quant_study.py` | The measurements behind the design choices above. |
 | `tests/`, `bench/` | Verification against MLX and CPU references; benchmarks and hardware probes. |
 

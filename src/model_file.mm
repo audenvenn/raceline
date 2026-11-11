@@ -62,6 +62,11 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   cfg_.native = [qc[@"mode"] isEqual:@"native"];
   if (cfg_.native) cfg_.book = [qc[@"book"] UTF8String];
   else cfg_.group = geti(qc, @"group");
+  NSDictionary *rot = qc[@"rotation"];
+  if ([rot isKindOfClass:[NSDictionary class]]) {
+    if (![rot[@"kind"] isEqual:@"signed-block-hadamard"]) fatal("unsupported rotation in the model file");
+    cfg_.rot_block = geti(rot, @"block");
+  }
 
   // One no-copy Metal buffer per page-aligned section.
   NSArray *sections = h[@"sections"];

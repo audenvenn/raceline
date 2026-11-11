@@ -26,6 +26,7 @@ from mlx_lm.models.base import create_attention_mask
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quantize import rotation  # noqa: E402
 from rlmfile import Native  # noqa: E402
 from verify_native import load_decoded  # noqa: E402
 
@@ -71,9 +72,23 @@ def main():
         "mlp.up_proj.weight": nat.part("mtp.mlp.gate_up", "up"),
         "mlp.down_proj.weight": nat.part("mtp.mlp.down", "out"),
     }.items()])
-    x = mx.concatenate([norm(e[:, 1:], "mtp.norm_e"), norm(hn, "mtp.norm_h")], axis=-1) @ mx.array(nat.matrix("mtp.fc")).T
-    out = norm(head_layer(x, mask=create_attention_mask(x, None), cache=None), "mtp.norm")
-    head = (tm.embed_tokens.weight if cfg.tie_word_embeddings else lm.lm_head.weight).astype(mx.float32)
+    rot = nat.hdr["quant"].get("rotation")
+    if rot:
+        # The residual stream is rotated (x Q) and the final norm is folded into the
+        # output head: undo the rotation where the head reads the hidden state, and
+        # rotate its output back into the stream the output head expects.
+        Q = mx.array(rotation(cfg.hidden_size, seed=rot["seed"]))
+        wf = nat.floats("final_norm.unfolded")
+        hidden_in = mx.fast.rms_norm(mx.fast.rms_norm(h, None, eps) @ Q.T, mx.array(wf), eps)
+    else:
+        hidden_in = hn
+    x = mx.concatenate([norm(e[:, 1:], "mtp.norm_e"), norm(hidden_in, "mtp.norm_h")], axis=-1) @ mx.array(nat.matrix("mtp.fc")).T
+    u = head_layer(x, mask=create_attention_mask(x, None), cache=None)
+    if rot:
+        out = mx.fast.rms_norm(u, mx.array(nat.floats("mtp.norm") / wf), eps) @ Q
+    else:
+        out = norm(u, "mtp.norm")
+    head = (tm.embed_tokens.weight if lm.args.tie_word_embeddings else lm.lm_head.weight).astype(mx.float32)
     ref = np.array(out[0, -1] @ head.T)
     del model
     mx.clear_cache()

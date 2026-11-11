@@ -107,6 +107,20 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       mtp_norm_e_ = fold(model_->f("mtp.norm_e"), model_->q("mtp.fc"), 0);
       mtp_norm_h_ = fold(model_->f("mtp.norm_h"), model_->q("mtp.fc"), c.hidden);
       mtp_norm_out_ = fold(model_->f("mtp.norm"), model_->q("lm_head"));
+      if (c.rot_block) {
+        if ((c.rot_block & (c.rot_block - 1)) || c.hidden % c.rot_block || c.hidden > 8192)
+          fatal("rotation block %d does not fit the hidden size %d", c.rot_block, c.hidden);
+        const float *sg = model_->f("rotation.signs").data, *wf = model_->f("final_norm.unfolded").data;
+        const float *wm = model_->f("mtp.norm").data;
+        const float norm = 1.0f / sqrtf((float)c.rot_block);
+        mtp_rot_w1_ = mt_.alloc((size_t)c.hidden * sizeof(float));
+        mtp_rot_g_ = mt_.alloc((size_t)c.hidden * sizeof(float));
+        float *w1 = (float *)mtp_rot_w1_.contents, *g = (float *)mtp_rot_g_.contents;
+        for (int k = 0; k < c.hidden; k++) {
+          w1[k] = wf[k] * sg[k] * norm;
+          g[k] = wm[k] / wf[k] * sg[k] * norm;
+        }
+      }
       mtp_h_ = mt_.alloc((size_t)kMtpRows * c.hidden * sizeof(float));
       mtp_out_ = mt_.alloc((size_t)c.hidden * sizeof(float));
       mtp_tok_ = mt_.alloc(R * sizeof(int32_t));
@@ -642,6 +656,20 @@ void Engine::encode_copy_rows(id<MTLBuffer> dst, int dst_row, int src_row, int r
   mark("copy_rows");
 }
 
+void Engine::encode_rot(const char *kernel, id<MTLBuffer> src, size_t src_offset, id<MTLBuffer> w1,
+                        id<MTLBuffer> w2, size_t w2_offset, int rows, size_t out_offset) {
+  const Config &c = config();
+  const Macros mac = {{"ROT_D", std::to_string(c.hidden)}, {"ROT_BLOCK", std::to_string(c.rot_block)}};
+  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", kernel, mac)];
+  [enc_ setBuffer:src offset:src_offset atIndex:0];
+  [enc_ setBuffer:w1 offset:0 atIndex:1];
+  [enc_ setBuffer:w2 offset:w2_offset atIndex:2];
+  [enc_ setBuffer:xn_ offset:out_offset atIndex:3];
+  set_params(enc_, RotNormParams{rows, c.hidden, c.hidden, x_stride_, c.norm_eps}, 4);
+  run_groups(1, rows, 256);
+  mark("mtp_rot");
+}
+
 void Engine::encode_mtp_hidden(id<MTLBuffer> src, const FTensor &w1, int rows, int first_row) {
   if (rows <= 0) return;
   const Config &c = config();
@@ -666,7 +694,12 @@ void Engine::encode_mtp_layer(int M, int pos0, bool logits) {
   encode_mlp(c.layers, M);
   if (logits) {
     encode_copy_rows(mtp_out_, 0, M - 1, 1);  // what draft_more continues from
-    encode_rms(h_, (size_t)(M - 1) * H * sizeof(float), H, mtp_norm_out_, 0, 1, 0);
+    if (c.rot_block) {  // into the rotated stream the output head expects
+      const QTensor &hd = model_->q("lm_head");
+      encode_rot("mtp_out_rot", h_, (size_t)(M - 1) * H * sizeof(float), mtp_rot_g_, hd.buf, hd.c, 1, 0);
+    } else {
+      encode_rms(h_, (size_t)(M - 1) * H * sizeof(float), H, mtp_norm_out_, 0, 1, 0);
+    }
     QTensor head = model_->q("lm_head");
     const int stride = head.n_pad;
     head.n_pad = draft_vocab();
@@ -682,9 +715,18 @@ int Engine::draft_vocab() const {
 }
 
 void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {
-  const FTensor &fn = model_->f("final_norm");
-  encode_mtp_hidden(mtp_h_, fn, n_carry, 0);
-  encode_mtp_hidden(h_, fn, n_chunk, n_carry);
+  const Config &c = config();
+  if (c.rot_block) {  // the model's hidden states are rotated: undo that before the head's norms
+    const size_t half = (size_t)c.hidden * sizeof(_Float16);
+    if (n_carry > 0) encode_rot("mtp_hidden_rot", mtp_h_, 0, mtp_rot_w1_, mtp_norm_h_, 0, n_carry, half);
+    if (n_chunk > 0)
+      encode_rot("mtp_hidden_rot", h_, 0, mtp_rot_w1_, mtp_norm_h_, 0, n_chunk,
+                 (size_t)n_carry * x_stride_ * sizeof(_Float16) + half);
+  } else {
+    const FTensor &fn = model_->f("final_norm");
+    encode_mtp_hidden(mtp_h_, fn, n_carry, 0);
+    encode_mtp_hidden(h_, fn, n_chunk, n_carry);
+  }
   if (keep_row >= 0) encode_copy_rows(mtp_h_, 0, keep_row, 1);
   if (n_carry + n_chunk > 0) encode_mtp_layer(n_carry + n_chunk, mtp_pos_, logits);
 }

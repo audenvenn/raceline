@@ -21,6 +21,7 @@ struct Config {
   int group = 64, block = 256;
   bool native = false;     // scale-free 4-bit weights (see kernels/linear.metal) instead of MLX's affine groups
   std::string book;        // native codebook: "fp4", "int15" or "int16"
+  int rot_block = 0;       // residual stream rotated by signed Hadamard blocks of this size (0: not rotated)
 
   bool is_linear_layer(int i) const { return (i + 1) % full_attn_interval != 0; }
   int lin_key_dim() const { return lin_k_heads * lin_k_dim; }

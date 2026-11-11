@@ -20,6 +20,8 @@ struct DeltaParams { int T, Hk, Dk, Hv, Dv, qk_stride, y_stride, v_off, bg_strid
 struct OutNormParams { int T, Hv, Dv, yo_stride, proj_stride, off_z, out_stride; float eps; };
 struct SwigluParams { int T, I, in_stride, out_stride; };
 struct CopyParams { int T, D; };
+// Rows of a rotated residual stream (see kernels/ops.metal, "rotation").
+struct RotNormParams { int T, D, in_stride, out_stride; float eps; };
 struct AttnParams {
   int T, H, KVH, D;          // rows, query heads, key/value heads, head dim
   int proj_stride, off_k, off_v;

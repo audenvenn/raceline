@@ -37,7 +37,7 @@ import quantlib  # noqa: E402
 from convert import Writer  # noqa: E402
 from rlmfile import Native  # noqa: E402
 from quantize import (T, Source, build_layer, default_texts, input_moments, quantize_stack,  # noqa: E402
-                      stacks_of, token_sequences)
+                      rotation, rotation_signs, stacks_of, token_sequences)
 
 NORM_E, NORM_H, NORM_OUT = "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight", "mtp.norm.weight"
 
@@ -75,11 +75,12 @@ def fc_inputs(emb_next, hn, norms, eps):
                            mx.fast.rms_norm(hn, mx.array(norms[NORM_H]), eps)], axis=-1)
 
 
-def head_output(fc_w, layer, norms, x, eps, batch=8):
+def head_output(fc_w, layer, x, batch=8):
+    """The head's residual stream after its decoder layer (before its final norm)."""
     outs = []
     for i in range(0, x.shape[0], batch):
         h = x[i:i + batch] @ mx.array(fc_w).T
-        y = mx.fast.rms_norm(layer(h, mask=create_attention_mask(h, None), cache=None), mx.array(norms[NORM_OUT]), eps)
+        y = layer(h, mask=create_attention_mask(h, None), cache=None)
         mx.eval(y)
         outs.append(y)
     return mx.concatenate(outs, axis=0)
@@ -133,22 +134,44 @@ def main():
     seqs = token_sequences(tok, cal_files, cli.calib_seqs) + token_sequences(tok, ev_files, cli.eval_seqs)
     n_cal = min(cli.calib_seqs, len(seqs) - 1)
     ids = np.asarray(seqs)
-    hid = engine_hiddens(cli.rlm, seqs, hidden)
-    hn = mx.fast.rms_norm(mx.array(hid), mx.array(nat.floats("final_norm")), eps)
+    # A file converted with --rotate has a rotated residual stream (x Q) and its
+    # final norm folded into the output head. The head is calibrated in the
+    # original coordinates, so the hidden states and token rows are rotated back.
+    rot = nat.hdr["quant"].get("rotation")
+    if rot:
+        Q = rotation(hidden, seed=rot["seed"])
+        if not np.array_equal(rotation_signs(hidden, rot["seed"]), nat.floats("rotation.signs")):
+            raise SystemExit("the rotation in the file is not the one this tool reconstructs")
+        Qm, wf = mx.array(Q), nat.floats("final_norm.unfolded")
+    hid = mx.array(engine_hiddens(cli.rlm, seqs, hidden))
     emb_next = mx.array(nat.rows("embed", ids[:, 1:].reshape(-1)).reshape(len(seqs), T - 1, hidden))
+    if rot:
+        head_in = mx.fast.rms_norm(hid, None, eps)             # what the output head reads: rotated, norm folded
+        hid, emb_next = hid @ Qm.T, emb_next @ Qm.T
+        hn = mx.fast.rms_norm(hid, mx.array(wf), eps)
+    else:
+        hn = mx.fast.rms_norm(hid, mx.array(nat.floats("final_norm")), eps)
+        head_in = hn
     x = fc_inputs(emb_next, hn[:, :-1], norms, eps)
-    mx.eval(x, hn)
+    mx.eval(x, hn, head_in)
+    del hid, emb_next
+
+    def to_head(u):
+        """The head's output as the model's output head reads it."""
+        if not rot:
+            return mx.fast.rms_norm(u, mx.array(norms[NORM_OUT]), eps)
+        return mx.fast.rms_norm(u, mx.array(norms[NORM_OUT] / wf), eps) @ Qm
 
     fc = fc.astype(np.float16).astype(np.float32)          # as stored
     tensors, layer_q = quantize_head(args, fc, lw, x[:n_cal], book, gptq)
 
     # Held-out check: how often is the head's top choice the model's own?
-    x_ev, hn_ev = x[n_cal:], hn[n_cal:]
+    x_ev, head_ev = x[n_cal:], head_in[n_cal:]
     n_ev, skip = x_ev.shape[0], 64
-    choice = nat.head_argmax(hn_ev.reshape(-1, hidden)).reshape(n_ev, T)       # choice[i]: the pick for token i+1
+    choice = nat.head_argmax(head_ev.reshape(-1, hidden)).reshape(n_ev, T)     # choice[i]: the pick for token i+1
     agree = {}
     for label, layer in (("float", build_layer(args, args.full_attention_interval - 1, lw)), ("4-bit", layer_q)):
-        out = head_output(fc, layer, norms, x_ev, eps)
+        out = to_head(head_output(fc, layer, x_ev))
         pred = nat.head_argmax(out.reshape(-1, hidden)).reshape(n_ev, T - 1)   # pred[i]: the guess for token i+2
         agree[label] = float(np.mean(pred[:, skip:T - 2] == choice[:, skip + 1:T - 1]))
     print(f"the head's top choice is the model's own choice: float head {100 * agree['float']:.1f}%, "
@@ -156,11 +179,16 @@ def main():
 
     out, hdr = Writer.append(cli.rlm, drop_from="mtp")
     out.begin("mtp")
+    norm_e, fc_file = norms[NORM_E], fc
+    if rot:   # the token rows the head reads are rotated: fold its embedding norm and the rotation into fc
+        fc_file = fc.copy()
+        fc_file[:, :hidden] = (fc[:, :hidden] * norm_e[None, :]) @ Q
+        norm_e = np.ones_like(norm_e)
     for name, w in (("mtp.in_norm", lw["input_layernorm.weight"]), ("mtp.post_norm", lw["post_attention_layernorm.weight"]),
                     ("mtp.attn.q_norm", lw["self_attn.q_norm.weight"]), ("mtp.attn.k_norm", lw["self_attn.k_norm.weight"]),
-                    ("mtp.norm_e", norms[NORM_E]), ("mtp.norm_h", norms[NORM_H]), ("mtp.norm", norms[NORM_OUT])):
+                    ("mtp.norm_e", norm_e), ("mtp.norm_h", norms[NORM_H]), ("mtp.norm", norms[NORM_OUT])):
         out.add_float(name, w)
-    out.add_dense("mtp.fc", fc)
+    out.add_dense("mtp.fc", fc_file)
     for name, (parts, (codes, s, c)) in tensors.items():
         out.add_native(name, parts, codes, s, c, book)
     out.end()

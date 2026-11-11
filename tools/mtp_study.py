@@ -8,10 +8,12 @@ A draft that is right lets a decoder verify two tokens in one pass over the
 weights, so what matters is how often its top choice equals the model's own.
 
 This script measures that on held-out text, in float (MLX), under teacher
-forcing, and answers two design questions for the engine:
+forcing, and answers three design questions for the engine:
 
   - does the head need its attention history, or only the current position?
   - how much agreement is lost when its matrices are stored in 4 bits?
+  - can the head draft more than one token, by running it again on its own
+    output in place of the hidden state the model has not computed yet?
 
   tools/mtp_study.py models/Qwen3.5-4B
 """
@@ -41,6 +43,7 @@ def main():
     ap.add_argument("--calib-seqs", type=int, default=16, help="sequences the 4-bit GPTQ variant is calibrated on")
     ap.add_argument("--tokens", type=int, default=768)
     ap.add_argument("--skip", type=int, default=256, help="positions at the start of each sequence left out")
+    ap.add_argument("--depth", type=int, default=4, help="how many tokens ahead to draft in the recursion test")
     cli = ap.parse_args()
 
     src = Source(cli.model)
@@ -120,6 +123,48 @@ def main():
     agreement(fc, lw, None, "float, full history")
     for w in (64, 8, 1):
         agreement(fc, lw, w, f"float, last {w} position{'s' if w > 1 else ''} only")
+
+    # Drafting further ahead. Draft d+1 comes from the head run on (embedding of
+    # draft d, the head's own output for draft d) appended to its history; here
+    # the tokens in between are the true ones, i.e. the earlier drafts held.
+    layer.load_weights([(k, mx.array(v)) for k, v in lw.items()])
+    n_e, n_h, n_o = (mx.array(norms[k]) for k in (NORM_E, NORM_H, NORM_OUT))
+    fcw = mx.array(fc)
+    hits = {"its output through the head's final norm": np.zeros(cli.depth), "its raw output": np.zeros(cli.depth)}
+    count = 0
+    for x, e, hn, choice in runs:
+        T = x.shape[1]
+        x1 = mx.concatenate([mx.fast.rms_norm(e[:, 1:], n_e, eps), mx.fast.rms_norm(hn[:, :-1], n_h, eps)],
+                            axis=-1) @ fcw.T
+        pos = list(range(cli.skip, T - cli.depth - 2, 6))
+        count += len(pos)
+        want = np.array(choice)
+        for variant, tally in hits.items():
+            extra = []                                    # recursive inputs so far, one [B, H] per depth
+            for d in range(1, cli.depth + 1):
+                length = max(pos) + d
+                rows = []
+                for b, i in enumerate(pos):
+                    seq = mx.concatenate([x1[0, :i + 1]] + [ex[b][None] for ex in extra], axis=0)
+                    rows.append(mx.concatenate([seq, mx.zeros((length - seq.shape[0], seq.shape[1]))], axis=0))
+                batch = mx.stack(rows)
+                outs = []
+                for c0 in range(0, len(pos), 32):
+                    part = batch[c0:c0 + 32]
+                    outs.append(layer(part, mask=create_attention_mask(part, None), cache=None))
+                    mx.eval(outs[-1])
+                o = mx.concatenate(outs, axis=0)[mx.arange(len(pos)), mx.array([i + d - 1 for i in pos])]
+                pred = np.array(mx.argmax(mx.fast.rms_norm(o, n_o, eps) @ head.T, axis=-1))
+                tally[d - 1] += (pred == want[[i + d for i in pos]]).sum()
+                hid = mx.fast.rms_norm(o, n_o, eps) if variant.endswith("norm") else o
+                emb_next = e[0][mx.array([i + d + 1 for i in pos])]
+                extra.append(mx.concatenate([mx.fast.rms_norm(emb_next, n_e, eps), mx.fast.rms_norm(hid, n_h, eps)],
+                                            axis=-1) @ fcw.T)
+                mx.eval(extra[-1])
+    print(f"\n  drafting further ahead ({count} positions): agreement of draft d given that the earlier ones held")
+    for variant, tally in hits.items():
+        print(f"  fed back {variant:42s} " + "  ".join(f"d={d + 1}: {100 * a / count:4.1f}%" for d, a in enumerate(tally)))
+    print()
 
     def q4(W):
         codes, s, c = quantlib.quantize_rtn(W, None, "fp4", A_GRID, B_GRID)

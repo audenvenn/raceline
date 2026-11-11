@@ -1,0 +1,36 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what you got instead. Paste the full output.
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Chip, memory and macOS version (the first line of `raceline probe` has all three).
+      placeholder: Apple M6 · 12-core GPU · 24 GB · macOS 27.2
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: raceline version or commit
+      placeholder: 0.1.0 / 2b193d2
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model
+      description: Pulled name, or how the file was converted.
+      placeholder: qwen3.5-4b (raceline pull)
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else

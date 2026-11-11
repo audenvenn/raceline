@@ -1,0 +1,34 @@
+name: Benchmark from another Mac
+description: Share numbers measured on your machine
+labels: [benchmark]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The project has been developed on a single machine, so numbers from other Macs are very welcome.
+        Please measure with nothing else using the GPU.
+  - type: input
+    id: machine
+    attributes:
+      label: Machine
+      description: Chip, memory and macOS version.
+      placeholder: Apple M5 Max · 40-core GPU · 64 GB · macOS 27.2
+    validations:
+      required: true
+  - type: textarea
+    id: probe
+    attributes:
+      label: Output of `raceline probe <model>`
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: bench
+    attributes:
+      label: Output of `bench/agent_bench.py` and `bench/chat_bench.py`
+      description: Ideally with an MLX conversion of the same model as the baseline.
+      render: text
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes

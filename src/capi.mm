@@ -36,6 +36,8 @@ const float *rl_draft_more(rl_engine *e, int32_t guess) { return e->engine.draft
 const float *rl_forward_draft(rl_engine *e, const int32_t *tokens, int n) { return e->engine.forward_draft(tokens, n); }
 void rl_keep_drafts(rl_engine *e, int accepted) { e->engine.keep_drafts(accepted); }
 int rl_max_drafts(const rl_engine *) { return rl::Engine::kMaxDrafts; }
+void rl_set_draft_vocab(rl_engine *e, int rows) { e->engine.set_draft_vocab(rows); }
+int rl_draft_vocab(const rl_engine *e) { return e->engine.draft_vocab(); }
 size_t rl_logits_stride(const rl_engine *e) { return (size_t)(e->engine.logits(1) - e->engine.logits(0)); }
 
 const float *rl_hidden(const rl_engine *e) { return e->engine.hidden(); }

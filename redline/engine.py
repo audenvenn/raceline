@@ -59,9 +59,10 @@ def _library() -> ctypes.CDLL:
     lib.rl_forward_draft.restype = ctypes.POINTER(ctypes.c_float)
     lib.rl_forward_draft.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int]
     lib.rl_keep_drafts.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.rl_set_draft_vocab.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.rl_logits_stride.restype = ctypes.c_size_t
     lib.rl_hidden.restype = ctypes.POINTER(ctypes.c_float)
-    for fn in ("rl_has_mtp", "rl_max_drafts", "rl_logits_stride", "rl_hidden", "rl_hidden_size"):
+    for fn in ("rl_has_mtp", "rl_max_drafts", "rl_draft_vocab", "rl_logits_stride", "rl_hidden", "rl_hidden_size"):
         getattr(lib, fn).argtypes = [ctypes.c_void_p]
     lib.rl_top_k.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     return lib
@@ -133,6 +134,11 @@ class RedlineBackend(Backend):
         # Drafting stops early once the chance that the drafts so far all hold
         # (the product of their probabilities under the head) falls below this:
         # a draft costs about a twentieth to a tenth of a pass over the weights.
+        # A draft only has to find likely tokens, and low token ids are the
+        # frequent ones: its pass over the output matrix covers ids below 64k
+        # (98% of English and code), 128k (99% of Chinese too) or everything,
+        # whichever the recent context calls for.
+        self.draft_vocab = int(os.environ.get("REDLINE_DRAFT_VOCAB", "-1"))     # -1: choose per generation
         self.max_drafts = min(int(os.environ.get("REDLINE_DRAFTS", "6")), self._lib.rl_max_drafts(self._e))
         self.min_confidence = float(os.environ.get("REDLINE_MIN_CONFIDENCE", "0.3"))
         self._stride = self._lib.rl_logits_stride(self._e)
@@ -186,6 +192,13 @@ class RedlineBackend(Backend):
         pos = self.position                    # position of the token being chosen
         token = _sample(self._logits, sampling, recent, seed, pos)
         produced = 0
+        if self.mtp:
+            rows = self.draft_vocab
+            if rows < 0:
+                seen_ids = np.asarray(history[-1024:] or [0])
+                rows = next((n for n in (65536, 131072) if np.mean(seen_ids >= n) <= 0.01), 0)
+            lib.rl_set_draft_vocab(e, rows)
+            D = lib.rl_draft_vocab(e)          # logits a draft call returns
         try:
             while produced < max_tokens:
                 k = min(self.max_drafts, max_tokens - produced - 1, self._max_ctx - self.position - 1) if self.mtp else 0
@@ -200,7 +213,7 @@ class RedlineBackend(Backend):
                 # The head's guesses for the tokens after `token`, each drawn with
                 # the random numbers the model's own choice at that position will use.
                 row, seen, confidence = [token], recent + [token], 1.0
-                guess = np.ctypeslib.as_array(lib.rl_draft_logits(e, token), shape=(V,))
+                guess = np.ctypeslib.as_array(lib.rl_draft_logits(e, token), shape=(D,))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
                 while True:
                     draft, p = _sample(guess, sampling, seen, seed, pos + len(row), with_probability=True)
@@ -209,7 +222,7 @@ class RedlineBackend(Backend):
                     seen.append(draft)
                     if len(row) > k or draft in self.eos_ids or confidence < self.min_confidence:
                         break
-                    guess = np.ctypeslib.as_array(lib.rl_draft_more(e, draft), shape=(V,))
+                    guess = np.ctypeslib.as_array(lib.rl_draft_more(e, draft), shape=(D,))
                     self.gpu_seconds += lib.rl_last_gpu_seconds(e)
 
                 n = len(row)

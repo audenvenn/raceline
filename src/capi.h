@@ -43,6 +43,10 @@ const float *rl_draft_more(rl_engine *e, int32_t guess);
 const float *rl_forward_draft(rl_engine *e, const int32_t *tokens, int n);
 void rl_keep_drafts(rl_engine *e, int accepted);
 size_t rl_logits_stride(const rl_engine *e);
+// Restricts drafts to token ids below `rows` (0 = the whole vocabulary); the
+// draft calls then return rl_draft_vocab() logits.
+void rl_set_draft_vocab(rl_engine *e, int rows);
+int rl_draft_vocab(const rl_engine *e);
 
 // The k largest of n logits in descending order (ties: lowest index first).
 // Writes their indices and values and returns how many (min(k, n)). A helper

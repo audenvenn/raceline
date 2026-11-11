@@ -5,6 +5,7 @@
 //   draft   <model.rlm> <tokens.i32> <out.f32>         MTP head logits for the token after the last one
 //   bench   <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--chunk N] [--ctx N] [--drafts K]
 //   spec    <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--drafts K ...]   speculative vs plain: same tokens?
+//           (bench and spec: --draft-vocab N restricts drafts to token ids below N)
 //   profile <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--times N]
 //
 // Token files are raw little-endian int32. Tokenization lives outside the
@@ -64,7 +65,7 @@ static std::vector<int32_t> generate(Engine &e, int n, int drafts, int *passes, 
     const float *guess = e.draft_logits(next);
     *gpu += e.last_gpu_seconds();
     for (int j = 0; j < k; j++) {
-      row.push_back(e.argmax_of(guess));
+      row.push_back(e.argmax_of(guess, e.draft_vocab()));
       if (j + 1 < k) {
         guess = e.draft_more(row.back());
         *gpu += e.last_gpu_seconds();
@@ -141,6 +142,7 @@ int main(int argc, char **argv) {
     if (modes.size() == 1) modes.insert(modes.end(), {1, 2, 3, 4});
     Engine e(argv[2], n_prompt + n_gen + 16, chunk);
     if (!e.has_mtp()) rl::fatal("this model file has no MTP head");
+    e.set_draft_vocab(flag(argc, argv, "--draft-vocab", 0));
     std::vector<int32_t> ref;
     bool same = true;
     for (int drafts : modes) {
@@ -178,6 +180,7 @@ int main(int argc, char **argv) {
     printf("load %.2fs\n", now() - t0);
     const int drafts = e.has_mtp() ? std::min(flag(argc, argv, "--drafts", 4), Engine::kMaxDrafts) : 0;
     if (e.has_mtp()) {
+      e.set_draft_vocab(flag(argc, argv, "--draft-vocab", 0));
       e.set_mtp(drafts > 0);
       printf("MTP head: %d draft%s per pass\n", drafts, drafts == 1 ? "" : "s");
     }

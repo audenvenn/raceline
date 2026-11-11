@@ -667,9 +667,18 @@ void Engine::encode_mtp_layer(int M, int pos0, bool logits) {
   if (logits) {
     encode_copy_rows(mtp_out_, 0, M - 1, 1);  // what draft_more continues from
     encode_rms(h_, (size_t)(M - 1) * H * sizeof(float), H, mtp_norm_out_, 0, 1, 0);
-    const QTensor &head = model_->q("lm_head");
-    encode_linear(head, 1, mtp_logits_, 0, head.n_pad, false, "linear:lm_head");
+    QTensor head = model_->q("lm_head");
+    const int stride = head.n_pad;
+    head.n_pad = draft_vocab();
+    encode_linear(head, 1, mtp_logits_, 0, stride, false, "linear:mtp_head");
   }
+}
+
+void Engine::set_draft_vocab(int rows) { draft_vocab_ = rows <= 0 ? 0 : (rows + 255) / 256 * 256; }
+
+int Engine::draft_vocab() const {
+  const int all = model_->q("lm_head").n_pad;
+  return draft_vocab_ > 0 ? std::min(draft_vocab_, all) : all;
 }
 
 void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {
@@ -812,10 +821,10 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
 
 int Engine::argmax() const { return argmax_of((const float *)logits_.contents); }
 
-int Engine::argmax_of(const float *logits) const {
+int Engine::argmax_of(const float *logits, int n) const {
   float best;
   vDSP_Length idx;
-  vDSP_maxvi(logits, 1, &best, &idx, (vDSP_Length)config().vocab);
+  vDSP_maxvi(logits, 1, &best, &idx, (vDSP_Length)(n > 0 ? std::min(n, config().vocab) : config().vocab));
   return (int)idx;
 }
 

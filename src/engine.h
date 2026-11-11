@@ -66,6 +66,13 @@ class Engine {
   // The head applied to its own output: logits for the token after `guess`,
   // the token picked from the previous draft_logits / draft_more call.
   const float *draft_more(int32_t guess);
+  // Drafts only need the likely tokens: restricts the head's vocabulary pass
+  // to token ids below `rows` (rounded up to a block of 256; 0 = all). Lower
+  // ids are the more frequent tokens, and the pass over the output matrix is
+  // most of what a draft costs. A token outside the range is simply never
+  // drafted. draft_logits / draft_more then return that many logits.
+  void set_draft_vocab(int rows);
+  int draft_vocab() const;
   // Feeds tokens[0] and, speculatively, tokens[1..n-1] (n <= kMaxDrafts + 1).
   const float *forward_draft(const int32_t *tokens, int n);
   // Keeps the first `accepted` drafts of the last forward_draft and takes the
@@ -73,7 +80,7 @@ class Engine {
   void keep_drafts(int accepted);
   // Logits of the last forward: row 0, or row r after forward_draft().
   const float *logits(int row = 0) const;
-  int argmax_of(const float *logits) const;
+  int argmax_of(const float *logits, int n = 0) const;  // over the first n entries (0 = the vocabulary)
 
   // Final hidden states [T][hidden] of the last forward(), before the final
   // norm. Only meaningful with the head off (the head reuses the buffer).
@@ -175,6 +182,7 @@ class Engine {
   int spec_rows_ = 0;                 // rows of the last forward_draft, until keep_drafts settles them
   int mtp_pos_ = 0;
   int draft_next_ = -1, draft_rows_ = 0, draft_depth_ = 0;  // the draft_logits / draft_more chain in progress
+  int draft_vocab_ = 0;               // rows of the output matrix a draft looks at (0 = all)
   std::vector<int32_t> pend_tok_;
   id<MTLBuffer> mtp_h_ = nil, mtp_out_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
   id<MTLBuffer> mtp_norm_e_ = nil, mtp_norm_h_ = nil, mtp_norm_out_ = nil;

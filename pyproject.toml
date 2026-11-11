@@ -1,5 +1,6 @@
 [build-system]
-requires = ["setuptools>=68"]
+# setup.py compiles the engine library with CMake and Ninja (see there).
+requires = ["setuptools>=68", "cmake>=3.24", "ninja"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -22,7 +23,7 @@ classifiers = [
   "Programming Language :: C++",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["mlx-lm>=0.32", "numpy"]
+dependencies = ["mlx-lm>=0.32", "numpy", "transformers", "tokenizers"]
 
 [project.urls]
 Homepage = "https://github.com/audenvenn/raceline"

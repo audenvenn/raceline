@@ -32,6 +32,9 @@ from .backends import Backend, Sampling, Snapshot
 @functools.lru_cache(maxsize=1)
 def _library() -> ctypes.CDLL:
     here = os.path.dirname(os.path.abspath(__file__))
+    # An installed package carries the kernel sources the engine compiles at run time.
+    if os.path.isfile(os.path.join(here, "kernels", "ops.metal")):
+        os.environ.setdefault("RL_KERNEL_DIR", os.path.join(here, "kernels"))
     candidates = [os.environ.get("RACELINE_LIB"), os.path.join(here, "libraceline.dylib"),
                   os.path.join(here, "..", "build", "cmake", "libraceline.dylib")]
     for path in candidates:

@@ -24,3 +24,19 @@ jobs:
         run: python tests/test_runtime.py
       - name: Repository contains English only
         run: python tools/check_english.py
+
+  wheel-macos:
+    # Builds the engine library and the wheel. The kernels themselves are compiled at run time
+    # on a Mac with GPU neural accelerators, which the hosted runners do not have.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Show the toolchain
+        run: sw_vers && xcodebuild -version && xcrun --show-sdk-version
+      - name: Build the wheel (compiles libraceline.dylib)
+        run: pip wheel . --no-deps -w dist
+      - name: Check its contents
+        run: python -c "import glob, zipfile; n = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist(); assert 'raceline/libraceline.dylib' in n and 'raceline/kernels/ops.metal' in n, n; print(glob.glob('dist/*.whl'))"

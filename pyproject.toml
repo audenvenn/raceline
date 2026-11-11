@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raceline-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "A local agent runtime for Apple Silicon with its own inference engine: OpenAI-compatible server and terminal agent."
 readme = "README.md"
 license = { text = "Apache-2.0" }

@@ -199,11 +199,11 @@ class RedlineBackend(Backend):
         token = _sample(self._logits, sampling, recent, seed, pos)
         produced = 0
         if self.mtp:
-            rows = self.draft_vocab
-            if rows < 0:
+            limit = self.draft_vocab
+            if limit < 0:
                 seen_ids = np.asarray(history[-1024:] or [0])
-                rows = next((n for n in (65536, 131072) if np.mean(seen_ids >= n) <= 0.01), 0)
-            lib.rl_set_draft_vocab(e, rows)
+                limit = next((n for n in (65536, 131072) if np.mean(seen_ids >= n) <= 0.01), 0)
+            lib.rl_set_draft_vocab(e, limit)
             D = lib.rl_draft_vocab(e)          # logits a draft call returns
         try:
             while produced < max_tokens:

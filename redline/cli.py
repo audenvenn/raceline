@@ -1,4 +1,4 @@
-"""Command line: redline serve | chat."""
+"""Command line: redline chat | serve | probe."""
 
 from __future__ import annotations
 
@@ -39,7 +39,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="command", required=True)
 
     def common(p):
-        p.add_argument("model", help="an MLX model directory, or a redline .rlm file")
+        p.add_argument("model", nargs="?", default=os.environ.get("REDLINE_MODEL"),
+                       help="a redline .rlm file, or an MLX model directory (default: $REDLINE_MODEL)")
         p.add_argument("--backend", choices=["mlx", "redline"], help="default: by model type")
         p.add_argument("--temperature", type=float)
 
@@ -56,7 +57,16 @@ def main(argv=None):
     p.add_argument("--no-think", action="store_true", help="skip the model's reasoning phase")
     p.add_argument("--max-tokens", type=int, default=4096)
 
+    p = sub.add_parser("probe", help="measure this Mac's limits for local inference (and a model against them)")
+    p.add_argument("model", nargs="?", help="optional: a model to measure against the limits")
+    p.add_argument("--backend", choices=["mlx", "redline"])
+
     args = ap.parse_args(argv)
+    if args.command == "probe":
+        from .probe import run
+        return run(args.model, args.backend)
+    if not args.model:
+        ap.error("no model given (and REDLINE_MODEL is not set)")
     rt = _runtime(args)
 
     if args.command == "serve":

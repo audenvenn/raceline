@@ -20,7 +20,7 @@ struct Engine::LinearLayer {
 
 namespace {
 struct MtpState {  // the head's bookkeeping, as saved by save_state
-  int32_t mtp_pos, n_tok, tok[4], draft_next, pad;
+  int32_t mtp_pos, n_tok, tok[4], draft_next, draft_rows;
 };
 constexpr int kMtpRows = 4;  // hidden states that can wait for their next token
 }  // namespace
@@ -144,6 +144,7 @@ void Engine::reset() {
   }
   mtp_pos_ = 0;
   draft_next_ = -1;
+  draft_rows_ = 0;
   pend_tok_.clear();
   spec_open_ = false;
 }
@@ -154,6 +155,7 @@ void Engine::set_mtp(bool on) {
   mtp_ = on;
   mtp_pos_ = 0;
   draft_next_ = -1;
+  draft_rows_ = 0;
   pend_tok_.clear();
 }
 
@@ -179,6 +181,7 @@ void Engine::save_state(void *dst) const {
     st.n_tok = (int32_t)pend_tok_.size();
     for (size_t i = 0; i < pend_tok_.size() && i < 4; i++) st.tok[i] = pend_tok_[i];
     st.draft_next = draft_next_;
+    st.draft_rows = draft_rows_;
     memcpy(p, &st, sizeof st);
     memcpy(p + sizeof st, mtp_h_.contents, mtp_h_.length);
   }
@@ -201,6 +204,7 @@ void Engine::load_state(const void *src, int position) {
     mtp_pos_ = mtp_ ? st.mtp_pos : 0;
     pend_tok_.assign(st.tok, st.tok + st.n_tok);
     draft_next_ = st.draft_next;
+    draft_rows_ = st.draft_rows;
   }
   pos_ = position;
   spec_open_ = false;
@@ -650,6 +654,7 @@ const float *Engine::draft_logits(int32_t next) {
   mtp_pos_ += n;
   pend_tok_.clear();
   draft_next_ = next;
+  draft_rows_ = n;
   return (const float *)mtp_logits_.contents;
 }
 
@@ -657,9 +662,14 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
   const Config &c = config();
   if (T < 1 || T > max_chunk_) fatal("forward: %d tokens, chunk limit is %d", T, max_chunk_);
   if (pos_ + T > max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
+  if (mtp_ && pos_ > 0 && pos_ == mtp_pos_ && tokens[0] != draft_next_) {
+    // draft_logits ran the head on the last position for a next token that is
+    // not the one arriving (a generation was cut short): that position waits again.
+    const size_t row = (size_t)c.hidden * sizeof(float);
+    if (draft_rows_ > 1) memmove(mtp_h_.contents, (const char *)mtp_h_.contents + (draft_rows_ - 1) * row, row);
+    mtp_pos_ -= 1;
+  }
   const int n_carry = mtp_ ? pos_ - mtp_pos_ : 0;  // hidden states waiting for their next token
-  if (mtp_ && n_carry == 0 && pos_ > 0 && tokens[0] != draft_next_)
-    fatal("forward: token %d follows draft_logits(%d)", tokens[0], draft_next_);
   if (spec && n_carry != 0) fatal("forward_draft: call draft_logits first");
   spec_open_ = false;
   gpu_seconds_ = 0;

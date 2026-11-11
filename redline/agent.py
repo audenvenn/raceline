@@ -288,11 +288,19 @@ class Agent:
             return ""
         return (f"  [{totals['steps']} step{'s' if totals['steps'] != 1 else ''} · context {last['prompt_tokens']} tok "
                 f"({last['cached_tokens']} reused) · {totals['completion_tokens']} out at "
-                f"{last['decode_tokens_per_second']:.1f} tok/s · {totals['seconds']:.1f}s]")
+                f"{last['decode_tokens_per_second']:.1f} tok/s"
+                + (f", {100 * last['drafts_accepted'] / last['drafts']:.0f}% of drafts accepted" if last.get("drafts") else "")
+                + f" · {totals['seconds']:.1f}s]")
 
 
 def repl(agent: Agent) -> None:
-    print(agent.c("1", "redline") + f" · {agent.rt.backend.name} backend · {agent.cwd}")
+    try:
+        import readline  # noqa: F401  (line editing and history for input())
+    except ImportError:
+        pass
+    b = agent.rt.backend
+    print(agent.c("1", "redline") + f" · {getattr(b, 'model_id', '')} · {b.name} backend"
+          + (" · speculative decoding" if getattr(b, "mtp", False) else "") + f" · {agent.cwd}")
     print(agent.c("2", "  /reset clears the conversation, /exit quits, Ctrl-C interrupts a reply."))
     while True:
         try:

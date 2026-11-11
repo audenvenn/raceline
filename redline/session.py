@@ -20,7 +20,7 @@ from .backends import Backend, Sampling, Snapshot
 
 
 class Session:
-    def __init__(self, backend: Backend, max_snapshots: int = 6, max_snapshot_bytes: int = 1 << 30):
+    def __init__(self, backend: Backend, max_snapshots: int = 6, max_snapshot_bytes: int = 512 << 20):
         self.backend = backend
         self.tokens: list = []          # exactly the tokens in the backend's context
         self._snaps: list = []          # ascending position

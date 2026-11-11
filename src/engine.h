@@ -162,7 +162,7 @@ class Engine {
   // positions mtp_pos_ .. pos_-1 are waiting, their hidden states parked in
   // mtp_h_ and the tokens that followed all but the last in pend_tok_.
   bool has_mtp_ = false, mtp_ = false, spec_open_ = false;
-  int mtp_pos_ = 0, draft_next_ = -1;
+  int mtp_pos_ = 0, draft_next_ = -1, draft_rows_ = 0;  // the last draft_logits call: its token, rows it processed
   std::vector<int32_t> pend_tok_;
   id<MTLBuffer> mtp_h_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
   id<MTLBuffer> mtp_norm_e_ = nil, mtp_norm_h_ = nil, mtp_norm_out_ = nil;

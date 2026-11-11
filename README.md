@@ -227,6 +227,12 @@ Quantization quality against the float model on held-out text, Qwen3.5-4B,
 | **native FP4, GPTQ (this format)** | 4.0 | 0.083 | 3.379 | 88.6% |
 | native FP4, round to nearest | 4.0 | 0.103 | 3.478 | 88.9% |
 
+The published Qwen3.8-27B file, same measurement:
+
+| Weights | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
+|---|---|---|---|---|
+| **native FP4, GPTQ (this format)** | 4.0 | 0.152 | 1.999 | 91.5% |
+
 ## How it works
 
 **Model file (`.rlm`).** One file: a JSON header, then page-aligned sections

@@ -58,8 +58,10 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   cfg_.partial_rotary = [c[@"partial_rotary_factor"] floatValue];
   if ([c[@"eos_token_id"] isKindOfClass:[NSNumber class]]) cfg_.eos = [c[@"eos_token_id"] intValue];
   NSDictionary *qc = h[@"quant"];
-  cfg_.group = geti(qc, @"group");
   cfg_.block = geti(qc, @"block");
+  cfg_.native = [qc[@"mode"] isEqual:@"native"];
+  if (cfg_.native) cfg_.book = [qc[@"book"] UTF8String];
+  else cfg_.group = geti(qc, @"group");
 
   // One no-copy Metal buffer per page-aligned section.
   NSArray *sections = h[@"sections"];
@@ -88,10 +90,12 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
     } else {
       QTensor qt;
       qt.buf = bufs[sec];
-      qt.blocked = [kind isEqualToString:@"q4a"];
+      qt.native = [kind hasPrefix:@"q4n"];
+      qt.blocked = [kind isEqualToString:@"q4a"] || [kind isEqualToString:@"q4n"];
       qt.w = [t[@"w"] unsignedLongLongValue] - sec_off[sec];
       qt.s = [t[@"s"] unsignedLongLongValue] - sec_off[sec];
-      qt.b = [t[@"b"] unsignedLongLongValue] - sec_off[sec];
+      if (qt.native) qt.c = [t[@"c"] unsignedLongLongValue] - sec_off[sec];
+      else qt.b = [t[@"b"] unsignedLongLongValue] - sec_off[sec];
       qt.k = geti(t, @"k");
       qt.n = geti(t, @"n");
       qt.n_pad = qt.blocked ? geti(t, @"n_pad") : qt.n;

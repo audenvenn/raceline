@@ -34,6 +34,29 @@ kernel void embed_rows(device const int *tok [[buffer(0)]],
   for (int i = 0; i < 8; ++i) out[i] = sc * float((bits >> (4 * i)) & 15u) + bi;
 }
 
+// Native format: h[t][k] = s[row] * c[k] * L[code]. BOOK_LEVELS is the codebook,
+// sixteen comma-separated values in code order.
+#ifdef BOOK_LEVELS
+constant float kLevel[16] = {BOOK_LEVELS};
+kernel void embed_rows_native(device const int *tok [[buffer(0)]],
+                              device const uchar *w [[buffer(1)]],
+                              device const float *s [[buffer(2)]],
+                              device const float *c [[buffer(3)]],
+                              device float *h [[buffer(4)]],
+                              constant EmbedParams &p [[buffer(5)]],
+                              uint2 tid [[thread_position_in_grid]])
+{
+  if (int(tid.x) >= p.K / 8 || int(tid.y) >= p.T) return;
+  const size_t row = size_t(tok[tid.y]);
+  const device uint *words = (const device uint *)(w + row * size_t(p.K / 2));
+  const uint bits = words[tid.x];
+  const int k0 = int(tid.x) * 8;
+  const float sc = s[row];
+  device float *out = h + size_t(tid.y) * p.h_stride + k0;
+  for (int i = 0; i < 8; ++i) out[i] = sc * c[k0 + i] * kLevel[(bits >> (4 * i)) & 15u];
+}
+#endif
+
 // ----------------------------------------------------------------- RMS norm
 // out[t] = x[t] * rsqrt(mean(x[t]^2) + eps) * weight, one threadgroup per row.
 //
@@ -209,16 +232,20 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
   for (int e = 0; e < E; ++e) st[e] = state[e];
 }
 
-// Per-head RMS norm of the recurrence output, gated by silu(z).
+// Per-head RMS norm of the recurrence output, gated by silu(z). `cs` is the
+// column scale of the projection that consumes the result (all ones for
+// weights that carry their scales themselves).
 kernel void lin_out_norm(device const float *yo [[buffer(0)]],
                          device const float *proj [[buffer(1)]],
                          device const float *wgt [[buffer(2)]],
                          device half *out [[buffer(3)]],
                          constant OutNormParams &p [[buffer(4)]],
+                         device const float *cs [[buffer(5)]],
                          uint3 tg [[threadgroup_position_in_grid]],
                          uint lane [[thread_index_in_simdgroup]])
 {
   const int hv = int(tg.x);
+  cs += hv * p.Dv;
   const device float *src = yo + size_t(tg.y) * p.yo_stride + hv * p.Dv;
   const device float *z = proj + size_t(tg.y) * p.proj_stride + p.off_z + hv * p.Dv;
   device half *dst = out + size_t(tg.y) * p.out_stride + hv * p.Dv;
@@ -226,18 +253,19 @@ kernel void lin_out_norm(device const float *yo [[buffer(0)]],
   for (int i = int(lane); i < p.Dv; i += 32) ss += src[i] * src[i];
   ss = simd_sum(ss);
   const float inv = rsqrt(ss / float(p.Dv) + p.eps);
-  for (int i = int(lane); i < p.Dv; i += 32) dst[i] = half(src[i] * inv * wgt[i] * silu(z[i]));
+  for (int i = int(lane); i < p.Dv; i += 32) dst[i] = half(src[i] * inv * wgt[i] * silu(z[i]) * cs[i]);
 }
 
 // ------------------------------------------------------------------- SwiGLU
 kernel void swiglu(device const float *proj [[buffer(0)]],
                    device half *out [[buffer(1)]],
                    constant SwigluParams &p [[buffer(2)]],
+                   device const float *cs [[buffer(3)]],
                    uint2 tid [[thread_position_in_grid]])
 {
   if (int(tid.x) >= p.I || int(tid.y) >= p.T) return;
   const device float *row = proj + size_t(tid.y) * p.in_stride;
-  out[size_t(tid.y) * p.out_stride + tid.x] = half(silu(row[tid.x]) * row[p.I + tid.x]);
+  out[size_t(tid.y) * p.out_stride + tid.x] = half(silu(row[tid.x]) * row[p.I + tid.x] * cs[tid.x]);
 }
 
 // ---------------------------------------------------------------- attention
@@ -306,6 +334,7 @@ kernel void attn_sdpa(device const float *qn [[buffer(0)]],
                       device const float *proj [[buffer(3)]],
                       device half *out [[buffer(4)]],
                       constant AttnParams &p [[buffer(5)]],
+                      device const float *cs [[buffer(6)]],
                       uint3 tg [[threadgroup_position_in_grid]],
                       uint lane [[thread_index_in_simdgroup]])
 {
@@ -339,6 +368,6 @@ kernel void attn_sdpa(device const float *qn [[buffer(0)]],
   device half *dst = out + size_t(t) * p.out_stride + hh * p.D;
   for (int j = 0; j < J; ++j) {
     const int e = j * 32 + int(lane);
-    dst[e] = half(acc[j] / l * sigmoidf(gate[e]));
+    dst[e] = half(acc[j] / l * sigmoidf(gate[e]) * cs[hh * p.D + e]);
   }
 }

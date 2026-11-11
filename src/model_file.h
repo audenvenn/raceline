@@ -19,6 +19,8 @@ struct Config {
   double rope_theta = 1e7;
   float partial_rotary = 0.25f;
   int group = 64, block = 256;
+  bool native = false;     // scale-free 4-bit weights (see kernels/linear.metal) instead of MLX's affine groups
+  std::string book;        // native codebook: "fp4", "int15" or "int16"
 
   bool is_linear_layer(int i) const { return (i + 1) % full_attn_interval != 0; }
   int lin_key_dim() const { return lin_k_heads * lin_k_dim; }
@@ -28,13 +30,16 @@ struct Config {
   int rope_dims() const { return (int)(head_dim * partial_rotary); }
 };
 
-// A quantized matrix (affine 4-bit). `blocked` matrices use the kernel layout
-// described in kernels/linear.metal; otherwise rows are stored contiguously.
+// A quantized 4-bit matrix. `blocked` matrices use the kernel layout described
+// in kernels/linear.metal; otherwise rows are stored contiguously.
+//   affine: w = s[n][g] * q + b[n][g]   (s, b bfloat16 per group of 64 inputs)
+//   native: w = s[n] * c[k] * L[q]      (s float32 per row, c float32 per column)
 struct QTensor {
   id<MTLBuffer> buf = nil;
-  size_t w = 0, s = 0, b = 0;  // byte offsets into buf
+  size_t w = 0, s = 0, b = 0, c = 0;  // byte offsets into buf
   int k = 0, n = 0, n_pad = 0;
   bool blocked = true;
+  bool native = false;
   std::map<std::string, std::pair<int, int>> parts;  // name -> (first row, rows)
 
   int part_offset(const std::string &name) const;

@@ -35,11 +35,16 @@ class Engine {
   // GPU seconds spent in the last forward().
   double last_gpu_seconds() const { return gpu_seconds_; }
 
-  // Profiling: every kernel runs in its own command buffer and its GPU time
-  // is accumulated per kernel name. Slow; totals are inflated by the extra
-  // submissions, so read it for proportions.
-  void set_profiling(bool on) { profiling_ = on; }
-  const std::map<std::string, double> &profile() const { return profile_; }
+  // Differential profiling: every dispatch of the named kernel is repeated
+  // `times` extra times. Repeats recompute the same outputs (or write to
+  // scratch), so results are unchanged and the added GPU time is that
+  // kernel's cost inside the real submission pattern. Per-kernel timers do not
+  // work here: separate submissions inflate small kernels, and pass-boundary
+  // timestamps of consecutive passes overlap.
+  void set_repeat(const std::string &kernel, int times) {
+    repeat_ = kernel;
+    repeat_times_ = times;
+  }
 
   // Debug: when set, forward() also writes the residual stream after every
   // layer to <dir>/layer_NN.f32 ([T][hidden] float32), plus logits.f32.
@@ -53,13 +58,19 @@ class Engine {
   Tile tile_for(int rows) const;
   void encode_linear(const QTensor &w, int rows, id<MTLBuffer> out, size_t out_offset, int out_stride,
                      bool accum, const char *what);
-  void encode_norm(const FTensor &wgt, int rows, size_t in_offset);
+  // which: 0 = a layer's input norm, 1 = its post-attention norm, 2 = the final norm.
+  void encode_norm(int which, int layer, int rows, size_t in_offset);
+  void bind_column_scale(const QTensor &consumer, int index);
   void encode_mlp(int layer, int T);
   void encode_linear_attn(int layer, int T);
   void encode_full_attn(int layer, int T);
   void begin();                 // opens a command buffer + compute encoder
   void flush(bool reopen);      // commits, waits, accumulates GPU time
-  void mark(const char *what);  // profiling: attributes the GPU time since the last mark
+  void run_threads(int w, int h);
+  void run_groups(int w, int h, int threads_per_group = 32);
+  void redo();                  // issues the last dispatch again
+  void mark(const char *what);  // names the dispatch just issued (for set_repeat)
+  bool repeating(const char *what) const { return repeat_times_ > 0 && repeat_ == what; }
 
   Metal mt_;
   std::unique_ptr<ModelFile> model_;
@@ -67,14 +78,25 @@ class Engine {
   int pos_ = 0;
   double gpu_seconds_ = 0;
   std::string dump_dir_;
-  bool profiling_ = false;
-  std::map<std::string, double> profile_;
+  std::string repeat_;
+  int repeat_times_ = 0;
+  struct Dispatch {
+    bool threads;
+    MTLSize grid, per_group;
+  } last_{};
+  id<MTLBuffer> scratch_state_ = nil, scratch_yo_ = nil;
   id<MTLCommandBuffer> cb_ = nil;
   id<MTLComputeCommandEncoder> enc_ = nil;
 
   // Scratch activations, all [rows_cap_][stride].
   int x_stride_, proj_stride_;
   id<MTLBuffer> tok_, h_, xn_, gsum_, proj_, y_, qk_, bg_, yo_, qn_, rope_, logits_;
+
+  // Native-format models scale each matrix's input columns outside the matmul:
+  // the norm weights are pre-multiplied by the column scale of the matrix they
+  // feed, and the other producers multiply by it explicitly (ones_ otherwise).
+  std::vector<id<MTLBuffer>> norm_in_, norm_post_;
+  id<MTLBuffer> norm_final_ = nil, ones_ = nil;
 
   std::vector<std::shared_ptr<LinearLayer>> lin_;
   std::vector<std::shared_ptr<AttnLayer>> attn_;

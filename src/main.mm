@@ -117,28 +117,57 @@ int main(int argc, char **argv) {
   }
 
   if (cmd == "profile") {
-    const int n_prompt = std::min(flag(argc, argv, "--prompt", 256), (int)toks.size());
+    const int n_prompt = std::min(flag(argc, argv, "--prompt", 1024), (int)toks.size());
     const int n_gen = flag(argc, argv, "--gen", 32);
     const int chunk = flag(argc, argv, "--chunk", 1024);
+    const int times = flag(argc, argv, "--times", 4);
     Engine e(argv[2], n_prompt + n_gen + 16, chunk);
-    auto report = [&](const char *title, int tokens) {
-      double total = 0;
-      for (auto &[k, v] : e.profile()) total += v;
-      printf("%s: %.3f ms per token (GPU, separate submissions)\n", title, total / tokens * 1e3);
-      std::vector<std::pair<double, std::string>> rows;
-      for (auto &[k, v] : e.profile()) rows.push_back({v, k});
-      std::sort(rows.rbegin(), rows.rend());
-      for (auto &[v, k] : rows) printf("  %-18s %8.3f ms/token  %5.1f%%\n", k.c_str(), v / tokens * 1e3, 100 * v / total);
+    // Returns {prefill GPU s, decode GPU s}, best of two runs each.
+    auto measure = [&]() {
+      double best_p = 1e30, best_d = 1e30;
+      for (int rep = 0; rep < 2; rep++) {
+        e.reset();
+        double gp = 0, gd = 0;
+        for (int i = 0; i < n_prompt; i += chunk) {
+          e.forward(toks.data() + i, std::min(chunk, n_prompt - i));
+          gp += e.last_gpu_seconds();
+        }
+        int32_t next = e.argmax();
+        for (int i = 0; i < n_gen; i++) {
+          e.forward(&next, 1);
+          gd += e.last_gpu_seconds();
+          next = e.argmax();
+        }
+        best_p = std::min(best_p, gp);
+        best_d = std::min(best_d, gd);
+      }
+      return std::pair<double, double>(best_p, best_d);
     };
-    for (int i = 0; i < n_prompt; i += chunk) e.forward(toks.data() + i, std::min(chunk, n_prompt - i));  // warm
-    e.reset();
-    e.set_profiling(true);
-    for (int i = 0; i < n_prompt; i += chunk) e.forward(toks.data() + i, std::min(chunk, n_prompt - i));
-    report("prefill", n_prompt);
-    const_cast<std::map<std::string, double> &>(e.profile()).clear();
-    int32_t next = e.argmax();
-    for (int i = 0; i < n_gen; i++) { e.forward(&next, 1); next = e.argmax(); }
-    report("decode", n_gen);
+    measure();  // compile pipelines, page in weights
+    const auto base = measure();
+    const char *kernels[] = {"linear:gate_up", "linear:down", "linear:lin_in", "linear:lin_out", "linear:attn_qkv",
+                             "linear:attn_out", "linear:lm_head", "group_sums", "rms_norm", "swiglu", "lin_conv",
+                             "lin_prep_qk", "lin_gates", "gated_delta", "lin_out_norm", "attn_prep", "attn_sdpa",
+                             "embed"};
+    printf("in-situ cost per kernel (ms per token): prefill of %d tokens, decode of %d tokens\n", n_prompt, n_gen);
+    printf("  %-18s %10s %7s %10s %7s\n", "kernel", "prefill", "", "decode", "");
+    double sum_p = 0, sum_d = 0;
+    const double bp = base.first / n_prompt * 1e3, bd = base.second / n_gen * 1e3;
+    for (const char *k : kernels) {
+      e.set_repeat(k, times);
+      const auto m = measure();
+      e.set_repeat("", 0);
+      const double dp = (m.first - base.first) / times / n_prompt * 1e3;
+      const double dd = (m.second - base.second) / times / n_gen * 1e3;
+      sum_p += dp;
+      sum_d += dd;
+      printf("  %-18s %10.4f %6.1f%% %10.3f %6.1f%%\n", k, dp, 100 * dp / bp, dd, 100 * dd / bd);
+      fflush(stdout);
+    }
+    printf("  %-18s %10.4f %6.1f%% %10.3f %6.1f%%\n", "(unattributed)", bp - sum_p, 100 * (bp - sum_p) / bp, bd - sum_d,
+           100 * (bd - sum_d) / bd);
+    printf("  %-18s %10.4f %7s %10.3f   = %.1f tok/s prefill, %.1f tok/s decode\n", "total", bp, "", bd,
+           n_prompt / base.first, n_gen / base.second);
     return 0;
   }
 

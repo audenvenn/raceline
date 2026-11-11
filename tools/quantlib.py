@@ -1,0 +1,214 @@
+"""Quantizers for weights of the form  W[n][k] ~ s[n] * c[k] * L[q[n][k]].
+
+`L` is a fixed 16-entry codebook the GPU accelerators understand natively, `s`
+a scale per output row and `c` a scale per input column. Nothing else may
+depend on (n, k): that is what lets the engine hand `q` to the accelerator as a
+plain 4-bit operand and apply `s` and `c` outside the matmul.
+
+Codebooks
+  int16  uniform, 16 levels at +-0.5 .. +-7.5 (two's-complement nibble + 0.5)
+  int15  uniform, 15 levels at 0, +-1 .. +-7
+  fp4    FP4 E2M1: 0, +-0.5, +-1, +-1.5, +-2, +-3, +-4, +-6
+
+The scale searches are element-wise and run on the GPU through MLX; the GPTQ
+column loop is sequential and runs in numpy. Matrices are processed in row
+chunks, so the vocabulary-sized ones stay within memory.
+"""
+
+from __future__ import annotations
+
+import mlx.core as mx
+import numpy as np
+
+LMAX = {"int16": 7.5, "int15": 7.0, "fp4": 6.0}
+
+
+def snap(x: np.ndarray, book: str) -> np.ndarray:
+    """Nearest codebook value to each element of x (x already divided by its scale)."""
+    if book == "int16":
+        return np.clip(np.floor(x), -8, 7) + 0.5
+    if book == "int15":
+        return np.clip(np.rint(x), -7, 7)
+    if book == "fp4":
+        m = np.abs(x)
+        fine = np.rint(m * 2) * 0.5                    # 0 .. 1.5 in steps of 0.5 (1.75 rounds to 2)
+        mid = np.rint(m)                               # 2, 3, 4
+        coarse = np.minimum(np.rint(m * 0.5) * 2, 6)   # 4, 6
+        q = np.where(m < 1.75, fine, np.where(m < 3.5, mid, coarse))
+        return np.copysign(q, x)
+    raise ValueError(book)
+
+
+def encode(v: np.ndarray, book: str) -> np.ndarray:
+    """Codebook values -> 4-bit codes (uint8), in the encoding the accelerator expects."""
+    if book == "int16":
+        return (np.rint(v - 0.5).astype(np.int8) & 0x0F).astype(np.uint8)
+    if book == "int15":
+        return (np.rint(v).astype(np.int8) & 0x0F).astype(np.uint8)
+    if book == "fp4":  # sign(1) exponent(2) mantissa(1)
+        m = np.abs(v)
+        code = np.select([m < 0.25, m < 0.75, m < 1.25, m < 1.75, m < 2.5, m < 3.5, m < 5.0],
+                         [0, 1, 2, 3, 4, 5, 6], default=7).astype(np.uint8)
+        return code | (np.signbit(v).astype(np.uint8) << 3)
+    raise ValueError(book)
+
+
+def column_scales(col_rms: np.ndarray, act_rms: np.ndarray | None, alpha: float, beta: float) -> np.ndarray:
+    """c[k] = colrms^beta / act_rms^alpha, normalized to geometric mean 1.
+
+    beta evens out columns whose weights are large; alpha gives inputs that are
+    large at run time a finer effective step (their error is amplified most).
+    """
+    c = np.power(col_rms + 1e-12, beta)
+    if act_rms is not None and alpha:
+        c = c / np.power(act_rms + 1e-12, alpha)
+    return (c / np.exp(np.log(c).mean())).astype(np.float32)
+
+
+RATIOS = np.geomspace(0.22, 1.0, 16).astype(np.float32)
+
+
+def _snap_mx(x, book: str):
+    if book == "int16":
+        return mx.clip(mx.floor(x), -8, 7) + 0.5
+    if book == "int15":
+        return mx.clip(mx.round(x), -7, 7)
+    m = mx.abs(x)
+    q = mx.where(m < 1.75, mx.round(m * 2) * 0.5, mx.where(m < 3.5, mx.round(m), mx.minimum(mx.round(m * 0.5) * 2, 6)))
+    return mx.where(x < 0, -q, q)
+
+
+def row_scales(Wc: np.ndarray, wgt: np.ndarray, book: str, ratios=RATIOS, chunk: int = 16384, levels: bool = False):
+    """Per row, the scale with the least weighted squared error.
+
+    Wc = W / c. `wgt[k]` weights the squared error of column k (input second
+    moment times c^2). Returns (s[N], total weighted error) and, if `levels`,
+    also the codebook values at that scale.
+    """
+    N = Wc.shape[0]
+    s = np.empty(N, dtype=np.float32)
+    L = np.empty(Wc.shape, dtype=np.float32) if levels else None
+    wg = mx.array(wgt)
+    total = 0.0
+    for i in range(0, N, chunk):
+        w = mx.array(Wc[i:i + chunk])
+        top = mx.maximum(mx.abs(w).max(axis=1, keepdims=True), 1e-12) / LMAX[book]
+        best_e = best_s = None
+        for r in ratios:
+            sc = top * float(r)
+            e = (mx.square(_snap_mx(w / sc, book) * sc - w) * wg).sum(axis=1, keepdims=True)
+            if best_e is None:
+                best_e, best_s = e, sc
+            else:
+                take = e < best_e
+                best_s = mx.where(take, sc, best_s)
+                best_e = mx.where(take, e, best_e)
+            mx.eval(best_e, best_s)
+        s[i:i + chunk] = np.array(best_s)[:, 0]
+        total += best_e.sum().item()
+        if levels:
+            L[i:i + chunk] = np.array(_snap_mx(w / best_s, book))
+    return (s, total, L) if levels else (s, total)
+
+
+def quantize_rtn(W: np.ndarray, h: np.ndarray | None, book: str, alphas=(0.0,), betas=(0.0,)):
+    """Round to nearest with searched row and column scales.
+
+    Returns (levels[N][K] float32 codebook values, s[N], c[K]).
+    The column-scale exponents are searched on a row subsample; rows are
+    independent once c is fixed.
+    """
+    N, K = W.shape
+    h = np.ones(K, dtype=np.float32) if h is None else (h / h.mean()).astype(np.float32)
+    col_rms = np.sqrt(np.square(W, dtype=np.float32).mean(axis=0))
+    act_rms = np.sqrt(h)
+    c = column_scales(col_rms, act_rms, alphas[0], betas[0])
+    if len(alphas) * len(betas) > 1:
+        sub = W if N <= 4096 else W[:: N // 4096][:4096]
+        best = None
+        for a in alphas:
+            for b in betas:
+                cand = column_scales(col_rms, act_rms, a, b)
+                _, err = row_scales(sub / cand, h * cand * cand, book)
+                if best is None or err < best:
+                    best, c = err, cand
+    s, _, L = row_scales(W / c, h * c * c, book, levels=True)
+    return L, s, c
+
+
+def gptq_factor(Hc: np.ndarray, damp: float) -> np.ndarray:
+    """Upper-triangular U with inverse(Hc + damping) = U^T U, in float32.
+
+    Equivalent to cholesky(inv(H), upper) as in the GPTQ reference, but from one
+    Cholesky factorization and one triangular inverse instead of a full
+    inverse: reverse the order of H, factor it, and reverse back to get an
+    upper-triangular R with H = R R^T; then U = inverse(R).
+    """
+    K = Hc.shape[0]
+    Hd = Hc.astype(np.float32).copy()
+    Hd[np.diag_indices(K)] += damp * float(np.diag(Hc).mean())
+    Lp = mx.linalg.cholesky(mx.array(Hd[::-1, ::-1].copy()), stream=mx.cpu)
+    R = Lp[::-1, ::-1]
+    U = mx.linalg.tri_inv(R, upper=True, stream=mx.cpu)
+    return np.array(U)
+
+
+_block_steps = {}
+
+
+def _block_step(book: str):
+    """One GPTQ block as a single compiled GPU graph.
+
+    W1 [N, B] are the block's columns (already corrected by earlier blocks), U
+    the matching [B, B] upper-triangular piece of the factor, sr [N, 1] the row
+    scales. Column j is rounded, and its error is pushed onto the columns to
+    its right (row j of U is zero to the left of the diagonal). Returns the
+    chosen codebook values and the scaled errors, both [N, B].
+    """
+    if book not in _block_steps:
+        def step(W1, U, sr):
+            levs, errs = [], []
+            for j in range(W1.shape[1]):
+                w = W1[:, j:j + 1]
+                lev = _snap_mx(w / sr, book)
+                e = (w - lev * sr) / U[j, j]
+                W1 = W1 - e * U[j:j + 1, :]
+                levs.append(lev)
+                errs.append(e)
+            return mx.concatenate(levs, axis=1), mx.concatenate(errs, axis=1)
+        _block_steps[book] = mx.compile(step)
+    return _block_steps[book]
+
+
+def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=(0.0,),
+                  damp: float = 0.01, block: int = 128, chunk: int = 32768):
+    """GPTQ on the fixed grid s[n] * c[k] * L: columns are rounded left to
+    right and each rounding error is pushed onto the not-yet-rounded columns,
+    using the inverse Hessian of the layer's input (H = E[x x^T]).
+
+    Scales come from the round-to-nearest search and stay fixed; only the
+    choice of level per weight changes. Returns (levels, s, c).
+    """
+    N, K = W.shape
+    h = np.diag(H).astype(np.float32).copy()
+    _, s, c = quantize_rtn(W, h, book, alphas, betas)
+
+    # Work on Wc = W / c, whose input is c * x: Hc = diag(c) H diag(c).
+    Hc = (H.astype(np.float32) * c[None, :]) * c[:, None]
+    dead = np.diag(Hc) <= 0
+    Hc[dead, dead] = 1.0
+    U = mx.array(gptq_factor(Hc, damp))
+    step = _block_step(book)
+    live = mx.array((~dead).astype(np.float32))
+
+    out = np.empty((N, K), dtype=np.float32)
+    for r0 in range(0, N, chunk):
+        rest = mx.array(W[r0:r0 + chunk] / c) * live     # columns not yet rounded
+        sr = mx.array(s[r0:r0 + chunk, None])
+        for i1 in range(0, K, block):
+            i2 = min(i1 + block, K)
+            lev, err = step(rest[:, :i2 - i1], U[i1:i2, i1:i2], sr)
+            rest = rest[:, i2 - i1:] - err @ U[i1:i2, i2:] if i2 < K else None
+            mx.eval(lev, rest) if rest is not None else mx.eval(lev)
+            out[r0:r0 + chunk, i1:i2] = np.array(lev)
+    return out, s, c

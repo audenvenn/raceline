@@ -166,6 +166,34 @@ class Writer:
             w=self.blob(w), s=self.blob(s), b=self.blob(b),
             parts={pn: dict(offset=o, n=r) for (pn, _), (o, r) in zip(named_parts, offs)})
 
+    def add_native(self, name, named_parts, codes, s, c, book):
+        """Scale-free 4-bit matrix: codes [N][K] (uint8, one code per weight),
+        a scale per row and a scale per column. Rows are padded to a whole
+        block with scale 0, so padding never contributes."""
+        n, k = codes.shape
+        n_pad = -(-n // BLOCK) * BLOCK
+        q = np.zeros((n_pad, k), dtype=np.uint8)
+        q[:n] = codes
+        blocks = n_pad // BLOCK
+        qb = q.reshape(blocks, BLOCK, k).transpose(0, 2, 1)
+        w = np.ascontiguousarray((qb[:, :, 0::2] | (qb[:, :, 1::2] << 4)).astype(np.uint8))
+        s_pad = np.zeros(n_pad, dtype=np.float32)
+        s_pad[:n] = s
+        off = 0
+        parts = {}
+        for pn, rows in named_parts:
+            parts[pn] = dict(offset=off, n=rows)
+            off += rows
+        self.tensors[name] = dict(kind="q4n", section=len(self.sections), book=book, k=k, n=n, n_pad=n_pad,
+                                  w=self.blob(w), s=self.blob(s_pad), c=self.blob(c.astype(np.float32)), parts=parts)
+
+    def add_native_rows(self, name, codes, s, c, book):
+        """Row-major variant for row lookups (token embeddings)."""
+        w = np.ascontiguousarray((codes[:, 0::2] | (codes[:, 1::2] << 4)).astype(np.uint8))
+        self.tensors[name] = dict(kind="q4n_rows", section=len(self.sections), book=book, k=codes.shape[1],
+                                  n=codes.shape[0], w=self.blob(w), s=self.blob(s.astype(np.float32)),
+                                  c=self.blob(c.astype(np.float32)))
+
     def add_rows(self, name, q, s, b):
         w, s16, b16 = pack_rows(q, s, b)
         self.tensors[name] = dict(kind="q4a_rows", section=len(self.sections), k=q.shape[1], n=q.shape[0],

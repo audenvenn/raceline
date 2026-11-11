@@ -114,3 +114,98 @@ kernel void linear_q4a(device half *a [[buffer(0)]],
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Native format: C[M][N] = s[n] * (A[M][K] * L(q[N][K])^T)
+//
+// q is a 4-bit code the accelerator decodes itself (W_T: `metal_fp4_e2m1_format`
+// or `int4b_format`), in the same blocked layout as above. There is no
+// per-group scale, so the whole inner dimension is one hardware matmul with
+// nothing done in software until the result is in registers. The scale per
+// output row is applied there; the scale per input column is already folded
+// into A by whichever kernel produced it.
+//
+// HALF_STEP = 1 selects the 16-level uniform codebook, whose levels sit at
+// q + 0.5: the extra 0.5 * sum_k A[m][k] is supplied per row in `asum`.
+#ifndef W_T
+#define W_T int4b_format
+#endif
+#ifndef HALF_STEP
+#define HALF_STEP 0
+#endif
+
+kernel void linear_q4n(device half *a [[buffer(0)]],
+                       device uchar *w [[buffer(1)]],
+                       device float *s [[buffer(2)]],
+                       device float *asum [[buffer(3)]],
+                       device OUT_T *c [[buffer(4)]],
+                       constant LinearParams &p [[buffer(5)]],
+                       uint3 tgid [[threadgroup_position_in_grid]])
+{
+  const int n0 = int(tgid.x) * TN;
+  const int m0 = int(tgid.y) * TM;
+  const int blk = n0 / BLOCK;
+  const int col = n0 % BLOCK;
+
+  constexpr auto desc = matmul2d_descriptor(TM, TN, static_cast<int>(dynamic_extent), false, false, true,
+                                            matmul2d_descriptor::mode::multiply);
+  matmul2d<desc, execution_simdgroups<NSG>> op;
+
+  array<int, 2> a_str = {1, p.a_stride};
+  array<int, 2> w_str = {1, BLOCK};
+  tensor<device half, dextents<int, 2>, tensor_inline> A(a, dextents<int, 2>(p.K, p.M), a_str);
+  tensor<device W_T, dextents<int, 2>, tensor_inline> W(
+      w + size_t(blk) * size_t(p.K) * (BLOCK / 2), dextents<int, 2>(BLOCK, p.K), w_str);
+
+  auto tA = A.slice(0, m0);
+  auto tW = W.slice(col, 0);
+  auto acc = op.get_destination_cooperative_tensor<decltype(tA), decltype(tW), float>();
+  op.run(tA, tW, acc);
+
+  const device float *sn = s + n0;
+  device OUT_T *out = c + size_t(m0) * p.c_stride + n0;
+#pragma clang loop unroll(full)
+  for (ushort i = 0; i < acc.get_capacity(); ++i) {
+    if (acc.is_valid_element(i)) {
+      auto idx = acc.get_multidimensional_index(i);
+#if HALF_STEP
+      const float v = sn[idx[0]] * (acc[i] + 0.5f * asum[m0 + idx[1]]);
+#else
+      const float v = sn[idx[0]] * acc[i];
+#endif
+      device OUT_T *dst = out + size_t(idx[1]) * p.c_stride + idx[0];
+#if ACCUM
+      *dst = OUT_T(float(*dst) + v);
+#else
+      *dst = OUT_T(v);
+#endif
+    }
+  }
+}
+
+// Same product without the row scale, written straight to memory by the
+// accelerator op: C[M][N] = A[M][K] * L(q[N][K])^T. Kept to measure what the
+// in-register epilogue of linear_q4n costs.
+kernel void linear_q4n_raw(device half *a [[buffer(0)]],
+                           device uchar *w [[buffer(1)]],
+                           device float *c [[buffer(4)]],
+                           constant LinearParams &p [[buffer(5)]],
+                           uint3 tgid [[threadgroup_position_in_grid]])
+{
+  const int n0 = int(tgid.x) * TN;
+  const int m0 = int(tgid.y) * TM;
+  constexpr auto desc = matmul2d_descriptor(TM, TN, static_cast<int>(dynamic_extent), false, false, true,
+                                            matmul2d_descriptor::mode::multiply);
+  matmul2d<desc, execution_simdgroups<NSG>> op;
+  array<int, 2> a_str = {1, p.a_stride};
+  array<int, 2> w_str = {1, BLOCK};
+  array<int, 2> c_str = {1, p.c_stride};
+  tensor<device half, dextents<int, 2>, tensor_inline> A(a, dextents<int, 2>(p.K, p.M), a_str);
+  tensor<device W_T, dextents<int, 2>, tensor_inline> W(
+      w + size_t(n0 / BLOCK) * size_t(p.K) * (BLOCK / 2), dextents<int, 2>(BLOCK, p.K), w_str);
+  tensor<device float, dextents<int, 2>, tensor_inline> C(c, dextents<int, 2>(p.N, p.M), c_str);
+  auto tA = A.slice(0, m0);
+  auto tW = W.slice(n0 % BLOCK, 0);
+  auto tC = C.slice(n0, m0);
+  op.run(tA, tW, tC);
+}

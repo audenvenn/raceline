@@ -45,13 +45,35 @@ End to end, 1024-token prompt, greedy decode:
 
 | Model | Engine | Load | Prefill | Decode |
 |---|---|---|---|---|
-| Qwen3.5-4B | MLX 0.32.4 | 1.2 s | 1773 tok/s | 50.2 tok/s |
+| Qwen3.5-4B | MLX 0.32.4 | 1.2 s | 1767 tok/s | 50.8 tok/s |
 | | llama.cpp 0.9.0 (Q4_K_M) | – | 1250 tok/s | 39.9 tok/s |
-| | **redline** | 0.03 s | 1607 tok/s | 37.4 tok/s |
+| | **redline**, MLX's weights | 0.03 s | 1588 tok/s | 37.4 tok/s |
+| | **redline**, native FP4 weights | 0.03 s | 1683 tok/s | 43.2 tok/s |
 | Qwen3.8-27B | MLX 0.32.4 | 4.6 s | 269 tok/s | 9.2 tok/s |
-| | **redline** | 0.05 s | ~205–230 tok/s | 7.2 tok/s |
+| | **redline**, MLX's weights | 0.05 s | ~205–230 tok/s | 7.2 tok/s |
 
 The 27B figures are noisy: at 4-bit it needs 15–18 GB and the machine swaps.
+The native format has not been run on the 27B yet.
+
+### Native weight format
+
+`tools/quantize.py` turns an original checkpoint into weights of the form
+`s[n] * c[k] * L[q]`: a 4-bit code the accelerators decode themselves, a scale
+per output row and one per input column, nothing per group. It works one layer
+at a time (GPTQ on calibration activations), so a checkpoint larger than RAM
+converts. Held-out quality against the float model, Qwen3.5-4B, 1152 positions:
+
+| Weights | Bits/weight | KL (nats) | Perplexity | Top-1 agreement |
+|---|---|---|---|---|
+| MLX affine 4-bit, groups of 64 | 4.5 | 0.072 | 3.465 | 88.5% |
+| native FP4, GPTQ | 4.0 | 0.083 | 3.379 | 88.6% |
+| native 16-level integer, GPTQ | 4.0 | 0.097 | 3.543 | 88.6% |
+| native FP4, round to nearest | 4.0 | 0.103 | 3.478 | 88.9% |
+| native 16-level integer, round to nearest | 4.0 | 0.155 | 3.782 | 85.4% |
+
+FP4 with GPTQ is on par with MLX's format at 11% less memory. The engine's
+output on that file matches MLX running the same decoded weights
+(`tests/verify_native.py`).
 
 The linear kernel in isolation, same quantized weights as MLX, Qwen3.8-27B
 gate/up projection (5120 → 17408):

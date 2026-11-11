@@ -201,6 +201,21 @@ Responses carry `usage.prompt_tokens_details.cached_tokens` and a `timings`
 object, so a client can see what a request cost. One conversation is served
 at a time; this is a single-user runtime.
 
+## Configuration
+
+Environment variables, all optional:
+
+| Variable | Meaning |
+|---|---|
+| `RACELINE_MODEL` | Model used when a command names none. |
+| `RACELINE_CACHE` | Where pulled models and unpacked tokenizer files live (default `~/.cache/raceline`). |
+| `RACELINE_MTP` | `0` turns drafts off: one token per pass. |
+| `RACELINE_DRAFTS` | Most drafts per pass (default 6, at most 7). |
+| `RACELINE_MIN_CONFIDENCE` | Fixed threshold below which drafting stops, instead of the measured one. |
+| `RACELINE_DRAFT_VOCAB` | Token-id limit of a draft's vocabulary pass (`0` for the whole vocabulary; chosen from the context by default). |
+| `RACELINE_RELEASES` | Base URL `raceline pull` downloads from. |
+| `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
+
 ## What is checked
 
 | Check | Result |

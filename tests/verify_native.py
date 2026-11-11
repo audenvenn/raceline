@@ -66,7 +66,7 @@ def main():
     ap.add_argument("float_model")
     ap.add_argument("rlm")
     ap.add_argument("tokens")
-    ap.add_argument("--redline", default="build/cmake/redline")
+    ap.add_argument("--redline", default="build/cmake/redline-engine")
     args = ap.parse_args()
 
     hdr, matrix = read_native(args.rlm)

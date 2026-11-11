@@ -27,7 +27,12 @@ target_include_directories(redline_core PUBLIC src)
 target_compile_definitions(redline_core PUBLIC RL_KERNEL_DIR="${CMAKE_SOURCE_DIR}/kernels")
 target_link_libraries(redline_core PUBLIC "-framework Metal" "-framework Foundation" "-framework Accelerate")
 
-add_executable(redline src/main.mm)
+# Development command line: dump, logits, bench, profile.
+add_executable(redline-engine src/main.mm)
+target_link_libraries(redline-engine PRIVATE redline_core)
+
+# C API for the Python agent runtime (redline/engine.py loads it with ctypes).
+add_library(redline SHARED src/capi.mm)
 target_link_libraries(redline PRIVATE redline_core)
 
 # Tests

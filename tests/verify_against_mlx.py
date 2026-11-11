@@ -59,7 +59,7 @@ def main():
     ap.add_argument("mlx_model")
     ap.add_argument("rlm_model")
     ap.add_argument("tokens")
-    ap.add_argument("--redline", default="build/cmake/redline")
+    ap.add_argument("--redline", default="build/cmake/redline-engine")
     ap.add_argument("--tol", type=float, default=2e-2, help="max relative error allowed on any layer")
     args = ap.parse_args()
 

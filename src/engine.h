@@ -35,6 +35,14 @@ class Engine {
   // GPU seconds spent in the last forward().
   double last_gpu_seconds() const { return gpu_seconds_; }
 
+  // The recurrent layers' state (conv window and DeltaNet matrices), which is
+  // all that is needed to return to an earlier position: attention entries
+  // past that position are overwritten as new tokens arrive. A state saved at
+  // position p may be loaded for as long as the first p tokens are unchanged.
+  size_t state_bytes() const;
+  void save_state(void *dst) const;
+  void load_state(const void *src, int position);
+
   // Differential profiling: every dispatch of the named kernel is repeated
   // `times` extra times. Repeats recompute the same outputs (or write to
   // scratch), so results are unchanged and the added GPU time is that

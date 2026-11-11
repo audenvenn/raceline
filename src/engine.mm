@@ -110,6 +110,37 @@ void Engine::reset() {
   }
 }
 
+size_t Engine::state_bytes() const {
+  size_t n = 0;
+  for (const auto &L : lin_)
+    if (L) n += L->conv[0].length + L->S.length;
+  return n;
+}
+
+void Engine::save_state(void *dst) const {
+  char *p = (char *)dst;
+  for (const auto &L : lin_) {
+    if (!L) continue;
+    memcpy(p, L->conv[L->cur].contents, L->conv[0].length);
+    p += L->conv[0].length;
+    memcpy(p, L->S.contents, L->S.length);
+    p += L->S.length;
+  }
+}
+
+void Engine::load_state(const void *src, int position) {
+  if (position < 0 || position > max_ctx_) fatal("load_state: position %d out of range", position);
+  const char *p = (const char *)src;
+  for (auto &L : lin_) {
+    if (!L) continue;
+    memcpy(L->conv[L->cur].contents, p, L->conv[0].length);
+    p += L->conv[0].length;
+    memcpy(L->S.contents, p, L->S.length);
+    p += L->S.length;
+  }
+  pos_ = position;
+}
+
 Engine::Tile Engine::tile_for(int rows) const {
   // From tests/test_linear --sweep and end-to-end runs on M6. Tiles taller
   // than 32 rows are ~3x slower in this kernel: the in-register scale step

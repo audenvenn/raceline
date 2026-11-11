@@ -26,7 +26,8 @@ constexpr int kMtpRows = 4;  // hidden states that can wait for their next token
 }  // namespace
 
 struct Engine::AttnLayer {
-  id<MTLBuffer> K, V;     // [KVH][max_ctx][head_dim] half
+  id<MTLBuffer> K;        // [KVH][blocks of 256 positions][head_dim][256] half
+  id<MTLBuffer> V;        // [KVH][positions][head_dim] half
 };
 
 namespace {
@@ -42,7 +43,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     : model_(new ModelFile(mt_, model_path)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
   const Config &c = config();
   if (c.lin_k_dim != 128 || c.head_dim != 256 || c.rope_dims() != 64 || c.conv_taps != 4 || c.group != 64 ||
-      c.block != 256 || c.lin_v_dim % 8 != 0)
+      c.block != 256 || c.lin_v_dim % 8 != 0 || c.heads % c.kv_heads != 0)
     fatal("unsupported model geometry (kernels assume Dk=128, head_dim=256, 64 rotary dims, 4 conv taps)");
 
   has_mtp_ = mtp_ = c.native && model_->has("mtp.fc");
@@ -67,7 +68,16 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   qk_ = mt_.alloc(R * 2 * c.lin_key_dim() * sizeof(float));
   bg_ = mt_.alloc(R * 2 * c.lin_v_heads * sizeof(float));
   yo_ = mt_.alloc(R * c.lin_value_dim() * sizeof(float));
-  qn_ = mt_.alloc(R * c.attn_dim() * sizeof(float));
+  const int G = c.heads / c.kv_heads;
+  kv_blocks_ = (max_ctx_ + 255) / 256;
+  q_rows_ = rows_cap_ * G + 32;
+  aq_ = mt_.alloc((size_t)c.kv_heads * q_rows_ * c.head_dim * sizeof(_Float16));
+  al_ = mt_.alloc((size_t)c.kv_heads * q_rows_ * sizeof(float));
+  // Scores for a group of rows: [KVH][rows * G][keys]. A decode step touches a
+  // sliver of this; a prefill chunk at long context is cut into groups that fit.
+  score_cap_ = std::max((size_t)24 << 20, (size_t)c.kv_heads * 64 * kv_blocks_ * 256);
+  as_ = mt_.alloc(score_cap_ * sizeof(float));
+  ap_ = mt_.alloc(score_cap_ * sizeof(_Float16));
   rope_ = mt_.alloc(R * 64 * sizeof(float));
   logits_ = mt_.alloc((size_t)16 * model_->q("lm_head").n_pad * sizeof(float));
 
@@ -111,7 +121,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       lin_[i] = L;
     } else {
       auto A = std::make_shared<AttnLayer>();
-      size_t bytes = (size_t)c.kv_heads * max_ctx_ * c.head_dim * sizeof(_Float16);
+      size_t bytes = (size_t)c.kv_heads * kv_blocks_ * 256 * c.head_dim * sizeof(_Float16);
       A->K = mt_.alloc(bytes);
       A->V = mt_.alloc(bytes);
       attn_[i] = A;
@@ -426,13 +436,16 @@ void Engine::encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope) {
   const Config &c = config();
   AttnLayer &A = *attn_[layer];
   const QTensor &qkv = model_->q(lname(layer, "attn.qkv"));
+  const int G = c.heads / c.kv_heads, D = c.head_dim;
 
   encode_norm(0, layer, T, 0);
   encode_linear(qkv, T, proj_, 0, proj_stride_, false, "linear:attn_qkv");
 
-  const AttnParams ap{T, c.heads, c.kv_heads, c.head_dim, proj_stride_, qkv.part_offset("k"),
-                      qkv.part_offset("v"), c.attn_dim(), x_stride_, pos0, max_ctx_, c.norm_eps,
-                      1.0f / sqrtf((float)c.head_dim)};
+  AttnParams ap{};
+  ap.T = T, ap.H = c.heads, ap.KVH = c.kv_heads, ap.D = D;
+  ap.proj_stride = proj_stride_, ap.off_k = qkv.part_offset("k"), ap.off_v = qkv.part_offset("v");
+  ap.q_rows = q_rows_, ap.out_stride = x_stride_, ap.pos0 = pos0, ap.Lb = kv_blocks_;
+  ap.eps = c.norm_eps, ap.scale = 1.0f / sqrtf((float)D);
   const FTensor &qw = model_->f(lname(layer, "attn.q_norm"));
   const FTensor &kw = model_->f(lname(layer, "attn.k_norm"));
   [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "attn_prep")];
@@ -440,23 +453,56 @@ void Engine::encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope) {
   [enc_ setBuffer:qw.buf offset:qw.offset atIndex:1];
   [enc_ setBuffer:kw.buf offset:kw.offset atIndex:2];
   [enc_ setBuffer:rope offset:0 atIndex:3];
-  [enc_ setBuffer:qn_ offset:0 atIndex:4];
+  [enc_ setBuffer:aq_ offset:0 atIndex:4];
   [enc_ setBuffer:A.K offset:0 atIndex:5];
   [enc_ setBuffer:A.V offset:0 atIndex:6];
   set_params(enc_, ap, 7);
   run_groups(c.heads + 2 * c.kv_heads, T);
   mark("attn_prep");
 
-  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "attn_sdpa")];
-  [enc_ setBuffer:qn_ offset:0 atIndex:0];
-  [enc_ setBuffer:A.K offset:0 atIndex:1];
-  [enc_ setBuffer:A.V offset:0 atIndex:2];
-  [enc_ setBuffer:proj_ offset:0 atIndex:3];
-  [enc_ setBuffer:xn_ offset:0 atIndex:4];
-  set_params(enc_, ap, 5);
-  bind_column_scale(model_->q(lname(layer, "attn.o_proj")), 6);
-  run_groups(c.heads, T);
-  mark("attn_sdpa");
+  // Rows are taken in groups whose scores fit the scratch buffers: all of
+  // them in one group unless the context is long.
+  for (int r0 = 0; r0 < T;) {
+    int R = T - r0, kv_rows = 0, n_pad = 0;
+    Tile t{};
+    for (;; R = (R + 1) / 2) {
+      t = tile_for(R * G);
+      kv_rows = (R * G + t.tm - 1) / t.tm * t.tm;
+      n_pad = (pos0 + r0 + R + 255) / 256 * 256;
+      if ((size_t)c.kv_heads * kv_rows * n_pad <= score_cap_ || R == 1) break;
+    }
+    ap.pos0 = pos0 + r0;
+    ap.M = R * G, ap.kv_rows = kv_rows, ap.n_pad = n_pad, ap.n_stride = n_pad;
+    const Macros mac = {{"TM", std::to_string(t.tm)}, {"TN", std::to_string(t.tn)}, {"NSG", std::to_string(t.nsg)}};
+
+    [enc_ setComputePipelineState:mt_.pipeline("attention.metal", "attn_scores", mac)];
+    [enc_ setBuffer:aq_ offset:(size_t)r0 * G * D * sizeof(_Float16) atIndex:0];
+    [enc_ setBuffer:A.K offset:0 atIndex:1];
+    [enc_ setBuffer:as_ offset:0 atIndex:2];
+    set_params(enc_, ap, 3);
+    run_groups(n_pad / t.tn, kv_rows / t.tm, 32 * t.nsg, c.kv_heads);
+    mark("attn_scores");
+
+    [enc_ setComputePipelineState:mt_.pipeline("attention.metal", "attn_softmax", mac)];
+    [enc_ setBuffer:as_ offset:0 atIndex:0];
+    [enc_ setBuffer:ap_ offset:0 atIndex:1];
+    [enc_ setBuffer:al_ offset:0 atIndex:2];
+    set_params(enc_, ap, 3);
+    run_groups(1, R * G, 32, c.kv_heads);
+    mark("attn_softmax");
+
+    [enc_ setComputePipelineState:mt_.pipeline("attention.metal", "attn_pv", mac)];
+    [enc_ setBuffer:ap_ offset:0 atIndex:0];
+    [enc_ setBuffer:A.V offset:0 atIndex:1];
+    [enc_ setBuffer:al_ offset:0 atIndex:2];
+    [enc_ setBuffer:proj_ offset:(size_t)r0 * proj_stride_ * sizeof(float) atIndex:3];
+    [enc_ setBuffer:xn_ offset:(size_t)r0 * x_stride_ * sizeof(_Float16) atIndex:4];
+    set_params(enc_, ap, 5);
+    bind_column_scale(model_->q(lname(layer, "attn.o_proj")), 6);
+    run_groups(D / t.tn, kv_rows / t.tm, 32 * t.nsg, c.kv_heads);
+    mark("attn_pv");
+    r0 += R;
+  }
 
   encode_linear(model_->q(lname(layer, "attn.o_proj")), T, h_, 0, c.hidden, true, "linear:attn_out");
 }
@@ -467,8 +513,8 @@ void Engine::run_threads(int w, int h) {
 }
 
 // `threads_per_group` threads (a whole number of 32-thread SIMD-groups) per grid cell.
-void Engine::run_groups(int w, int h, int threads_per_group) {
-  last_ = {false, MTLSizeMake(w, h, 1), MTLSizeMake(threads_per_group, 1, 1)};
+void Engine::run_groups(int w, int h, int threads_per_group, int depth) {
+  last_ = {false, MTLSizeMake(w, h, depth), MTLSizeMake(threads_per_group, 1, 1)};
   redo();
 }
 

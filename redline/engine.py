@@ -15,6 +15,7 @@ this off.
 from __future__ import annotations
 
 import ctypes
+import functools
 import json
 import os
 import struct
@@ -25,6 +26,7 @@ import numpy as np
 from .backends import Backend, Sampling, Snapshot
 
 
+@functools.lru_cache(maxsize=1)
 def _library() -> ctypes.CDLL:
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [os.environ.get("REDLINE_LIB"), os.path.join(here, "libredline.dylib"),
@@ -56,6 +58,7 @@ def _library() -> ctypes.CDLL:
     lib.rl_hidden.restype = ctypes.POINTER(ctypes.c_float)
     for fn in ("rl_has_mtp", "rl_reject_draft", "rl_logits_stride", "rl_hidden", "rl_hidden_size"):
         getattr(lib, fn).argtypes = [ctypes.c_void_p]
+    lib.rl_top_k.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     return lib
 
 
@@ -199,6 +202,14 @@ class RedlineBackend(Backend):
         self._logits = snap.logits
 
 
+def _top_k(logits: np.ndarray, k: int):
+    """-> (token ids, values) of the k largest logits, descending."""
+    k = min(k, logits.size)
+    ids, vals = np.empty(k, dtype=np.int32), np.empty(k, dtype=np.float32)
+    n = _library().rl_top_k(logits.ctypes.data, logits.size, k, ids.ctypes.data, vals.ctypes.data)
+    return ids[:n].astype(np.int64), vals[:n]
+
+
 def _uniform(seed: int, position: int, ids: np.ndarray) -> np.ndarray:
     """A number in (0, 1) for every (seed, position, token id), by hashing: the
     same token at the same position gets the same number whoever asks."""
@@ -222,21 +233,24 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
     drafts keep being accepted at temperatures where the model's pick is not
     simply its most likely token.
     """
-    z = logits
+    k = 1 if s.temperature <= 0 else (s.top_k if s.top_k > 0 else 1024)   # beyond 1024 the tail carries no usable mass
+    top, z = _top_k(logits, k)
     if recent and (s.repetition_penalty != 1.0 or s.presence_penalty):
-        z = z.copy()
-        idx = np.unique(np.asarray(recent[-64:], dtype=np.int64))
+        # Penalties touch only recently seen tokens, so the penalized top k is
+        # among the plain top k + |seen| and the seen tokens themselves.
+        seen = np.unique(np.asarray(recent[-64:], dtype=np.int64))
+        top = np.union1d(_top_k(logits, k + len(seen))[0], seen)
+        z = logits[top].astype(np.float64)
+        hit = np.isin(top, seen)
         if s.repetition_penalty != 1.0:
-            v = z[idx]
-            z[idx] = np.where(v > 0, v / s.repetition_penalty, v * s.repetition_penalty)
+            z[hit] = np.where(z[hit] > 0, z[hit] / s.repetition_penalty, z[hit] * s.repetition_penalty)
         if s.presence_penalty:
-            z[idx] -= s.presence_penalty
+            z[hit] -= s.presence_penalty
+        order = np.argsort(-z, kind="stable")[:k]
+        top, z = top[order], z[order]
     if s.temperature <= 0:
-        return int(np.argmax(z))
-    k = min(s.top_k, z.size) if s.top_k > 0 else min(1024, z.size)   # the tail beyond 1024 carries no usable mass
-    top = np.argpartition(z, -k)[-k:]
-    top = top[np.argsort(-z[top])]
-    logp = (z[top] - z[top[0]]).astype(np.float64) / s.temperature
+        return int(top[0])
+    logp = (z - z[0]).astype(np.float64) / s.temperature
     p = np.exp(logp)
     p /= p.sum()
     keep = len(top)

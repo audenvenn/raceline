@@ -118,7 +118,7 @@ class Engine {
   void begin();                 // opens a command buffer + compute encoder
   void flush(bool reopen);      // commits, waits, accumulates GPU time
   void run_threads(int w, int h);
-  void run_groups(int w, int h, int threads_per_group = 32);
+  void run_groups(int w, int h, int threads_per_group = 32, int depth = 1);
   void redo();                  // issues the last dispatch again
   void mark(const char *what);  // names the dispatch just issued (for set_repeat)
   bool repeating(const char *what) const { return repeat_times_ > 0 && repeat_ == what; }
@@ -141,7 +141,12 @@ class Engine {
 
   // Scratch activations, all [rows_cap_][stride].
   int x_stride_, proj_stride_;
-  id<MTLBuffer> tok_, h_, xn_, gsum_, proj_, y_, qk_, bg_, yo_, qn_, rope_, logits_;
+  id<MTLBuffer> tok_, h_, xn_, gsum_, proj_, y_, qk_, bg_, yo_, rope_, logits_;
+  // Attention: queries [KVH][q_rows_][head_dim] half, and for one group of rows
+  // the scores (float), unnormalized probabilities (half) and their row sums.
+  id<MTLBuffer> aq_, as_, ap_, al_;
+  int q_rows_ = 0, kv_blocks_ = 0;
+  size_t score_cap_ = 0;  // elements in as_ / ap_
 
   // Native-format models scale each matrix's input columns outside the matmul:
   // the norm weights are pre-multiplied by the column scale of the matrix they

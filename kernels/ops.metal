@@ -320,16 +320,21 @@ kernel void swiglu(device const float *proj [[buffer(0)]],
 }
 
 // ---------------------------------------------------------------- attention
-// One SIMD-group per (vector, token). Vectors 0..H-1 are queries, the next KVH
-// are keys, the last KVH are values. Queries and keys get a weighted RMS norm
-// and rotary embedding on their first 64 dims; keys and values are appended to
-// the cache at position pos0 + t. Lane l owns dims l, l+32, ..., so each
-// rotary pair (i, i+32) sits in one lane. Requires D == 256 and 64 rotary dims.
+// Prepares one token's queries, keys and values (the attention itself is in
+// attention.metal). One SIMD-group per (vector, token): vectors 0..H-1 are
+// queries, the next KVH are keys, the last KVH are values. Queries and keys
+// get a weighted RMS norm and rotary embedding on their first 64 dims. Lane l
+// owns dims l, l+32, ..., so each rotary pair (i, i+32) sits in one lane.
+// Requires D == 256 and 64 rotary dims.
+//
+// Queries go to q[kv head][t * G + j][D] (G = H / KVH query heads j per
+// key/value head), keys and values into the cache at position pos0 + t: keys
+// as [block of 256 positions][dim][position], values as [position][dim].
 kernel void attn_prep(device const float *proj [[buffer(0)]],
                       device const float *q_w [[buffer(1)]],
                       device const float *k_w [[buffer(2)]],
                       device const float *rope [[buffer(3)]],
-                      device float *qn [[buffer(4)]],
+                      device half *q [[buffer(4)]],
                       device half *Kc [[buffer(5)]],
                       device half *Vc [[buffer(6)]],
                       constant AttnParams &p [[buffer(7)]],
@@ -344,7 +349,7 @@ kernel void attn_prep(device const float *proj [[buffer(0)]],
   if (v >= p.H + p.KVH) {  // value: plain copy into the cache
     const int kvh = v - p.H - p.KVH;
     const device float *src = row + p.off_v + kvh * p.D;
-    device half *dst = Vc + (size_t(kvh) * p.L + slot) * p.D;
+    device half *dst = Vc + (size_t(kvh) * p.Lb * 256 + slot) * p.D;
     for (int j = 0; j < J; ++j) dst[j * 32 + lane] = half(src[j * 32 + lane]);
     return;
   }
@@ -369,56 +374,11 @@ kernel void attn_prep(device const float *proj [[buffer(0)]],
   x[1] = x1;
 
   if (is_q) {
-    device float *dst = qn + size_t(t) * p.qn_stride + v * p.D;
-    for (int j = 0; j < J; ++j) dst[j * 32 + lane] = x[j];
-  } else {
-    device half *dst = Kc + (size_t(v - p.H) * p.L + slot) * p.D;
+    const int G = p.H / p.KVH;
+    device half *dst = q + (size_t(v / G) * p.q_rows + size_t(t) * G + v % G) * p.D;
     for (int j = 0; j < J; ++j) dst[j * 32 + lane] = half(x[j]);
-  }
-}
-
-// Causal softmax attention with a streaming (online) softmax, one SIMD-group
-// per (query head, token), followed by the sigmoid output gate.
-kernel void attn_sdpa(device const float *qn [[buffer(0)]],
-                      device const half *Kc [[buffer(1)]],
-                      device const half *Vc [[buffer(2)]],
-                      device const float *proj [[buffer(3)]],
-                      device half *out [[buffer(4)]],
-                      constant AttnParams &p [[buffer(5)]],
-                      device const float *cs [[buffer(6)]],
-                      uint3 tg [[threadgroup_position_in_grid]],
-                      uint lane [[thread_index_in_simdgroup]])
-{
-  constexpr int J = 8;
-  const int hh = int(tg.x), t = int(tg.y);
-  const int kvh = hh / (p.H / p.KVH);
-  const device float *qrow = qn + size_t(t) * p.qn_stride + hh * p.D;
-  float q[J];
-  for (int j = 0; j < J; ++j) q[j] = qrow[j * 32 + lane];
-
-  const device half *K = Kc + size_t(kvh) * p.L * p.D;
-  const device half *V = Vc + size_t(kvh) * p.L * p.D;
-  const int n_keys = p.pos0 + t + 1;
-  float m = -INFINITY, l = 0.0f;
-  float acc[J];
-  for (int j = 0; j < J; ++j) acc[j] = 0.0f;
-  for (int i = 0; i < n_keys; ++i) {
-    const device half *kr = K + size_t(i) * p.D;
-    float d = 0.0f;
-    for (int j = 0; j < J; ++j) d += q[j] * float(kr[j * 32 + lane]);
-    d = simd_sum(d) * p.scale;
-    const float m_new = max(m, d);
-    const float keep = exp(m - m_new), add = exp(d - m_new);
-    l = l * keep + add;
-    const device half *vr = V + size_t(i) * p.D;
-    for (int j = 0; j < J; ++j) acc[j] = acc[j] * keep + add * float(vr[j * 32 + lane]);
-    m = m_new;
-  }
-
-  const device float *gate = proj + size_t(t) * p.proj_stride + hh * 2 * p.D + p.D;
-  device half *dst = out + size_t(t) * p.out_stride + hh * p.D;
-  for (int j = 0; j < J; ++j) {
-    const int e = j * 32 + int(lane);
-    dst[e] = half(acc[j] / l * sigmoidf(gate[e]) * cs[hh * p.D + e]);
+  } else {
+    device half *dst = Kc + (size_t(v - p.H) * p.Lb + slot / 256) * p.D * 256 + slot % 256;
+    for (int j = 0; j < J; ++j) dst[size_t(j * 32 + lane) * 256] = half(x[j]);
   }
 }

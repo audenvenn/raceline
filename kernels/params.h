@@ -23,9 +23,14 @@ struct CopyParams { int T, D; };
 struct AttnParams {
   int T, H, KVH, D;          // rows, query heads, key/value heads, head dim
   int proj_stride, off_k, off_v;
-  int qn_stride, out_stride;
-  int pos0, L;               // absolute position of row 0; capacity of the KV cache
+  int q_rows;                // rows reserved per key/value head in the query buffer
+  int out_stride;
+  int pos0, Lb;              // absolute position of row 0; KV cache capacity in blocks of 256 keys
   float eps, scale;
+  // One group of rows in the matmul kernels (kernels/attention.metal); pos0 is then the group's first row.
+  int M;                     // query rows per key/value head: rows * (H / KVH)
+  int kv_rows;               // M padded to the tile height: rows between key/value heads in the score buffers
+  int n_pad, n_stride;       // keys covered (a multiple of 256); elements between rows of the score buffers
 };
 
 #endif

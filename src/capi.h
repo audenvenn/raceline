@@ -41,6 +41,12 @@ const float *rl_forward_draft(rl_engine *e, int32_t token, int32_t draft);
 void rl_reject_draft(rl_engine *e);
 size_t rl_logits_stride(const rl_engine *e);
 
+// The k largest of n logits in descending order (ties: lowest index first).
+// Writes their indices and values and returns how many (min(k, n)). A helper
+// for samplers: a full sort or partition of the vocabulary costs more than
+// the rest of sampling together.
+int rl_top_k(const float *logits, int n, int k, int32_t *ids, float *vals);
+
 // Final hidden states of the last rl_forward, [n][hidden] floats (MTP off).
 const float *rl_hidden(const rl_engine *e);
 int rl_hidden_size(const rl_engine *e);

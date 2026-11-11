@@ -227,7 +227,8 @@ int main(int argc, char **argv) {
     const auto base = measure();
     const char *kernels[] = {"linear:gate_up", "linear:down", "linear:lin_in", "linear:lin_out", "linear:attn_qkv",
                              "linear:attn_out", "linear:lm_head", "group_sums", "rms_norm", "swiglu", "lin_conv",
-                             "lin_prep_qk", "lin_gates", "gated_delta", "lin_out_norm", "attn_prep", "attn_sdpa",
+                             "lin_prep_qk", "lin_gates", "gated_delta", "lin_out_norm", "attn_prep", "attn_scores",
+                             "attn_softmax", "attn_pv",
                              "embed"};
     printf("in-situ cost per kernel (ms per token): prefill of %d tokens, decode of %d tokens\n", n_prompt, n_gen);
     printf("  %-18s %10s %7s %10s %7s\n", "kernel", "prefill", "", "decode", "");

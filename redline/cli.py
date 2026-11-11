@@ -55,6 +55,8 @@ def main(argv=None):
     p.add_argument("--cwd", default=".", help="working directory for the tools")
     p.add_argument("--yes", action="store_true", help="approve shell commands and file writes without asking")
     p.add_argument("--no-think", action="store_true", help="skip the model's reasoning phase")
+    p.add_argument("--effort", choices=["low", "medium", "xhigh"], default="low",
+                   help="reasoning effort, for models whose template takes one (default: low, for short steps)")
     p.add_argument("--max-tokens", type=int, default=4096)
 
     p = sub.add_parser("probe", help="measure this Mac's limits for local inference (and a model against them)")
@@ -75,7 +77,7 @@ def main(argv=None):
     else:
         from .agent import Agent, repl
         agent = Agent(rt, args.cwd, auto_approve=args.yes, thinking=not args.no_think, max_tokens=args.max_tokens,
-                      interactive=args.prompt is None, color=sys.stdout.isatty())
+                      interactive=args.prompt is None, color=sys.stdout.isatty(), effort=args.effort)
         if args.prompt is None:
             repl(agent)
         else:

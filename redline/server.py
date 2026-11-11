@@ -10,6 +10,8 @@ context, and reusing it across turns is the point.
 Extensions to the OpenAI schema, all optional: `top_k`, `repetition_penalty`,
 `enable_thinking` (also read from `chat_template_kwargs`), and in responses
 `usage.prompt_tokens_details.cached_tokens` plus a `timings` object.
+`reasoning_effort` low / medium / high selects the model's reasoning effort
+where its chat template has one (Qwen3.8); none / minimal turns thinking off.
 """
 
 from __future__ import annotations
@@ -37,6 +39,12 @@ def _thinking(body: dict) -> bool:
         if "enable_thinking" in src:
             return bool(src["enable_thinking"])
     return body.get("reasoning_effort") not in ("none", "minimal")
+
+
+def _effort(body: dict):
+    """OpenAI's reasoning_effort in the model's terms (low, medium, xhigh), if the client sent one."""
+    value = body.get("reasoning_effort") or (body.get("chat_template_kwargs") or {}).get("reasoning_effort")
+    return {"low": "low", "medium": "medium", "high": "xhigh", "xhigh": "xhigh"}.get(value)
 
 
 def _usage(stats: dict) -> dict:
@@ -93,7 +101,8 @@ def make_handler(runtime: Runtime, model_id: str):
             stop = [stop] if isinstance(stop, str) else stop
             max_tokens = body.get("max_completion_tokens") or body.get("max_tokens") or 4096
             try:
-                events = runtime.chat(messages, tools, _sampling(runtime, body), int(max_tokens), _thinking(body), stop)
+                events = runtime.chat(messages, tools, _sampling(runtime, body), int(max_tokens), _thinking(body), stop,
+                                      effort=_effort(body))
                 if body.get("stream"):
                     self._stream(events, body)
                 else:

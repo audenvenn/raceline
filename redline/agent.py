@@ -178,10 +178,11 @@ class Tools:
 
 class Agent:
     def __init__(self, runtime: Runtime, cwd: str, auto_approve: bool = False, thinking: bool = True,
-                 max_tokens: int = 4096, max_steps: int = 40, interactive: bool = True, color: bool = True):
+                 max_tokens: int = 4096, max_steps: int = 40, interactive: bool = True, color: bool = True,
+                 effort: str = "low"):
         self.rt = runtime
         self.cwd = os.path.abspath(cwd)
-        self.thinking, self.max_tokens, self.max_steps = thinking, max_tokens, max_steps
+        self.thinking, self.max_tokens, self.max_steps, self.effort = thinking, max_tokens, max_steps, effort
         self.auto_approve, self.interactive = auto_approve, interactive
         self.c = (lambda code, s: f"\033[{code}m{s}\033[0m") if color else (lambda code, s: s)
         self.tools = Tools(self.cwd, self._approve)
@@ -230,7 +231,7 @@ class Agent:
             t0 = time.perf_counter()
             try:
                 for kind, value in self.rt.chat(self.messages, TOOLS, max_tokens=self.max_tokens,
-                                                thinking=self.thinking):
+                                                thinking=self.thinking, effort=self.effort):
                     if kind == "reasoning":
                         reasoning += value
                         if shown != kind:

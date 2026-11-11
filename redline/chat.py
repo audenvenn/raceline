@@ -124,12 +124,14 @@ class Runtime:
         self._im_start, self._think, self._think_end = ids["<|im_start|>"], ids["<think>"], ids["</think>"]
         self._call, self._call_end = ids["<tool_call>"], ids["</tool_call>"]
 
-    def render(self, messages: list, tools: Optional[list], thinking: bool):
-        """-> (prompt tokens, snapshot positions, position to pin)."""
+    def render(self, messages: list, tools: Optional[list], thinking: bool, effort: Optional[str] = None):
+        """-> (prompt tokens, snapshot positions, position to pin). `effort` is the
+        reasoning effort for templates that take one (Qwen3.8: low, medium, xhigh)."""
         tok = self.backend.tokenizer
         msgs = normalize_messages(messages)
+        extra = {"reasoning_effort": effort} if effort and thinking else {}
         text = tok.apply_chat_template(msgs, tools=tools or None, add_generation_prompt=True, tokenize=False,
-                                       enable_thinking=thinking)
+                                       enable_thinking=thinking, **extra)
         tokens = tok.encode(text, add_special_tokens=False)
         starts = [i for i, t in enumerate(tokens) if t == self._im_start]
         has_system = bool(tools) or (msgs and msgs[0].get("role") == "system")
@@ -141,16 +143,16 @@ class Runtime:
 
     def chat(self, messages: list, tools: Optional[list] = None, sampling: Optional[Sampling] = None,
              max_tokens: int = 2048, thinking: bool = True, stop: Optional[list] = None,
-             progress=None) -> Iterator[tuple]:
+             progress=None, effort: Optional[str] = None) -> Iterator[tuple]:
         """Yields ("reasoning", text), ("content", text), ("tool_call", {...}) and
         finally ("done", stats)."""
         with self.lock:
             yield from self._chat(messages, tools, sampling or self.defaults, max_tokens, thinking, stop or [],
-                                  progress)
+                                  progress, effort)
 
-    def _chat(self, messages, tools, sampling, max_tokens, thinking, stop, progress):
+    def _chat(self, messages, tools, sampling, max_tokens, thinking, stop, progress, effort):
         tok = self.backend.tokenizer
-        prompt, points, pin = self.render(messages, tools, thinking)
+        prompt, points, pin = self.render(messages, tools, thinking, effort)
         limit = self.backend.max_context
         if limit is not None:
             if len(prompt) + 8 > limit:

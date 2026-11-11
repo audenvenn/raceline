@@ -154,7 +154,7 @@ later. It has been run on one machine, the M6 Mac mini above.
 
 ```sh
 python3 -m venv ~/.raceline && source ~/.raceline/bin/activate
-pip install git+https://github.com/audenvenn/raceline    # compiles the engine, about a minute
+pip install git+https://github.com/audenvenn/raceline    # compiles the engine, half a minute
 
 raceline pull  qwen3.5-4b     # 2.5 GB, converted and ready to run
 raceline chat  qwen3.5-4b     # terminal agent in the current directory
@@ -163,6 +163,10 @@ raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
 
 raceline pull  qwen3.8-27b    # 13.8 GB; wants a Mac with 24 GB or more
 ```
+
+Without the Xcode command line tools, install the wheel attached to the
+[latest release](https://github.com/audenvenn/raceline/releases/latest)
+instead: it has the engine compiled in.
 
 `raceline pull` downloads from this repository's releases (`--source
 huggingface` takes the same files from

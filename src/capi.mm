@@ -32,8 +32,10 @@ void rl_load_state(rl_engine *e, const void *src, int position) { e->engine.load
 int rl_has_mtp(const rl_engine *e) { return e->engine.has_mtp(); }
 void rl_set_mtp(rl_engine *e, int on) { e->engine.set_mtp(on != 0); }
 const float *rl_draft_logits(rl_engine *e, int32_t next_token) { return e->engine.draft_logits(next_token); }
-const float *rl_forward_draft(rl_engine *e, int32_t token, int32_t draft) { return e->engine.forward_draft(token, draft); }
-void rl_reject_draft(rl_engine *e) { e->engine.reject_draft(); }
+const float *rl_draft_more(rl_engine *e, int32_t guess) { return e->engine.draft_more(guess); }
+const float *rl_forward_draft(rl_engine *e, const int32_t *tokens, int n) { return e->engine.forward_draft(tokens, n); }
+void rl_keep_drafts(rl_engine *e, int accepted) { e->engine.keep_drafts(accepted); }
+int rl_max_drafts(const rl_engine *) { return rl::Engine::kMaxDrafts; }
 size_t rl_logits_stride(const rl_engine *e) { return (size_t)(e->engine.logits(1) - e->engine.logits(0)); }
 
 const float *rl_hidden(const rl_engine *e) { return e->engine.hidden(); }

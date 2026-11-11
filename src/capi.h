@@ -32,13 +32,16 @@ void rl_save_state(const rl_engine *e, void *dst);
 void rl_load_state(rl_engine *e, const void *src, int position);
 
 // Speculative decoding with the model's MTP head; see Engine in engine.h.
-// rl_forward_draft returns the logits after `token`; those after `draft`
-// follow rl_logits_stride() floats later.
+// rl_forward_draft feeds tokens[0] and the drafts tokens[1..n-1]; the logits
+// after row r start rl_logits_stride() * r floats into the returned array.
+// rl_keep_drafts(accepted) must follow it.
 int rl_has_mtp(const rl_engine *e);
+int rl_max_drafts(const rl_engine *e);
 void rl_set_mtp(rl_engine *e, int on);
 const float *rl_draft_logits(rl_engine *e, int32_t next_token);
-const float *rl_forward_draft(rl_engine *e, int32_t token, int32_t draft);
-void rl_reject_draft(rl_engine *e);
+const float *rl_draft_more(rl_engine *e, int32_t guess);
+const float *rl_forward_draft(rl_engine *e, const int32_t *tokens, int n);
+void rl_keep_drafts(rl_engine *e, int accepted);
 size_t rl_logits_stride(const rl_engine *e);
 
 // The k largest of n logits in descending order (ties: lowest index first).

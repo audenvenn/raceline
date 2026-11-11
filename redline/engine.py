@@ -5,11 +5,11 @@ chat template are not part of a .rlm file: they are read from REDLINE_TOKENIZER,
 or from the model directory the file was converted from if it sits next to it.
 
 When the file carries the model's multi-token-prediction head, generation is
-speculative: the head drafts the token after next, the engine checks the next
-token and the draft in one pass over the weights, and a draft that matches
-what the model then picks is a second token for the price of one. The output
+speculative: the head drafts the tokens that follow the next one, the engine
+checks the next token and the drafts in one pass over the weights, and every
+draft the model confirms is a token that cost no pass of its own. The output
 is exactly what one-token-at-a-time decoding produces. REDLINE_MTP=0 turns
-this off.
+this off; REDLINE_DRAFTS sets the most drafts per pass.
 """
 
 from __future__ import annotations
@@ -54,11 +54,14 @@ def _library() -> ctypes.CDLL:
     lib.rl_set_mtp.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.rl_draft_logits.restype = ctypes.POINTER(ctypes.c_float)
     lib.rl_draft_logits.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.rl_draft_more.restype = ctypes.POINTER(ctypes.c_float)
+    lib.rl_draft_more.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     lib.rl_forward_draft.restype = ctypes.POINTER(ctypes.c_float)
-    lib.rl_forward_draft.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32]
+    lib.rl_forward_draft.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int]
+    lib.rl_keep_drafts.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.rl_logits_stride.restype = ctypes.c_size_t
     lib.rl_hidden.restype = ctypes.POINTER(ctypes.c_float)
-    for fn in ("rl_has_mtp", "rl_reject_draft", "rl_logits_stride", "rl_hidden", "rl_hidden_size"):
+    for fn in ("rl_has_mtp", "rl_max_drafts", "rl_logits_stride", "rl_hidden", "rl_hidden_size"):
         getattr(lib, fn).argtypes = [ctypes.c_void_p]
     lib.rl_top_k.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     return lib
@@ -121,12 +124,17 @@ class RedlineBackend(Backend):
         self._chunk, self._max_ctx = chunk, max_ctx
         self.max_context = max_ctx
         self._logits = None
-        self._open_draft = False
+        self._open = None                # [rows fed, rows known to stand] of a speculative pass not settled yet
         if mtp is None:
             mtp = os.environ.get("REDLINE_MTP", "1") != "0"
         self.mtp = bool(self._lib.rl_has_mtp(self._e)) and mtp
         if self._lib.rl_has_mtp(self._e):
             self._lib.rl_set_mtp(self._e, int(self.mtp))
+        # Drafting stops early once the chance that the drafts so far all hold
+        # (the product of their probabilities under the head) falls below this:
+        # a draft costs about a twentieth to a tenth of a pass over the weights.
+        self.max_drafts = min(int(os.environ.get("REDLINE_DRAFTS", "6")), self._lib.rl_max_drafts(self._e))
+        self.min_confidence = float(os.environ.get("REDLINE_MIN_CONFIDENCE", "0.3"))
         self._stride = self._lib.rl_logits_stride(self._e)
         self.gpu_seconds = 0.0
         self.counters = dict(passes=0, drafts=0, accepted=0)
@@ -138,18 +146,19 @@ class RedlineBackend(Backend):
 
     @property
     def position(self) -> int:
-        return self._lib.rl_position(self._e) - (1 if self._open_draft else 0)
+        return self._lib.rl_position(self._e) - (self._open[0] - self._open[1] if self._open else 0)
 
     def reset(self) -> None:
         self._lib.rl_reset(self._e)
         self._logits = None
-        self._open_draft = False
+        self._open = None
 
     def _settle(self) -> None:
-        """Takes back a draft row that nobody confirmed (a generation stopped right after it was fed)."""
-        if self._open_draft:
-            self._lib.rl_reject_draft(self._e)
-            self._open_draft = False
+        """Takes back the draft rows of the last speculative pass that the model did not confirm."""
+        if self._open:
+            self._lib.rl_keep_drafts(self._e, self._open[1] - 1)
+            self.gpu_seconds += self._lib.rl_last_gpu_seconds(self._e)
+            self._open = None
 
     def _forward(self, tokens) -> None:
         self._settle()
@@ -179,8 +188,8 @@ class RedlineBackend(Backend):
         produced = 0
         try:
             while produced < max_tokens:
-                if (not self.mtp or token in self.eos_ids or produced + 1 >= max_tokens
-                        or self.position + 2 > self._max_ctx):
+                k = min(self.max_drafts, max_tokens - produced - 1, self._max_ctx - self.position - 1) if self.mtp else 0
+                if k < 1 or token in self.eos_ids:
                     self._forward([token])
                     recent.append(token)
                     produced, pos = produced + 1, pos + 1
@@ -188,33 +197,47 @@ class RedlineBackend(Backend):
                     token = _sample(self._logits, sampling, recent, seed, pos)
                     continue
 
-                # The head's guess for the token after `token`, drawn with the
-                # random numbers the real choice at that position will use.
+                # The head's guesses for the tokens after `token`, each drawn with
+                # the random numbers the model's own choice at that position will use.
+                row, seen, confidence = [token], recent + [token], 1.0
                 guess = np.ctypeslib.as_array(lib.rl_draft_logits(e, token), shape=(V,))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
-                recent.append(token)
-                draft = _sample(guess, sampling, recent, seed, pos + 1)
-                two = np.ctypeslib.as_array(lib.rl_forward_draft(e, token, draft), shape=(2, self._stride))
+                while True:
+                    draft, p = _sample(guess, sampling, seen, seed, pos + len(row), with_probability=True)
+                    confidence *= p
+                    row.append(draft)
+                    seen.append(draft)
+                    if len(row) > k or draft in self.eos_ids or confidence < self.min_confidence:
+                        break
+                    guess = np.ctypeslib.as_array(lib.rl_draft_more(e, draft), shape=(V,))
+                    self.gpu_seconds += lib.rl_last_gpu_seconds(e)
+
+                n = len(row)
+                rows = np.ctypeslib.as_array(lib.rl_forward_draft(e, (ctypes.c_int32 * n)(*row), n),
+                                             shape=(n, self._stride))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
-                self._open_draft = True
-                self._logits = two[0, :V]
+                self._open = [n, 1]
+                self._logits = rows[0, :V]
                 self.counters["passes"] += 1
-                self.counters["drafts"] += 1
+                self.counters["drafts"] += n - 1
+                recent.append(token)
                 produced, pos = produced + 1, pos + 1
                 yield token
 
-                nxt = _sample(two[0, :V], sampling, recent, seed, pos)
-                if nxt != draft:
-                    self._settle()
-                    token = nxt
-                    continue
-                self._open_draft = False       # the draft row is the real next token
-                self._logits = two[1, :V]
-                self.counters["accepted"] += 1
-                recent.append(nxt)
-                produced, pos = produced + 1, pos + 1
-                yield nxt
-                token = _sample(two[1, :V], sampling, recent, seed, pos)
+                # A draft stands if it is what the model picks at its position.
+                accepted = 0
+                nxt = _sample(rows[0, :V], sampling, recent, seed, pos)
+                while accepted < n - 1 and nxt == row[accepted + 1]:
+                    accepted += 1
+                    self._open[1] = accepted + 1
+                    self._logits = rows[accepted, :V]
+                    self.counters["accepted"] += 1
+                    recent.append(nxt)
+                    produced, pos = produced + 1, pos + 1
+                    yield nxt
+                    nxt = _sample(rows[accepted, :V], sampling, recent, seed, pos)
+                self._settle()
+                token = nxt
         finally:
             self._settle()
 
@@ -226,7 +249,7 @@ class RedlineBackend(Backend):
         return Snapshot(self.position, state, logits, state.nbytes)
 
     def restore(self, snap: Snapshot) -> None:
-        self._open_draft = False
+        self._settle()
         self._lib.rl_load_state(self._e, snap.state.ctypes.data, snap.position)
         self._logits = snap.logits
 
@@ -251,8 +274,9 @@ def _uniform(seed: int, position: int, ids: np.ndarray) -> np.ndarray:
     return ((x >> np.uint64(11)).astype(np.float64) + 0.5) / float(1 << 53)
 
 
-def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: int) -> int:
-    """Draws the token for `position` from the truncated distribution.
+def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: int, with_probability: bool = False):
+    """Draws the token for `position` from the truncated distribution; with
+    `with_probability`, also returns the probability it had there.
 
     The draw is a Gumbel-max over the candidates with noise that depends only
     on (seed, position, token id). That is an ordinary sample from the
@@ -262,7 +286,8 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
     drafts keep being accepted at temperatures where the model's pick is not
     simply its most likely token.
     """
-    k = 1 if s.temperature <= 0 else (s.top_k if s.top_k > 0 else 1024)   # beyond 1024 the tail carries no usable mass
+    greedy = s.temperature <= 0
+    k = (8 if with_probability else 1) if greedy else (s.top_k if s.top_k > 0 else 1024)   # 1024: the tail carries no mass
     top, z = _top_k(logits, k)
     if recent and (s.repetition_penalty != 1.0 or s.presence_penalty):
         # Penalties touch only recently seen tokens, so the penalized top k is
@@ -277,8 +302,10 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
             z[hit] -= s.presence_penalty
         order = np.argsort(-z, kind="stable")[:k]
         top, z = top[order], z[order]
-    if s.temperature <= 0:
-        return int(top[0])
+    if greedy:
+        if not with_probability:
+            return int(top[0])
+        return int(top[0]), float(1.0 / np.exp((z - z[0]).astype(np.float64)).sum())   # its share among the top few
     logp = (z - z[0]).astype(np.float64) / s.temperature
     p = np.exp(logp)
     p /= p.sum()
@@ -289,4 +316,7 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
         keep = min(keep, int(np.count_nonzero(p >= s.min_p * p[0])))
     top, logp = top[:keep], logp[:keep]
     gumbel = -np.log(-np.log(_uniform(seed, position, top)))
-    return int(top[np.argmax(logp + gumbel)])
+    pick = int(np.argmax(logp + gumbel))
+    if not with_probability:
+        return int(top[pick])
+    return int(top[pick]), float(p[pick] / p[:keep].sum())

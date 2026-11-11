@@ -12,17 +12,21 @@
 namespace rl {
 
 struct Engine::LinearLayer {
-  id<MTLBuffer> conv[3];  // conv state, [3][conv_dim] float: current, next, and (speculation) one token back
-  int cur = 0, prev = 0;
-  id<MTLBuffer> S;        // DeltaNet state, [Hv][Dv][Dk] float
-  id<MTLBuffer> S_prev;   // the state before a speculative last token
+  id<MTLBuffer> conv[2];  // conv state, [3][conv_dim] float; conv[cur] is current
+  id<MTLBuffer> S[2];     // DeltaNet state, [Hv][Dv][Dk] float; S[scur] is current
+  int cur = 0, scur = 0;
+  // A speculative pass writes its new state next to the old one and keeps what
+  // went into the recurrence for each row here, so the state after any prefix
+  // of its rows can be rebuilt: pre-conv inputs, conv outputs, q|k, gates.
+  id<MTLBuffer> sp_in, sp_y, sp_qk, sp_bg;
 };
 
 namespace {
 struct MtpState {  // the head's bookkeeping, as saved by save_state
-  int32_t mtp_pos, n_tok, tok[4], draft_next, draft_rows;
+  int32_t mtp_pos, n_tok, tok[Engine::kMaxDrafts + 1], draft_next, draft_rows;
 };
-constexpr int kMtpRows = 4;  // hidden states that can wait for their next token
+constexpr int kSpecRows = Engine::kMaxDrafts + 1;  // rows of a speculative pass
+constexpr int kMtpRows = kSpecRows;                // hidden states that can wait for their next token
 }  // namespace
 
 struct Engine::AttnLayer {
@@ -49,8 +53,8 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   has_mtp_ = mtp_ = c.native && model_->has("mtp.fc");
   const int n_layers = c.layers + (has_mtp_ ? 1 : 0);  // the head's decoder layer is layer c.layers
 
-  // A head pass can carry up to two parked rows on top of a chunk.
-  rows_cap_ = (int)Metal::round_up((size_t)max_chunk_ + (has_mtp_ ? 2 : 0), 128);
+  // A head pass can carry the parked rows of a speculative pass on top of a chunk.
+  rows_cap_ = (int)Metal::round_up((size_t)max_chunk_ + (has_mtp_ ? kMtpRows : 0), 128);
   x_stride_ = std::max({c.hidden, c.intermediate, c.lin_value_dim(), c.attn_dim(), has_mtp_ ? 2 * c.hidden : 0});
   proj_stride_ = 0;
   for (int i = 0; i < n_layers; i++) {
@@ -104,6 +108,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       mtp_norm_h_ = fold(model_->f("mtp.norm_h"), model_->q("mtp.fc"), c.hidden);
       mtp_norm_out_ = fold(model_->f("mtp.norm"), model_->q("lm_head"));
       mtp_h_ = mt_.alloc((size_t)kMtpRows * c.hidden * sizeof(float));
+      mtp_out_ = mt_.alloc((size_t)c.hidden * sizeof(float));
       mtp_tok_ = mt_.alloc(R * sizeof(int32_t));
       mtp_rope_ = mt_.alloc(R * 64 * sizeof(float));
       mtp_logits_ = mt_.alloc((size_t)16 * model_->q("lm_head").n_pad * sizeof(float));
@@ -116,8 +121,14 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     if (is_linear(i)) {
       auto L = std::make_shared<LinearLayer>();
       for (auto &b : L->conv) b = mt_.alloc((size_t)3 * c.lin_conv_dim() * sizeof(float));
-      L->S = mt_.alloc((size_t)c.lin_v_heads * c.lin_v_dim * c.lin_k_dim * sizeof(float));
-      L->S_prev = has_mtp_ ? mt_.alloc(L->S.length) : L->S;  // only written by speculative passes
+      L->S[0] = mt_.alloc((size_t)c.lin_v_heads * c.lin_v_dim * c.lin_k_dim * sizeof(float));
+      if (has_mtp_) {
+        L->S[1] = mt_.alloc(L->S[0].length);
+        L->sp_in = mt_.alloc((size_t)kSpecRows * c.lin_conv_dim() * sizeof(float));
+        L->sp_y = mt_.alloc((size_t)kSpecRows * c.lin_conv_dim() * sizeof(float));
+        L->sp_qk = mt_.alloc((size_t)kSpecRows * 2 * c.lin_key_dim() * sizeof(float));
+        L->sp_bg = mt_.alloc((size_t)kSpecRows * 2 * c.lin_v_heads * sizeof(float));
+      }
       lin_[i] = L;
     } else {
       auto A = std::make_shared<AttnLayer>();
@@ -139,14 +150,14 @@ void Engine::reset() {
   for (auto &L : lin_) {
     if (!L) continue;
     for (auto &b : L->conv) memset(b.contents, 0, b.length);
-    memset(L->S.contents, 0, L->S.length);
-    L->cur = L->prev = 0;
+    memset(L->S[0].contents, 0, L->S[0].length);
+    L->cur = L->scur = 0;
   }
   mtp_pos_ = 0;
   draft_next_ = -1;
-  draft_rows_ = 0;
+  draft_rows_ = draft_depth_ = 0;
   pend_tok_.clear();
-  spec_open_ = false;
+  spec_rows_ = 0;
 }
 
 void Engine::set_mtp(bool on) {
@@ -155,31 +166,32 @@ void Engine::set_mtp(bool on) {
   mtp_ = on;
   mtp_pos_ = 0;
   draft_next_ = -1;
-  draft_rows_ = 0;
+  draft_rows_ = draft_depth_ = 0;
   pend_tok_.clear();
 }
 
 size_t Engine::state_bytes() const {
   size_t n = has_mtp_ ? sizeof(MtpState) + mtp_h_.length : 0;
   for (const auto &L : lin_)
-    if (L) n += L->conv[0].length + L->S.length;
+    if (L) n += L->conv[0].length + L->S[0].length;
   return n;
 }
 
 void Engine::save_state(void *dst) const {
+  if (spec_rows_) fatal("save_state: drafts are open (keep_drafts first)");
   char *p = (char *)dst;
   for (const auto &L : lin_) {
     if (!L) continue;
     memcpy(p, L->conv[L->cur].contents, L->conv[0].length);
     p += L->conv[0].length;
-    memcpy(p, L->S.contents, L->S.length);
-    p += L->S.length;
+    memcpy(p, L->S[L->scur].contents, L->S[0].length);
+    p += L->S[0].length;
   }
   if (has_mtp_) {
     MtpState st{};
     st.mtp_pos = mtp_pos_;
     st.n_tok = (int32_t)pend_tok_.size();
-    for (size_t i = 0; i < pend_tok_.size() && i < 4; i++) st.tok[i] = pend_tok_[i];
+    for (size_t i = 0; i < pend_tok_.size(); i++) st.tok[i] = pend_tok_[i];
     st.draft_next = draft_next_;
     st.draft_rows = draft_rows_;
     memcpy(p, &st, sizeof st);
@@ -194,8 +206,8 @@ void Engine::load_state(const void *src, int position) {
     if (!L) continue;
     memcpy(L->conv[L->cur].contents, p, L->conv[0].length);
     p += L->conv[0].length;
-    memcpy(L->S.contents, p, L->S.length);
-    p += L->S.length;
+    memcpy(L->S[L->scur].contents, p, L->S[0].length);
+    p += L->S[0].length;
   }
   if (has_mtp_) {
     MtpState st;
@@ -205,21 +217,53 @@ void Engine::load_state(const void *src, int position) {
     pend_tok_.assign(st.tok, st.tok + st.n_tok);
     draft_next_ = st.draft_next;
     draft_rows_ = st.draft_rows;
+    draft_depth_ = 0;
   }
   pos_ = position;
-  spec_open_ = false;
+  spec_rows_ = 0;
 }
 
-void Engine::reject_draft() {
-  if (!spec_open_) fatal("reject_draft: the last call was not forward_draft");
-  spec_open_ = false;
-  for (auto &L : lin_) {
-    if (!L) continue;
-    L->cur = L->prev;
-    std::swap(L->S, L->S_prev);
+void Engine::keep_drafts(int accepted) {
+  const Config &c = config();
+  if (!spec_rows_) fatal("keep_drafts: the last call was not forward_draft");
+  const int rows = spec_rows_, keep = accepted + 1;
+  if (accepted < 0 || keep > rows) fatal("keep_drafts: %d of %d drafts", accepted, rows - 1);
+  spec_rows_ = 0;
+  gpu_seconds_ = 0;
+  if (keep == rows) return;  // every row stands, and the new state is already current
+
+  // Rebuild the recurrent state as it is after `keep` rows. Conv windows: the
+  // last three of (old window, kept inputs). DeltaNet: rerun the recurrence on
+  // the kept rows from the old state. Attention entries of the dropped rows
+  // are simply overwritten by the tokens that come next.
+  const size_t C = (size_t)c.lin_conv_dim(), row = C * sizeof(float);
+  const int kd = c.lin_key_dim(), vd = c.lin_value_dim();
+  @autoreleasepool {
+    begin();
+    if (!scratch_yo_) scratch_yo_ = mt_.alloc(yo_.length);
+    for (auto &L : lin_) {
+      if (!L) continue;
+      char *now = (char *)L->conv[L->cur].contents;
+      const char *old = (const char *)L->conv[1 - L->cur].contents, *in = (const char *)L->sp_in.contents;
+      for (int j = 0; j < 3; j++) {
+        const int idx = keep - 3 + j;
+        memcpy(now + j * row, idx >= 0 ? in + idx * row : old + (3 + idx) * row, row);
+      }
+      [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "gated_delta")];
+      [enc_ setBuffer:L->sp_qk offset:0 atIndex:0];
+      [enc_ setBuffer:L->sp_y offset:0 atIndex:1];
+      [enc_ setBuffer:L->sp_bg offset:0 atIndex:2];
+      [enc_ setBuffer:L->S[1 - L->scur] offset:0 atIndex:3];
+      [enc_ setBuffer:scratch_yo_ offset:0 atIndex:4];
+      set_params(enc_, DeltaParams{keep, c.lin_k_heads, c.lin_k_dim, c.lin_v_heads, c.lin_v_dim, 2 * kd, (int)C, 2 * kd,
+                                   2 * c.lin_v_heads, vd}, 5);
+      [enc_ setBuffer:L->S[L->scur] offset:0 atIndex:6];
+      run_groups(c.lin_v_dim / 8, c.lin_v_heads);
+    }
+    flush(false);
   }
-  pos_ -= 1;         // the attention entries of the draft row are overwritten by the next token
-  pend_tok_.clear();  // one hidden state is waiting again, its next token unknown
+  pos_ -= rows - keep;
+  pend_tok_.resize(keep - 1);  // the kept rows wait for the head; the last one's next token is unknown
 }
 
 const float *Engine::logits(int row) const {
@@ -365,6 +409,8 @@ void Engine::encode_linear_attn(int layer, int T, bool spec) {
   const QTensor &in_proj = model_->q(lname(layer, "lin.in_proj"));
   const int C = c.lin_conv_dim(), kd = c.lin_key_dim(), vd = c.lin_value_dim();
   const int Hk = c.lin_k_heads, Hv = c.lin_v_heads, Dk = c.lin_k_dim, Dv = c.lin_v_dim;
+  // A speculative pass keeps the recurrence inputs per layer (see LinearLayer).
+  id<MTLBuffer> y = spec ? L.sp_y : y_, qk = spec ? L.sp_qk : qk_, bg = spec ? L.sp_bg : bg_;
 
   encode_norm(0, layer, T, 0);
   encode_linear(in_proj, T, proj_, 0, proj_stride_, false, "linear:lin_in");
@@ -374,20 +420,19 @@ void Engine::encode_linear_attn(int layer, int T, bool spec) {
   [enc_ setBuffer:proj_ offset:0 atIndex:0];
   [enc_ setBuffer:L.conv[L.cur] offset:0 atIndex:1];
   [enc_ setBuffer:cw.buf offset:cw.offset atIndex:2];
-  [enc_ setBuffer:y_ offset:0 atIndex:3];
-  [enc_ setBuffer:L.conv[(L.cur + 1) % 3] offset:0 atIndex:4];
-  [enc_ setBuffer:L.conv[(L.cur + 2) % 3] offset:0 atIndex:6];
+  [enc_ setBuffer:y offset:0 atIndex:3];
+  [enc_ setBuffer:L.conv[1 - L.cur] offset:0 atIndex:4];
+  [enc_ setBuffer:(spec ? L.sp_in : L.conv[1 - L.cur]) offset:0 atIndex:6];
   set_params(enc_, ConvParams{T, C, proj_stride_, C, spec ? 1 : 0}, 5);
-  run_threads(C, T + 3 + (spec ? 3 : 0));
+  run_threads(C, T + 3 + (spec ? T : 0));
   mark("lin_conv");
-  L.prev = (L.cur + 2) % 3;
-  L.cur = (L.cur + 1) % 3;
+  L.cur = 1 - L.cur;
 
   const LinPrepParams pp{T, Hk, Dk, Hv, C, 2 * kd, proj_stride_, in_proj.part_offset("b"),
                          in_proj.part_offset("a"), 2 * Hv};
   [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "lin_prep_qk")];
-  [enc_ setBuffer:y_ offset:0 atIndex:0];
-  [enc_ setBuffer:qk_ offset:0 atIndex:1];
+  [enc_ setBuffer:y offset:0 atIndex:0];
+  [enc_ setBuffer:qk offset:0 atIndex:1];
   set_params(enc_, pp, 2);
   run_groups(2 * Hk, T);
   mark("lin_prep_qk");
@@ -398,29 +443,34 @@ void Engine::encode_linear_attn(int layer, int T, bool spec) {
   [enc_ setBuffer:proj_ offset:0 atIndex:0];
   [enc_ setBuffer:A_log.buf offset:A_log.offset atIndex:1];
   [enc_ setBuffer:dt_bias.buf offset:dt_bias.offset atIndex:2];
-  [enc_ setBuffer:bg_ offset:0 atIndex:3];
+  [enc_ setBuffer:bg offset:0 atIndex:3];
   set_params(enc_, pp, 4);
   run_threads(Hv, T);
   mark("lin_gates");
 
+  // The new state replaces the old one in place, except in a speculative pass,
+  // which leaves the old one intact next to it.
+  const int out = spec ? 1 - L.scur : L.scur;
   [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "gated_delta")];
-  [enc_ setBuffer:qk_ offset:0 atIndex:0];
-  [enc_ setBuffer:y_ offset:0 atIndex:1];
-  [enc_ setBuffer:bg_ offset:0 atIndex:2];
-  [enc_ setBuffer:L.S offset:0 atIndex:3];
+  [enc_ setBuffer:qk offset:0 atIndex:0];
+  [enc_ setBuffer:y offset:0 atIndex:1];
+  [enc_ setBuffer:bg offset:0 atIndex:2];
+  [enc_ setBuffer:L.S[L.scur] offset:0 atIndex:3];
   [enc_ setBuffer:yo_ offset:0 atIndex:4];
-  [enc_ setBuffer:L.S_prev offset:0 atIndex:6];
-  set_params(enc_, DeltaParams{T, Hk, Dk, Hv, Dv, 2 * kd, C, 2 * kd, 2 * Hv, vd, spec ? 1 : 0}, 5);
+  set_params(enc_, DeltaParams{T, Hk, Dk, Hv, Dv, 2 * kd, C, 2 * kd, 2 * Hv, vd}, 5);
+  [enc_ setBuffer:L.S[out] offset:0 atIndex:6];
   run_groups(Dv / 8, Hv);
-  if (repeating("gated_delta")) {  // the recurrence updates its state in place: repeat on scratch
+  if (repeating("gated_delta")) {  // a repeat must not advance the state again: it runs on scratch
     if (!scratch_state_) {
-      scratch_state_ = mt_.alloc(L.S.length);
+      scratch_state_ = mt_.alloc(L.S[0].length);
       scratch_yo_ = mt_.alloc(yo_.length);
     }
     [enc_ setBuffer:scratch_state_ offset:0 atIndex:3];
     [enc_ setBuffer:scratch_yo_ offset:0 atIndex:4];
+    [enc_ setBuffer:scratch_state_ offset:0 atIndex:6];
   }
   mark("gated_delta");
+  L.scur = out;
 
   const FTensor &nw = model_->f(lname(layer, "lin.norm"));
   [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "lin_out_norm")];
@@ -582,63 +632,67 @@ void Engine::encode_embed(id<MTLBuffer> tok, int T) {
   mark("embed");
 }
 
-void Engine::encode_copy_hidden(int src_row, int dst_row, int rows) {
+void Engine::encode_copy_rows(id<MTLBuffer> dst, int dst_row, int src_row, int rows) {
   const size_t row_bytes = (size_t)config().hidden * sizeof(float);
   [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "copy_rows")];
   [enc_ setBuffer:h_ offset:src_row * row_bytes atIndex:0];
-  [enc_ setBuffer:mtp_h_ offset:dst_row * row_bytes atIndex:1];
+  [enc_ setBuffer:dst offset:dst_row * row_bytes atIndex:1];
   set_params(enc_, CopyParams{rows, config().hidden}, 2);
   run_threads(config().hidden, rows);
   mark("copy_rows");
 }
 
-void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {
+void Engine::encode_mtp_hidden(id<MTLBuffer> src, const FTensor &w1, int rows, int first_row) {
+  if (rows <= 0) return;
   const Config &c = config();
-  const int H = c.hidden, M = n_carry + n_chunk;
-  const FTensor &fn = model_->f("final_norm");
-  // Hidden half of the head's input: rows of `src` -> xn_[first_row ..][H .. 2H).
-  auto hidden_half = [&](id<MTLBuffer> src, int rows, int first_row) {
-    if (rows <= 0) return;
-    [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rms_norm2_rows")];
-    [enc_ setBuffer:src offset:0 atIndex:0];
-    [enc_ setBuffer:fn.buf offset:fn.offset atIndex:1];
-    [enc_ setBuffer:mtp_norm_h_ offset:0 atIndex:2];
-    [enc_ setBuffer:xn_ offset:((size_t)first_row * x_stride_ + H) * sizeof(_Float16) atIndex:3];
-    set_params(enc_, NormParams{rows, H, H, x_stride_, c.norm_eps}, 4);
-    run_groups(1, rows);
-    mark("mtp_norm");
-  };
-  hidden_half(mtp_h_, n_carry, 0);
-  hidden_half(h_, n_chunk, n_carry);
-  if (keep_row >= 0) encode_copy_hidden(keep_row, 0, 1);
-  if (M == 0) return;
+  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rms_norm2_rows")];
+  [enc_ setBuffer:src offset:0 atIndex:0];
+  [enc_ setBuffer:w1.buf offset:w1.offset atIndex:1];
+  [enc_ setBuffer:mtp_norm_h_ offset:0 atIndex:2];
+  [enc_ setBuffer:xn_ offset:((size_t)first_row * x_stride_ + c.hidden) * sizeof(_Float16) atIndex:3];
+  set_params(enc_, NormParams{rows, c.hidden, c.hidden, x_stride_, c.norm_eps}, 4);
+  run_groups(1, rows);
+  mark("mtp_norm");
+}
 
+void Engine::encode_mtp_layer(int M, int pos0, bool logits) {
+  const Config &c = config();
+  const int H = c.hidden;
   // From here on h_ is the head's own residual stream.
   encode_embed(mtp_tok_, M);
   encode_rms(h_, 0, H, mtp_norm_e_, 0, M, 0);
   encode_linear(model_->q("mtp.fc"), M, h_, 0, H, false, "linear:mtp_fc");
-  encode_full_attn(c.layers, M, mtp_pos_, mtp_rope_);
+  encode_full_attn(c.layers, M, pos0, mtp_rope_);
   encode_mlp(c.layers, M);
   if (logits) {
+    encode_copy_rows(mtp_out_, 0, M - 1, 1);  // what draft_more continues from
     encode_rms(h_, (size_t)(M - 1) * H * sizeof(float), H, mtp_norm_out_, 0, 1, 0);
     const QTensor &head = model_->q("lm_head");
     encode_linear(head, 1, mtp_logits_, 0, head.n_pad, false, "linear:lm_head");
   }
 }
 
+void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {
+  const FTensor &fn = model_->f("final_norm");
+  encode_mtp_hidden(mtp_h_, fn, n_carry, 0);
+  encode_mtp_hidden(h_, fn, n_chunk, n_carry);
+  if (keep_row >= 0) encode_copy_rows(mtp_h_, 0, keep_row, 1);
+  if (n_carry + n_chunk > 0) encode_mtp_layer(n_carry + n_chunk, mtp_pos_, logits);
+}
+
 const float *Engine::forward(const int32_t *tokens, int T) { return run(tokens, T, false); }
 
-const float *Engine::forward_draft(int32_t token, int32_t draft) {
+const float *Engine::forward_draft(const int32_t *tokens, int n) {
   if (!mtp_) fatal("forward_draft: the model has no MTP head, or it is off");
-  const int32_t two[2] = {token, draft};
-  return run(two, 2, true);
+  if (n < 2 || n > kSpecRows) fatal("forward_draft: %d rows (2 to %d)", n, kSpecRows);
+  return run(tokens, n, true);
 }
 
 const float *Engine::draft_logits(int32_t next) {
   if (!mtp_) fatal("draft_logits: the model has no MTP head, or it is off");
+  if (spec_rows_) fatal("draft_logits: drafts are open (keep_drafts first)");
   const int n = pos_ - mtp_pos_;
   if (n < 1) fatal("draft_logits: no position is waiting for its next token");
-  spec_open_ = false;  // a draft row that was not rejected stands
   gpu_seconds_ = 0;
 
   int32_t *succ = (int32_t *)mtp_tok_.contents;
@@ -655,6 +709,27 @@ const float *Engine::draft_logits(int32_t next) {
   pend_tok_.clear();
   draft_next_ = next;
   draft_rows_ = n;
+  draft_depth_ = 1;
+  return (const float *)mtp_logits_.contents;
+}
+
+const float *Engine::draft_more(int32_t guess) {
+  if (!mtp_ || draft_depth_ < 1) fatal("draft_more: call draft_logits first");
+  // The head's previous output stands in for the hidden state of the position
+  // the model has not computed yet; its cache entry is overwritten when the
+  // real position is processed.
+  const int slot = mtp_pos_ + draft_depth_ - 1;
+  if (slot >= max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
+  gpu_seconds_ = 0;
+  *(int32_t *)mtp_tok_.contents = guess;
+  fill_rope(mtp_rope_, slot, 1);
+  @autoreleasepool {
+    begin();
+    encode_mtp_hidden(mtp_out_, model_->f("mtp.norm"), 1, 0);
+    encode_mtp_layer(1, slot, true);
+    flush(false);
+  }
+  draft_depth_++;
   return (const float *)mtp_logits_.contents;
 }
 
@@ -662,6 +737,7 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
   const Config &c = config();
   if (T < 1 || T > max_chunk_) fatal("forward: %d tokens, chunk limit is %d", T, max_chunk_);
   if (pos_ + T > max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
+  if (spec_rows_) fatal("forward: drafts are open (keep_drafts first)");
   if (mtp_ && pos_ > 0 && pos_ == mtp_pos_ && tokens[0] != draft_next_) {
     // draft_logits ran the head on the last position for a next token that is
     // not the one arriving (a generation was cut short): that position waits again.
@@ -671,7 +747,6 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
   }
   const int n_carry = mtp_ ? pos_ - mtp_pos_ : 0;  // hidden states waiting for their next token
   if (spec && n_carry != 0) fatal("forward_draft: call draft_logits first");
-  spec_open_ = false;
   gpu_seconds_ = 0;
 
   memcpy(tok_.contents, tokens, (size_t)T * sizeof(int32_t));
@@ -705,13 +780,13 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
       }
     }
 
-    // Logits for the last row, or for both rows of a speculative pair.
-    const int out_rows = spec ? 2 : 1;
+    // Logits for the last row, or for every row of a speculative pass.
+    const int out_rows = spec ? T : 1;
     encode_norm(2, 0, out_rows, (size_t)(T - out_rows) * c.hidden * sizeof(float));
     const QTensor &head = model_->q("lm_head");
     encode_linear(head, out_rows, logits_, 0, head.n_pad, false, "linear:lm_head");
     if (mtp_) {
-      if (spec) encode_copy_hidden(0, 0, 2);
+      if (spec) encode_copy_rows(mtp_h_, 0, 0, T);
       else encode_mtp(n_carry, T - 1, T - 1, false);
     }
     flush(false);
@@ -721,10 +796,11 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
   if (mtp_) {
     mtp_pos_ += head_rows;
     pend_tok_.clear();
-    if (spec) pend_tok_.push_back(tokens[1]);
+    if (spec) pend_tok_.assign(tokens + 1, tokens + T);
     draft_next_ = -1;
+    draft_depth_ = 0;
   }
-  spec_open_ = spec;
+  spec_rows_ = spec ? T : 0;
   if (!dump_dir_.empty()) {
     FILE *f = fopen((dump_dir_ + "/logits.f32").c_str(), "wb");
     if (!f) fatal("cannot write logits dump");

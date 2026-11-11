@@ -3,8 +3,8 @@
 //   dump    <model.rlm> <tokens.i32> <outdir>          per-layer activations for verification
 //   logits  <model.rlm> <tokens.i32> <out.f32> [--chunk N]
 //   draft   <model.rlm> <tokens.i32> <out.f32>         MTP head logits for the token after the last one
-//   bench   <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--chunk N] [--ctx N] [--mtp 0|1]
-//   spec    <model.rlm> <tokens.i32> [--prompt N] [--gen N]   speculative vs plain decoding: same tokens?
+//   bench   <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--chunk N] [--ctx N] [--drafts K]
+//   spec    <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--drafts K ...]   speculative vs plain: same tokens?
 //   profile <model.rlm> <tokens.i32> [--prompt N] [--gen N] [--times N]
 //
 // Token files are raw little-endian int32. Tokenization lives outside the
@@ -44,14 +44,15 @@ static int flag(int argc, char **argv, const char *name, int def) {
   return def;
 }
 
-// Greedy generation of n tokens after whatever has been fed. With `spec`, the
-// model's MTP head drafts one token ahead and a pass over the weights checks
-// two tokens at once. Counts those passes and the GPU time.
-static std::vector<int32_t> generate(Engine &e, int n, bool spec, int *passes, double *gpu) {
+// Greedy generation of n tokens after whatever has been fed. With drafts > 0
+// the model's MTP head guesses that many tokens ahead and one pass over the
+// weights checks them all. Counts those passes and the GPU time.
+static std::vector<int32_t> generate(Engine &e, int n, int drafts, int *passes, double *gpu) {
   std::vector<int32_t> out;
   int32_t next = e.argmax();
   while ((int)out.size() < n) {
-    if (!spec || (int)out.size() + 1 >= n) {
+    const int k = std::min(drafts, n - (int)out.size() - 1);
+    if (k < 1) {
       e.forward(&next, 1);
       *gpu += e.last_gpu_seconds();
       ++*passes;
@@ -59,20 +60,25 @@ static std::vector<int32_t> generate(Engine &e, int n, bool spec, int *passes, d
       next = e.argmax();
       continue;
     }
-    const int32_t draft = e.argmax_of(e.draft_logits(next));
+    std::vector<int32_t> row = {next};
+    const float *guess = e.draft_logits(next);
     *gpu += e.last_gpu_seconds();
-    e.forward_draft(next, draft);
+    for (int j = 0; j < k; j++) {
+      row.push_back(e.argmax_of(guess));
+      if (j + 1 < k) {
+        guess = e.draft_more(row.back());
+        *gpu += e.last_gpu_seconds();
+      }
+    }
+    e.forward_draft(row.data(), (int)row.size());
     *gpu += e.last_gpu_seconds();
     ++*passes;
     out.push_back(next);
-    const int32_t tok = e.argmax_of(e.logits(0));
-    if (tok == draft) {
-      out.push_back(tok);
-      next = e.argmax_of(e.logits(1));
-    } else {
-      e.reject_draft();
-      next = tok;
-    }
+    int a = 0;
+    while (a < k && e.argmax_of(e.logits(a)) == row[a + 1]) out.push_back(row[++a]);
+    next = e.argmax_of(e.logits(a));
+    e.keep_drafts(a);
+    *gpu += e.last_gpu_seconds();
   }
   return out;
 }
@@ -128,30 +134,37 @@ int main(int argc, char **argv) {
     const int n_prompt = std::min(flag(argc, argv, "--prompt", 512), (int)toks.size());
     const int n_gen = flag(argc, argv, "--gen", 256);
     const int chunk = flag(argc, argv, "--chunk", 1024);
+    std::vector<int> modes = {0};  // drafts per pass; 0 = plain decoding
+    for (int i = 0; i < argc; i++)
+      if (!strcmp(argv[i], "--drafts"))
+        for (int j = i + 1; j < argc && argv[j][0] != '-'; j++) modes.push_back(atoi(argv[j]));
+    if (modes.size() == 1) modes.insert(modes.end(), {1, 2, 3, 4});
     Engine e(argv[2], n_prompt + n_gen + 16, chunk);
     if (!e.has_mtp()) rl::fatal("this model file has no MTP head");
-    std::vector<int32_t> out[2];
-    for (int mode = 0; mode < 2; mode++) {
+    std::vector<int32_t> ref;
+    bool same = true;
+    for (int drafts : modes) {
+      std::vector<int32_t> out;
       for (int rep = 0; rep < 2; rep++) {  // the first run warms pipelines and pages in the weights
         e.reset();
-        e.set_mtp(mode == 1);
+        e.set_mtp(drafts > 0);
         double t0 = now();
         for (int i = 0; i < n_prompt; i += chunk) e.forward(toks.data() + i, std::min(chunk, n_prompt - i));
         const double t_prefill = now() - t0;
         int passes = 0;
         double gpu = 0;
         t0 = now();
-        out[mode] = generate(e, n_gen, mode == 1, &passes, &gpu);
+        out = generate(e, n_gen, drafts, &passes, &gpu);
         const double dt = now() - t0;
         if (!rep) continue;
-        printf("%-12s prefill %7.1f tok/s   decode %d tokens in %d passes, %.3fs = %.1f tok/s", mode ? "speculative:" : "plain:",
-               n_prompt / t_prefill, n_gen, passes, dt, n_gen / dt);
-        if (mode) printf("   (drafts accepted: %.1f%%)", 100.0 * (n_gen - passes) / std::max(1, passes - 1));
-        printf("\n");
+        printf("%d draft%s: prefill %7.1f tok/s   decode %d tokens in %3d passes (%.2f per pass), %.3fs = %5.1f tok/s\n",
+               drafts, drafts == 1 ? " " : "s", n_prompt / t_prefill, n_gen, passes, (double)n_gen / passes, dt, n_gen / dt);
+        fflush(stdout);
       }
+      if (drafts == 0) ref = out;
+      else same = same && out == ref;
     }
-    const bool same = out[0] == out[1];
-    printf("generated tokens: %s\n", same ? "identical" : "DIFFERENT");
+    printf("generated tokens: %s\n", same ? "identical in every mode" : "DIFFERENT");
     return same ? 0 : 1;
   }
 
@@ -163,9 +176,11 @@ int main(int argc, char **argv) {
     double t0 = now();
     Engine e(argv[2], ctx, chunk);
     printf("load %.2fs\n", now() - t0);
-    const bool mtp = e.has_mtp() && flag(argc, argv, "--mtp", 1) != 0;
-    e.set_mtp(mtp);
-    if (e.has_mtp()) printf("MTP head: %s\n", mtp ? "on (speculative decoding)" : "off");
+    const int drafts = e.has_mtp() ? std::min(flag(argc, argv, "--drafts", 4), Engine::kMaxDrafts) : 0;
+    if (e.has_mtp()) {
+      e.set_mtp(drafts > 0);
+      printf("MTP head: %d draft%s per pass\n", drafts, drafts == 1 ? "" : "s");
+    }
 
     for (int rep = 0; rep < 2; rep++) {  // first pass warms pipelines and pages in the weights
       e.reset();
@@ -182,7 +197,7 @@ int main(int argc, char **argv) {
       gpu = 0;
       int passes = 0;
       t0 = now();
-      const std::vector<int32_t> out = generate(e, n_gen, mtp, &passes, &gpu);
+      const std::vector<int32_t> out = generate(e, n_gen, drafts, &passes, &gpu);
       dt = now() - t0;
       printf("%s decode:  %d tokens in %.3fs = %.1f tok/s (GPU time %.3fs = %.1f tok/s; %d passes)\n",
              rep ? "warm" : "cold", n_gen, dt, n_gen / dt, gpu, n_gen / gpu, passes);

@@ -95,7 +95,7 @@ class _Decoder:
     def push(self, token: int) -> str:
         self.ids.append(token)
         text = self.tok.decode(self.ids, skip_special_tokens=False)
-        if text.endswith("�"):      # a multi-byte character is still incomplete
+        if text.endswith("\ufffd"):      # a multi-byte character is still incomplete
             return ""
         new = text[self.sent:]
         self.sent = len(text)

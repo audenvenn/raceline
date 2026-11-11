@@ -45,28 +45,33 @@ class Engine {
 
   // ---- Speculative decoding with the model's own multi-token-prediction head
   // (present in files extended by tools/add_mtp.py). The head guesses the
-  // token after next; feeding that guess along with the next token costs
-  // about the same pass over the weights as the next token alone, and when
-  // the guess is what the model then picks, two tokens are done in one pass.
-  // Results are bit-identical to feeding the tokens one at a time.
+  // tokens that follow the next one; feeding the guesses along with the next
+  // token costs about the same pass over the weights as the next token alone,
+  // and every guess the model then confirms is a token that needed no pass of
+  // its own. Results are bit-identical to feeding the tokens one at a time.
   //
-  //   next = pick(logits)                         // not fed yet
-  //   draft = pick(draft_logits(next))
-  //   forward_draft(next, draft)                  // logits(0): after next
-  //   tok = pick(logits(0))
-  //   if (tok == draft) next = pick(logits(1));   // the draft row stands
-  //   else { reject_draft(); next = tok; }
+  //   next = pick(logits)                           // not fed yet
+  //   d[0] = pick(draft_logits(next))               // the head's guess for the token after next
+  //   d[j] = pick(draft_more(d[j-1]))               // ... and for the ones after that
+  //   forward_draft({next, d[0], ..., d[k-1]})      // logits(r): after row r
+  //   a = 0; while (a < k && pick(logits(a)) == d[a]) a++;
+  //   next = pick(logits(a)); keep_drafts(a);       // rows after the a-th draft are taken back
+  static constexpr int kMaxDrafts = 7;
   bool has_mtp() const { return has_mtp_; }
   // On by default when the file has a head. Only at position 0. When on, every
   // forward also runs the head over the new positions (one extra layer).
   void set_mtp(bool on);
   // The head's logits for the token after `next`, the token about to be fed.
   const float *draft_logits(int32_t next);
-  // Feeds `token` and, speculatively, `draft` after it.
-  const float *forward_draft(int32_t token, int32_t draft);
-  // Takes the draft row back. Only directly after forward_draft().
-  void reject_draft();
-  // Logits of the last forward: row 0, or row 1 after forward_draft().
+  // The head applied to its own output: logits for the token after `guess`,
+  // the token picked from the previous draft_logits / draft_more call.
+  const float *draft_more(int32_t guess);
+  // Feeds tokens[0] and, speculatively, tokens[1..n-1] (n <= kMaxDrafts + 1).
+  const float *forward_draft(const int32_t *tokens, int n);
+  // Keeps the first `accepted` drafts of the last forward_draft and takes the
+  // rest back. Must follow forward_draft before any other call.
+  void keep_drafts(int accepted);
+  // Logits of the last forward: row 0, or row r after forward_draft().
   const float *logits(int row = 0) const;
   int argmax_of(const float *logits) const;
 
@@ -111,9 +116,14 @@ class Engine {
   void encode_mlp(int layer, int T);
   void encode_linear_attn(int layer, int T, bool spec);
   void encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope);
-  void encode_copy_hidden(int src_row, int dst_row, int rows);
-  // Runs the MTP head over n_carry rows of mtp_h_ followed by n_chunk rows of
-  // h_ (whose next tokens are in mtp_tok_), after saving row keep_row of h_.
+  void encode_copy_rows(id<MTLBuffer> dst, int dst_row, int src_row, int rows);  // rows of h_
+  // Hidden half of the head's input: norm_h(w1-norm(rows of src)) -> xn_ rows first_row.., second half.
+  void encode_mtp_hidden(id<MTLBuffer> src, const FTensor &w1, int rows, int first_row);
+  // The head from its input projection on, for M rows whose next tokens are
+  // in mtp_tok_ and whose hidden halves are in xn_; positions pos0.. .
+  void encode_mtp_layer(int M, int pos0, bool logits);
+  // Runs the head over n_carry rows of mtp_h_ followed by n_chunk rows of h_,
+  // after saving row keep_row of h_.
   void encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits);
   void begin();                 // opens a command buffer + compute encoder
   void flush(bool reopen);      // commits, waits, accumulates GPU time
@@ -161,10 +171,12 @@ class Engine {
   // i+1, so a position can only be processed once its next token is known:
   // positions mtp_pos_ .. pos_-1 are waiting, their hidden states parked in
   // mtp_h_ and the tokens that followed all but the last in pend_tok_.
-  bool has_mtp_ = false, mtp_ = false, spec_open_ = false;
-  int mtp_pos_ = 0, draft_next_ = -1, draft_rows_ = 0;  // the last draft_logits call: its token, rows it processed
+  bool has_mtp_ = false, mtp_ = false;
+  int spec_rows_ = 0;                 // rows of the last forward_draft, until keep_drafts settles them
+  int mtp_pos_ = 0;
+  int draft_next_ = -1, draft_rows_ = 0, draft_depth_ = 0;  // the draft_logits / draft_more chain in progress
   std::vector<int32_t> pend_tok_;
-  id<MTLBuffer> mtp_h_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
+  id<MTLBuffer> mtp_h_ = nil, mtp_out_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
   id<MTLBuffer> mtp_norm_e_ = nil, mtp_norm_h_ = nil, mtp_norm_out_ = nil;
 };
 

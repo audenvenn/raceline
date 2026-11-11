@@ -151,22 +151,23 @@ kernel void copy_rows(device const float *src [[buffer(0)]],
 // ---------------------------------------------------- Gated DeltaNet pieces
 // Depthwise causal conv (4 taps) + SiLU over the q|k|v channels. Rows T..T+2
 // of the grid write the next conv state (the last three pre-conv inputs).
-// With p.spec set, rows T+3..T+5 also write the state as it was before the
-// last token, so a speculative last token can be taken back.
+// With p.spec set, T more rows copy the pre-conv inputs to `keep`, from which
+// the state after any prefix of the tokens can be rebuilt (speculative rows
+// that turn out wrong are taken back).
 kernel void lin_conv(device const float *proj [[buffer(0)]],
                      device const float *st_in [[buffer(1)]],
                      device const float *cw [[buffer(2)]],
                      device float *y [[buffer(3)]],
                      device float *st_out [[buffer(4)]],
                      constant ConvParams &p [[buffer(5)]],
-                     device float *st_prev [[buffer(6)]],
+                     device float *keep [[buffer(6)]],
                      uint2 tid [[thread_position_in_grid]])
 {
   const int c = int(tid.x), r = int(tid.y);
-  if (c >= p.C || r >= p.T + 3 + 3 * p.spec) return;
+  if (c >= p.C || r >= p.T + 3 + p.T * p.spec) return;
   if (r >= p.T + 3) {
-    const int j = r - p.T - 3, tau = p.T - 4 + j;
-    st_prev[j * p.C + c] = tau >= 0 ? proj[size_t(tau) * p.in_stride + c] : st_in[(3 + tau) * p.C + c];
+    const int j = r - p.T - 3;
+    keep[j * p.C + c] = proj[size_t(j) * p.in_stride + c];
     return;
   }
   if (r < p.T) {
@@ -226,14 +227,14 @@ kernel void lin_gates(device const float *proj [[buffer(0)]],
 // Rows of S are independent, so a SIMD-group carries 8 rows: 4 lanes per row,
 // each lane holding 32 state values in registers for the whole token loop
 // (the packing MLX's Gated DeltaNet kernel introduced). Requires Dk == 128.
-// With p.spec set, the state before the last token is also written, to S_prev.
+// The state is read from S and written to S_out; they may be the same buffer.
 kernel void gated_delta(device const float *qk [[buffer(0)]],
                         device const float *y [[buffer(1)]],
                         device const float *bg [[buffer(2)]],
-                        device float *S [[buffer(3)]],
+                        device const float *S [[buffer(3)]],
                         device float *yo [[buffer(4)]],
                         constant DeltaParams &p [[buffer(5)]],
-                        device float *S_prev [[buffer(6)]],
+                        device float *S_out [[buffer(6)]],
                         uint3 tg [[threadgroup_position_in_grid]],
                         uint lane [[thread_index_in_simdgroup]])
 {
@@ -243,7 +244,8 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
   const int row = int(tg.x) * 8 + int(lane >> 2);
   const int part = int(lane & 3);
 
-  device float *st = S + (size_t(hv) * p.Dv + row) * p.Dk + part * E;
+  const size_t at = (size_t(hv) * p.Dv + row) * p.Dk + part * E;
+  const device float *st = S + at;
   float state[E];
   for (int e = 0; e < E; ++e) state[e] = st[e];
 
@@ -253,10 +255,6 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
   device float *op = yo + hv * p.Dv + row;
 
   for (int t = 0; t < p.T; ++t) {
-    if (p.spec != 0 && t == p.T - 1) {
-      device float *prev = S_prev + (size_t(hv) * p.Dv + row) * p.Dk + part * E;
-      for (int e = 0; e < E; ++e) prev[e] = state[e];
-    }
     const float beta = bg[size_t(t) * p.bg_stride + hv];
     const float g = bg[size_t(t) * p.bg_stride + p.Hv + hv];
     const device float *k = kp + size_t(t) * p.qk_stride;
@@ -280,7 +278,8 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
     out += simd_shuffle_xor(out, 2);
     if (part == 0) op[size_t(t) * p.yo_stride] = out;
   }
-  for (int e = 0; e < E; ++e) st[e] = state[e];
+  device float *dst = S_out + at;
+  for (int e = 0; e < E; ++e) dst[e] = state[e];
 }
 
 // Per-head RMS norm of the recurrence output, gated by silu(z). `cs` is the

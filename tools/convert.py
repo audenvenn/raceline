@@ -261,6 +261,41 @@ class Writer:
         self.f.close()
 
 
+class Layout(Writer):
+    """Where a Writer puts things, computed without writing anything. Replaying
+    the calls of a conversion on it rebuilds the tensor table of a file whose
+    header was never written, which is what lets an interrupted conversion
+    continue (tools/quantize.py --resume)."""
+
+    def __init__(self):
+        self.pos = self.header_room = 64 * PAGE
+        self.tensors, self.files, self.sections, self._sec = {}, {}, [], None
+
+    def _pad(self, align):
+        self.pos += (-self.pos) % align
+        return self.pos
+
+    def blob(self, arr) -> int:
+        off = self._pad(ALIGN)
+        self.pos += arr if isinstance(arr, int) else arr.nbytes
+        return off
+
+    def add_native_layout(self, name, named_parts, k, book):
+        n = sum(rows for _, rows in named_parts)
+        n_pad = -(-n // BLOCK) * BLOCK
+        off, parts = 0, {}
+        for pn, rows in named_parts:
+            parts[pn] = dict(offset=off, n=rows)
+            off += rows
+        self.tensors[name] = dict(kind="q4n", section=len(self.sections), book=book, k=k, n=n, n_pad=n_pad,
+                                  w=self.blob(n_pad // BLOCK * k * (BLOCK // 2)), s=self.blob(4 * n_pad),
+                                  c=self.blob(4 * k), parts=parts)
+
+    def add_native_rows_layout(self, name, n, k, book):
+        self.tensors[name] = dict(kind="q4n_rows", section=len(self.sections), book=book, k=k, n=n,
+                                  w=self.blob(n * k // 2), s=self.blob(4 * n), c=self.blob(4 * k))
+
+
 # ------------------------------------------------------------------- convert
 
 def main():

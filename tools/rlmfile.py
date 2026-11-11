@@ -15,12 +15,15 @@ from convert import BLOCK, MAGIC
 class Native:
     """Reads tensors back out of a native .rlm file."""
 
-    def __init__(self, path):
-        with open(path, "rb") as f:
-            if f.read(4) != MAGIC:
-                raise SystemExit(f"{path} is not a redline model file")
-            _, n = struct.unpack("<IQ", f.read(12))
-            self.hdr = json.loads(f.read(n))
+    def __init__(self, path, hdr=None):
+        """`hdr` supplies the header for a file that has none yet (an interrupted conversion)."""
+        if hdr is None:
+            with open(path, "rb") as f:
+                if f.read(4) != MAGIC:
+                    raise SystemExit(f"{path} is not a redline model file")
+                _, n = struct.unpack("<IQ", f.read(12))
+                hdr = json.loads(f.read(n))
+        self.hdr = hdr
         if self.hdr["quant"].get("mode") != "native":
             raise SystemExit("the MTP head is only supported for native-format files (tools/quantize.py)")
         self.book = self.hdr["quant"]["book"]
@@ -33,6 +36,15 @@ class Native:
     def _scales(self, t, n):
         return (np.frombuffer(self.mm, dtype=np.float32, count=n, offset=t["s"]),
                 np.frombuffer(self.mm, dtype=np.float32, count=t["k"], offset=t["c"]))
+
+    def row_codes(self, name):
+        """A row-major matrix as stored -> (codes [N][K] uint8, row scales, column scales)."""
+        t = self.hdr["tensors"][name]
+        b = np.asarray(self.mm[t["w"]:t["w"] + t["n"] * (t["k"] // 2)]).reshape(t["n"], t["k"] // 2)
+        codes = np.empty((t["n"], t["k"]), dtype=np.uint8)
+        codes[:, 0::2], codes[:, 1::2] = b & 15, b >> 4
+        s, c = self._scales(t, t["n"])
+        return codes, s.copy(), c.copy()
 
     def rows(self, name, ids) -> np.ndarray:
         """Rows `ids` of a row-major matrix (the token table)."""

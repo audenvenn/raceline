@@ -18,7 +18,12 @@ RAM converts fine (Qwen3.8-27B is 55 GB in bf16). For each layer:
 A held-out set is pushed through both the float and the quantized model and
 the divergence of their next-token distributions is reported at the end.
 
-  tools/quantize.py models/Qwen3.5-4B models/qwen3.5-4b.native.rlm
+  tools/quantize.py models/Qwen3.5-4B models/qwen3.5-4b.rlm
+
+A large model takes a while (Qwen3.8-27B: close to two hours on an M6). If
+the run is interrupted, the same command with --resume picks up after the
+last layer that reached the file: finished layers are read back, checked
+against the checkpoint and only pushed through the activations again.
 """
 
 from __future__ import annotations
@@ -40,7 +45,8 @@ from tokenizers import Tokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import quantlib  # noqa: E402
-from convert import GROUP, BLOCK, SafeTensors, Writer  # noqa: E402,F401
+from convert import GROUP, BLOCK, MAGIC, Layout, SafeTensors, Writer  # noqa: E402,F401
+from rlmfile import Native  # noqa: E402
 
 T = 512
 EVAL_POS = 96
@@ -183,6 +189,31 @@ def quantize_stack(parts, H, book, gptq):
     return quantize_matrix(W, H, book, gptq)
 
 
+def emit_layer(out, i, layer, weights, stacks, results, book):
+    """Writes layer i's section. With results=None, `out` is a Layout and only
+    the positions are computed (the same calls, in the same order)."""
+    out.begin(f"layer.{i}")
+    out.add_float(f"layers.{i}.in_norm", weights["input_layernorm.weight"])
+    out.add_float(f"layers.{i}.post_norm", weights["post_attention_layernorm.weight"])
+    if layer.is_linear:
+        conv = weights["linear_attn.conv1d.weight"]
+        out.add_float(f"layers.{i}.lin.conv", conv.reshape(conv.shape[0], conv.shape[1]))
+        out.add_float(f"layers.{i}.lin.A_log", weights["linear_attn.A_log"])
+        out.add_float(f"layers.{i}.lin.dt_bias", weights["linear_attn.dt_bias"])
+        out.add_float(f"layers.{i}.lin.norm", weights["linear_attn.norm.weight"])
+    else:
+        out.add_float(f"layers.{i}.attn.q_norm", weights["self_attn.q_norm.weight"])
+        out.add_float(f"layers.{i}.attn.k_norm", weights["self_attn.k_norm.weight"])
+    for j, (name, parts) in enumerate(stacks):
+        named = [(pn, m.weight.shape[0]) for pn, m in parts]
+        if results is None:
+            out.add_native_layout(f"layers.{i}.{name}", named, parts[0][1].weight.shape[1], book)
+        else:
+            codes, s, c = results[j][1]
+            out.add_native(f"layers.{i}.{name}", named, codes, s, c, book)
+    out.end()
+
+
 # -------------------------------------------------------------------- main
 
 def log_softmax(z):
@@ -201,7 +232,12 @@ def main():
     ap.add_argument("--eval-seqs", type=int, default=12)
     ap.add_argument("--no-gptq", action="store_true", help="round to nearest (fast, less accurate)")
     ap.add_argument("--layers", type=int, help="stop after this many layers (debugging)")
+    ap.add_argument("--resume", action="store_true", help="continue an interrupted conversion of the same checkpoint")
     cli = ap.parse_args()
+
+    # Freed buffers are kept for reuse up to this much; without a bound the pool
+    # grows to several GB over a layer and pushes a 24 GB machine into swap.
+    mx.set_cache_limit(2 << 30)
 
     cfg_all = json.load(open(os.path.join(cli.src, "config.json")))
     tc = cfg_all.get("text_config", cfg_all)
@@ -231,7 +267,28 @@ def main():
 
     t_start = time.time()
     write = book != "mlx-affine4"
-    out = Writer(cli.dst) if write else None
+    # An interrupted run leaves a file without a header. Its contents are found
+    # again by replaying the writer's layout (`plan`); `out` opens once the
+    # first layer that is not in the file is reached.
+    plan = None
+    if write and cli.resume and os.path.exists(cli.dst):
+        with open(cli.dst, "rb") as f:
+            if f.read(4) == MAGIC:
+                raise SystemExit(f"{cli.dst} is a finished model file: nothing to resume")
+        plan, have = Layout(), os.path.getsize(cli.dst)
+        partial = Native(cli.dst, hdr=dict(tensors=plan.tensors, quant=dict(mode="native", book=book)))
+    elif cli.resume:
+        raise SystemExit(f"--resume: {cli.dst} does not exist")
+    out = Writer(cli.dst) if write and plan is None else None
+
+    def reopen():
+        """The real writer, positioned after what the plan found in the file."""
+        w = Writer.__new__(Writer)
+        w.header_room, w.tensors, w.files, w.sections, w._sec = plan.header_room, plan.tensors, {}, plan.sections, None
+        w.f = open(cli.dst, "r+b")
+        w.f.truncate(plan.pos)
+        w.f.seek(plan.pos)
+        return w
     final_norm = src.get("norm.weight")
     cal_np, ev_np = np.asarray(cal), np.asarray(ev)
     ev_ids = mx.array(ev)
@@ -255,7 +312,20 @@ def main():
     # calibration set. Untied, it is only ever read row by row: round to nearest.
     emb = src.get("embed_tokens.weight")                       # [V, H] float32
     hr = mx.array(emb[ev_np])                                  # evaluation stream, float model
-    if tied:
+    if plan is not None:                                       # the table is the first thing in the file
+        plan.begin("embed")
+        plan.add_native_rows_layout("embed", emb.shape[0], emb.shape[1], book)
+        plan.end()
+        if plan.pos > have:
+            raise SystemExit(f"{cli.dst} holds nothing to resume from: run without --resume")
+        emb_wq, emb_q = None, partial.row_codes("embed")
+        err = float(np.linalg.norm(quantlib.dequant(emb_q[0][:4096], emb_q[1][:4096], emb_q[2], book) - emb[:4096])
+                    / np.linalg.norm(emb[:4096]))
+        if not err < 0.5:
+            raise SystemExit(f"{cli.dst} does not look like a conversion of {cli.src} (token table off by {err:.2f})")
+        head_wq, head_q, head_float = (None, emb_q, emb) if tied else (None, None, None)
+        print(f"  resuming: token table read back from {cli.dst}")
+    elif tied:
         h = mx.array(emb[cal_np])
         for i in range(n_layers):
             h = run_layer(build_layer(args, i, src.layer_weights(i)), h)
@@ -269,7 +339,7 @@ def main():
     hc = rows(emb_wq, emb_q, cal_np)                           # calibration stream, quantized model
     hq = rows(emb_wq, emb_q, ev_np)                            # evaluation stream, quantized model
     mx.eval(hc, hq, hr)
-    if write:
+    if write and plan is None:
         out.begin("embed")
         out.add_native_rows("embed", emb_q[0], emb_q[1], emb_q[2], book)
         out.end()
@@ -280,36 +350,49 @@ def main():
         weights = src.layer_weights(i)
         layer = build_layer(args, i, weights)
         hr = run_layer(layer, hr)
-        moments = input_moments(layer, hc)
         stacks = stacks_of(layer)
-        results = [quantize_stack(parts, moments[id(parts[0][1])], book, gptq) for _, parts in stacks]
 
+        if out is None and plan is not None:
+            # Is this layer in the file? Lay it out and see whether its data ends within it.
+            mark = (plan.pos, dict(plan.tensors), list(plan.sections))
+            emit_layer(plan, i, layer, weights, stacks, None, book)
+            last = plan.tensors[f"layers.{i}.{stacks[-1][0]}"]
+            if last["c"] + 4 * last["k"] <= have:
+                worst = 0.0
+                for name, parts in stacks:
+                    Wq, row = partial.matrix(f"layers.{i}.{name}"), 0
+                    for _, m in parts:
+                        W = np.array(m.weight.astype(mx.float32))
+                        worst = max(worst, float(np.linalg.norm(Wq[row:row + W.shape[0]] - W) / np.linalg.norm(W)))
+                        m.weight = mx.array(Wq[row:row + W.shape[0]])
+                        row += W.shape[0]
+                if not worst < 0.7:
+                    raise SystemExit(f"{cli.dst}: layer {i} does not match {cli.src} (relative error {worst:.2f})")
+                mx.eval(layer.parameters())
+                hc = run_layer(layer, hc)
+                hq = run_layer(layer, hq)
+                print(f"  layer {i + 1}/{n_layers} read back from the file (largest deviation from float {worst:.2f}) "
+                      f"{time.time() - t0:.0f}s", flush=True)
+                del layer
+                mx.clear_cache()
+                continue
+            plan.pos, plan.tensors, plan.sections = mark[0], mark[1], mark[2]
+            partial.hdr["tensors"] = plan.tensors
+            out = reopen()
+            print(f"  continuing the conversion at layer {i + 1}", flush=True)
+
+        moments = input_moments(layer, hc)
+        results = [quantize_stack(parts, moments[id(parts[0][1])], book, gptq) for _, parts in stacks]
         if write:
-            out.begin(f"layer.{i}")
-            out.add_float(f"layers.{i}.in_norm", weights["input_layernorm.weight"])
-            out.add_float(f"layers.{i}.post_norm", weights["post_attention_layernorm.weight"])
-            if layer.is_linear:
-                conv = weights["linear_attn.conv1d.weight"]
-                out.add_float(f"layers.{i}.lin.conv", conv.reshape(conv.shape[0], conv.shape[1]))
-                out.add_float(f"layers.{i}.lin.A_log", weights["linear_attn.A_log"])
-                out.add_float(f"layers.{i}.lin.dt_bias", weights["linear_attn.dt_bias"])
-                out.add_float(f"layers.{i}.lin.norm", weights["linear_attn.norm.weight"])
-            else:
-                out.add_float(f"layers.{i}.attn.q_norm", weights["self_attn.q_norm.weight"])
-                out.add_float(f"layers.{i}.attn.k_norm", weights["self_attn.k_norm.weight"])
+            emit_layer(out, i, layer, weights, stacks, results, book)
+            out.f.flush()
         for (name, parts), (Wq, q) in zip(stacks, results):
             if q is not None:
-                codes, s, c = q
-                if write:
-                    out.add_native(f"layers.{i}.{name}", [(pn, m.weight.shape[0]) for pn, m in parts],
-                                   codes, s, c, book)
-                Wq = quantlib.dequant(codes, s, c, book)
+                Wq = quantlib.dequant(*q, book)
             row = 0
             for _, m in parts:
                 m.weight = mx.array(Wq[row:row + m.weight.shape[0]])
                 row += m.weight.shape[0]
-        if write:
-            out.end()
         mx.eval(layer.parameters())
         hc = run_layer(layer, hc)
         hq = run_layer(layer, hq)
@@ -317,6 +400,8 @@ def main():
         del layer, moments, results
         mx.clear_cache()
 
+    if write and out is None:          # every layer was already in the file
+        out = reopen()
     if not tied:
         head_float = src.get("lm_head.weight")
         head_wq, head_q = quantize_matrix(head_float, second_moment(hc), book, gptq)

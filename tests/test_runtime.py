@@ -152,6 +152,36 @@ def test_sampler_matches_its_distribution_and_couples():
     assert _sample(z, Sampling(temperature=0.0), [], 0, 0) == int(np.argmax(z))
 
 
+def test_layout_replay_matches_the_writer():
+    """Resuming an interrupted conversion relies on recomputing where the writer put everything."""
+    import tempfile
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+    from convert import Layout, Writer
+    rng = np.random.default_rng(0)
+    w, plan = Writer(os.path.join(tempfile.mkdtemp(), "t.rlm")), Layout()
+    for o in (w, plan):
+        o.begin("embed")
+        if o is w:
+            o.add_native_rows("embed", rng.integers(0, 16, (1000, 64), dtype=np.uint8), np.ones(1000, np.float32),
+                              np.ones(64, np.float32), "fp4")
+        else:
+            o.add_native_rows_layout("embed", 1000, 64, "fp4")
+        o.end()
+        for i in range(3):
+            o.begin(f"layer.{i}")
+            o.add_float(f"layers.{i}.in_norm", np.ones(64, np.float32))
+            o.add_float(f"layers.{i}.lin.conv", np.ones((96, 4), np.float32))
+            parts = [("q", 300), ("k", 77), ("v", 123)]
+            if o is w:
+                o.add_native(f"layers.{i}.attn.qkv", parts, rng.integers(0, 16, (500, 64), dtype=np.uint8),
+                             np.ones(500, np.float32), np.ones(64, np.float32), "fp4")
+            else:
+                o.add_native_layout(f"layers.{i}.attn.qkv", parts, 64, "fp4")
+            o.end()
+    assert w.tensors == plan.tensors and w.sections == plan.sections and w.f.tell() == plan.pos
+    w.finish({})
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for name, fn in tests:

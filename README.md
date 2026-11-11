@@ -6,10 +6,12 @@
 A local agent runtime for Apple Silicon with its own inference engine, built
 to get as much out of one Mac, for one user, as the hardware allows.
 
-On an M6 Mac mini with 24 GB it runs **Qwen3.8-27B at 22 to 41 tokens/s,
-where mlx-lm manages 8 to 9** on the same machine, and Qwen3.5-4B at 81 to
-163 against 47 to 51. The text it produces is bit-for-bit what decoding one
-token at a time produces, at any sampling temperature.
+On an M6 Mac mini with 24 GB it runs **Qwen3.8-27B at 26 to 44 tokens/s,
+where mlx-lm manages 9** on the same machine, and Qwen3.5-4B at 90 to 162
+against 49 to 54. The text it produces is bit-for-bit what decoding one token
+at a time produces, at any sampling temperature.
+
+![The same request answered by mlx-lm and by raceline, replayed at the measured speed](docs/race.gif)
 
 ```
 $ raceline chat qwen3.8-27b --yes -p "Run test_inventory.py. If a test fails, find the cause in inventory.py, fix it, and run the tests again until they all pass."
@@ -58,45 +60,46 @@ greedy, 128 tokens (`bench/agent_bench.py`):
 
 | Context | Runtime | Prompt processing | Decoding | Memory |
 |---|---|---|---|---|
-| 1,024 tokens | mlx-lm, MLX 4-bit weights | 275 tok/s | 8.6 tok/s | 18.2 GB |
-| | **raceline** | 240 tok/s | **40.8 tok/s** | 3.5 GB + 13.8 GB file mapped |
-| | raceline, drafts off | 244 tok/s | 9.4 tok/s | |
-| 4,096 tokens | mlx-lm, MLX 4-bit weights | 237 tok/s | 8.1 tok/s | 19.6 GB |
-| | **raceline** | 232 tok/s | **23.5 tok/s** | 3.5 GB + 13.8 GB file mapped |
-| | raceline, drafts off | 226 tok/s | 8.9 tok/s | |
+| 1,024 tokens | mlx-lm, MLX 4-bit weights | 306 tok/s | 9.2 tok/s | 18.2 GB |
+| | **raceline** | 283 tok/s | **44.3 tok/s** | 3.5 GB + 13.8 GB file mapped |
+| | raceline, drafts off | 296 tok/s | 9.8 tok/s | |
+| 4,096 tokens | mlx-lm, MLX 4-bit weights | 288 tok/s | 9.0 tok/s | 19.6 GB |
+| | **raceline** | 270 tok/s | **30.6 tok/s** | 3.5 GB + 13.8 GB file mapped |
+| | raceline, drafts off | 266 tok/s | 9.5 tok/s | |
 
 Chat answers, thinking off, three requests of up to 300 tokens
 (`bench/chat_bench.py`):
 
 | Sampling | mlx-lm | raceline | raceline, drafts off |
 |---|---|---|---|
-| greedy | 8.8 tok/s | **25.4 tok/s** | 9.1 tok/s |
-| temperature 0.7, top-p 0.8, top-k 20 | 8.8 tok/s | **23.6 tok/s** | 9.1 tok/s |
-| temperature 1.0, top-p 0.95, top-k 20 | 8.8 tok/s | **22.0 tok/s** | 9.2 tok/s |
+| greedy | 9.3 tok/s | **27.0 tok/s** | 9.8 tok/s |
+| temperature 0.7, top-p 0.8, top-k 20 | 9.4 tok/s | **25.8 tok/s** | 9.7 tok/s |
+| temperature 1.0, top-p 0.95, top-k 20 | 9.4 tok/s | **26.2 tok/s** | 9.7 tok/s |
 
 **Qwen3.5-4B.** The same two benchmarks, 256 tokens of source code:
 
 | Context | Runtime | Prompt processing | Decoding | Memory |
 |---|---|---|---|---|
-| 1,024 tokens | mlx-lm, MLX 4-bit weights | 1665 tok/s | 51.3 tok/s | 4.7 GB |
-| | **raceline** | 1795 tok/s | **163.4 tok/s** | 2.0 GB + 2.5 GB file mapped |
-| | raceline, drafts off | 1852 tok/s | 47.0 tok/s | |
-| 8,192 tokens | mlx-lm, MLX 4-bit weights | 1576 tok/s | 47.1 tok/s | 6.0 GB |
-| | **raceline** | 1568 tok/s | **112.2 tok/s** | 2.0 GB + 2.5 GB file mapped |
-| | raceline, drafts off | 1639 tok/s | 41.4 tok/s | |
+| 1,024 tokens | mlx-lm, MLX 4-bit weights | 1771 tok/s | 53.7 tok/s | 4.7 GB |
+| | **raceline** | 1915 tok/s | **161.6 tok/s** | 2.0 GB + 2.5 GB file mapped |
+| | raceline, drafts off | 2001 tok/s | 49.3 tok/s | |
+| 8,192 tokens | mlx-lm, MLX 4-bit weights | 1648 tok/s | 49.2 tok/s | 6.0 GB |
+| | **raceline** | 1689 tok/s | **111.0 tok/s** | 2.0 GB + 2.5 GB file mapped |
+| | raceline, drafts off | 1767 tok/s | 43.6 tok/s | |
 
 | Sampling | mlx-lm | raceline | raceline, drafts off |
 |---|---|---|---|
-| greedy | 50.8 tok/s | **86.7 tok/s** | 47.5 tok/s |
-| temperature 0.7, top-p 0.8, top-k 20 | 49.1 tok/s | **83.2 tok/s** | 47.0 tok/s |
-| temperature 1.0, top-p 0.95, top-k 20 | 49.0 tok/s | **81.5 tok/s** | 46.6 tok/s |
+| greedy | 54.5 tok/s | **94.4 tok/s** | 50.3 tok/s |
+| temperature 0.7, top-p 0.8, top-k 20 | 52.8 tok/s | **91.3 tok/s** | 49.7 tok/s |
+| temperature 1.0, top-p 0.95, top-k 20 | 52.4 tok/s | **90.4 tok/s** | 49.4 tok/s |
 
 How to read this. Without drafts the engine decodes at about MLX's speed, and
-it processes prompts at about MLX's speed with or without them (13% slower
-for the 27B at 1,024 tokens): there is no advantage there. The gain is the
-drafts, and it depends on how predictable the text is: 2.9x to 4.7x for
-source code and 2.5x to 2.9x for prose on the 27B, less on the 4B, where a
-draft costs more relative to a pass. Memory is the peak
+it processes prompts at about MLX's speed with or without them (6 to 8%
+slower for the 27B, 2 to 8% faster for the 4B): there is no advantage there.
+The gain is the drafts, and it depends on how predictable the text is: 3.4x
+to 4.8x for source code and 2.7x to 2.9x for prose on the 27B, less on the
+4B, where a draft costs more relative to a pass. The files measured are the
+published ones; `bench/results/` has the raw numbers. Memory is the peak
 footprint of the process; the model file is mapped read-only on top of that
 and its pages can be dropped and re-read by the system.
 
@@ -114,7 +117,7 @@ machine. The engine is built around getting more than one token out of a pass.
    and up to seven guesses through the model together; every guess the model
    confirms is a token that needed no pass of its own. On held-out text the
    first four guesses hold 79%, 71%, 64% and 59% of the time, each given the
-   ones before it (Qwen3.5-4B; the 27B's first guess holds 81.5%).
+   ones before it (Qwen3.5-4B; the 27B's first guess holds 82%).
 2. **A pass costs about the same for 1 or 16 rows.** The linear-layer kernel
    hands packed 4-bit weights straight to the GPU's neural accelerators
    (Metal 4 `matmul2d` with FP4 operands) over a layout made for streaming.
@@ -363,8 +366,8 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
   vision input.
 - The 27B conversion loses more quality than MLX's 4-bit format does (KL
   0.148 against 0.105 nats to the float model on held-out text, #15).
-- Without drafts, decoding is at 66% of the bandwidth ceiling for the 4B
-  model and 81% for the 27B: a pass is some 380 to 760 GPU dispatches, many
+- Without drafts, decoding is at 70% of the bandwidth ceiling for the 4B
+  model and 84% for the 27B: a pass is some 380 to 760 GPU dispatches, many
   of them small kernels.
 - Prompt processing is at MLX's speed or slightly below. The accelerators run 8-bit activations
   against 4-bit weights about 1.6x faster than half precision; that path is

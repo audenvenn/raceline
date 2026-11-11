@@ -1,0 +1,60 @@
+[
+ {
+  "model": "models/qwen3.5-4b.rot.rlm",
+  "backend": "raceline",
+  "mtp": false,
+  "load_s": 0.5691222499590367,
+  "prompt_tokens": 1024,
+  "gen_tokens": 256,
+  "prefill_tps": 2001.297880782741,
+  "decode_tps": 49.341361487642715,
+  "tokens": [
+   318,
+   17,
+   11,
+   220,
+   18,
+   11,
+   220,
+   15,
+   11,
+   328,
+   6918,
+   487,
+   220,
+   15,
+   681,
+   198
+  ],
+  "peak_gb": 1.785760264
+ },
+ {
+  "model": "models/qwen3.5-4b.rot.rlm",
+  "backend": "raceline",
+  "mtp": false,
+  "load_s": 0.565070915967226,
+  "prompt_tokens": 8192,
+  "gen_tokens": 256,
+  "prefill_tps": 1766.9234340707826,
+  "decode_tps": 43.55395571400489,
+  "tokens": [
+   198,
+   262,
+   4071,
+   198,
+   262,
+   1259,
+   48093,
+   548,
+   283,
+   4178,
+   548,
+   2048,
+   84494,
+   8,
+   271,
+   262
+  ],
+  "peak_gb": 1.788692976
+ }
+]

@@ -129,8 +129,10 @@ machine. The engine is built around getting more than one token out of a pass.
    over the weights.
 4. **4.0 bits per weight that the hardware decodes itself.** Weights are
    stored as `row scale x column scale x FP4 code`, quantized with GPTQ one
-   layer at a time: the quality of MLX's 4-bit format, which needs 4.5 bits,
-   with 11% less to read per pass. The file is mapped, not loaded.
+   layer at a time, with 11% less to read per pass than MLX's 4-bit format
+   (4.5 bits). In held-out quality that is on par with MLX's format for the
+   4B model and behind it for the 27B; the tables are below. The file is
+   mapped, not loaded.
 5. **Nothing is recomputed between turns.** The runtime keeps the model where
    the last request left it and snapshots the recurrent state at the points a
    conversation can branch from, so a follow-up request only processes what
@@ -214,6 +216,7 @@ Environment variables, all optional:
 | `RACELINE_MIN_CONFIDENCE` | Fixed threshold below which drafting stops, instead of the measured one. |
 | `RACELINE_DRAFT_VOCAB` | Token-id limit of a draft's vocabulary pass (`0` for the whole vocabulary; chosen from the context by default). |
 | `RACELINE_RELEASES` | Base URL `raceline pull` downloads from. |
+| `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 
 ## What is checked
@@ -242,11 +245,18 @@ Quantization quality against the float model on held-out text, Qwen3.5-4B,
 | **native FP4, GPTQ (this format)** | 4.0 | 0.083 | 3.379 | 88.6% |
 | native FP4, round to nearest | 4.0 | 0.103 | 3.478 | 88.9% |
 
-The published Qwen3.8-27B file, same measurement:
+Qwen3.8-27B, same measurement:
 
 | Weights | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
 |---|---|---|---|---|
-| **native FP4, GPTQ (this format)** | 4.0 | 0.152 | 1.999 | 91.5% |
+| MLX affine 4-bit, groups of 64 | 4.5 | 0.105 | 1.861 | 92.2% |
+| **native FP4, GPTQ (the published file)** | 4.0 | 0.152 | 1.999 | 91.5% |
+
+For the 27B the native file is measurably further from the float model than
+MLX's format, so the speed tables compare weights of slightly different
+quality there. The speed-up itself does not come from the format (decoding
+without drafts is 9.4 against 8.6 tok/s); the quality gap is tracked in
+[#15](https://github.com/audenvenn/raceline/issues/15).
 
 ## How it works
 
@@ -314,6 +324,8 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 
 - One model family: dense Qwen3.5 / Qwen3.8 text models. No MoE variants, no
   vision input.
+- The 27B conversion loses more quality than MLX's 4-bit format does (KL
+  0.152 against 0.105 nats to the float model on held-out text).
 - Without drafts, decoding is at 66% of the bandwidth ceiling for the 4B
   model and 81% for the 27B: a pass is some 380 to 760 GPU dispatches, many
   of them small kernels.

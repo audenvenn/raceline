@@ -179,6 +179,30 @@ class ExpertStack:
         self.moe, self.kind = moe, kind
         self.moment_key = id(moe.gate) if kind == "gate_up" else None
 
+    def numpy(self, chunk: int = 32) -> np.ndarray:
+        """`weight` as float32 NumPy, copied a few experts at a time: no second copy
+        of the whole stack in MLX (2 GB for a layer of Qwen3.5-35B-A3B)."""
+        sw, sh = self.moe.switch_mlp, self.moe.shared_expert
+        if self.kind == "gate_up":
+            g, u = sw.gate_proj.weight, sw.up_proj.weight              # [E, I, H]
+            E, I, H = g.shape
+            out = np.empty(((E + 1) * 2 * I, H), dtype=np.float32)
+            for e0 in range(0, E, chunk):
+                e1 = min(E, e0 + chunk)
+                block = mx.concatenate([g[e0:e1], u[e0:e1]], axis=1).astype(mx.float32)
+                out[e0 * 2 * I:e1 * 2 * I] = np.array(block).reshape(-1, H)
+            out[E * 2 * I:E * 2 * I + I] = np.array(sh.gate_proj.weight.astype(mx.float32))
+            out[E * 2 * I + I:] = np.array(sh.up_proj.weight.astype(mx.float32))
+        else:
+            d = sw.down_proj.weight                                      # [E, H, I]
+            E, H, I = d.shape
+            out = np.empty(((E + 1) * H, I), dtype=np.float32)
+            for e0 in range(0, E, chunk):
+                e1 = min(E, e0 + chunk)
+                out[e0 * H:e1 * H] = np.array(d[e0:e1].astype(mx.float32)).reshape(-1, I)
+            out[E * H:] = np.array(sh.down_proj.weight.astype(mx.float32))
+        return out
+
     @property
     def weight(self):
         sw, sh = self.moe.switch_mlp, self.moe.shared_expert
@@ -251,7 +275,9 @@ def quantize_matrix(W, H, book, gptq):
 
 def quantize_stack(parts, H, book, gptq):
     """Quantizes the row-stacked matrices jointly: they share the input, hence c."""
-    W = np.concatenate([np.array(m.weight.astype(mx.float32)) for _, m in parts], axis=0)
+    rows = [m.numpy() if isinstance(m, ExpertStack) else np.array(m.weight.astype(mx.float32)) for _, m in parts]
+    W = rows[0] if len(rows) == 1 else np.concatenate(rows, axis=0)   # one part: no copy of a 2 GB stack
+    del rows
     return quantize_matrix(W, H, book, gptq)
 
 
@@ -421,7 +447,7 @@ def main():
 
     # Freed buffers are kept for reuse up to this much; without a bound the pool
     # grows to several GB over a layer and pushes a 24 GB machine into swap.
-    mx.set_cache_limit(2 << 30)
+    mx.set_cache_limit(1 << 30)
 
     cfg_all = json.load(open(os.path.join(cli.src, "config.json")))
     tc = cfg_all.get("text_config", cfg_all)
@@ -552,6 +578,11 @@ def main():
         if Q is not None:
             weights = rotate_layer(weights, Q)
         layer = build_layer(args, i, weights)
+        # The matrices live in `layer` now; what emit_layer still reads from `weights`
+        # is small (norms, convolution, gates). Keeping the float copies of a MoE
+        # layer's experts besides would add 3.3 GB to a peak that has to fit in 24 GB
+        # next to everything else on the machine.
+        weights = {k: v for k, v in weights.items() if v.size < (1 << 22)}
         hr = run_layer(layer, hr)
         stacks = stacks_of(layer)
 

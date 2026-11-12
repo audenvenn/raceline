@@ -287,6 +287,9 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       x.S = (int)S;
       x.fd = open(model_->path().c_str(), O_RDONLY);
       if (x.fd < 0) fatal("cannot open %s", model_->path().c_str());
+      // For measuring a Mac with less memory on one with more: read experts from
+      // the SSD every time, past the system's file cache.
+      if (getenv("RACELINE_EXPERT_NOCACHE") && atoi(getenv("RACELINE_EXPERT_NOCACHE"))) fcntl(x.fd, F_NOCACHE, 1);
       for (int kind = 0; kind < 2; kind++) {
         for (int i = 0; i < c.layers; i++) {
           const QTensor &t = model_->q(lname(i, kind ? "moe.down" : "moe.gate_up"));

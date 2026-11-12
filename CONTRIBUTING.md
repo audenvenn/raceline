@@ -44,6 +44,8 @@ a stale binary and new kernel sources disagree silently and give wrong results.
 | Speed | idle GPU, model, an MLX conversion as the baseline | `bench/agent_bench.py`, `bench/chat_bench.py` |
 | The agent end to end: tasks solved, time, drafts | idle GPU, model | `bench/agent_eval.py <model>` |
 
+To measure a mixture-of-experts model with its experts on disk as a Mac with less memory would run it, set `RACELINE_EXPERT_CACHE=<GB>` to that Mac's budget and `RACELINE_EXPERT_NOCACHE=1`, which reads every missing expert from the SSD instead of from the system's file cache.
+
 Token files are raw little-endian int32. `tools/make_tokens.py <model.rlm>
 README.md tokens.i32 --count 96` makes one from any text; 96 tokens are enough
 for the verification scripts, the benchmarks of the engine's own command line

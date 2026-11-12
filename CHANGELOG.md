@@ -8,6 +8,12 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Fixed
+
+- `raceline pull` without a model marks a mixture of experts whose experts
+  stay partly on the SSD by the rule the engine applies (the memory the GPU
+  may use, not the Mac's); Qwen3.6-35B-A3B went unmarked on a 24 GB Mac.
+
 ## [0.5.0] - 2026-11-13
 
 ### Added

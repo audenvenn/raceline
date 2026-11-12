@@ -267,6 +267,22 @@ def test_anthropic_stream_is_well_formed():
     assert events[-2][1]["delta"]["stop_reason"] == "tool_use" and events[-2][1]["usage"]["output_tokens"] == 3
 
 
+def test_openai_context_length_exceeded_before_the_stream():
+    from raceline.chat import ContextFull
+
+    rt = ScriptedRuntime()
+    server, port = start(rt)
+    try:
+        for stream in (False, True):
+            rt.script = [ContextFull(40000, 32768)]
+            code, text = post(port, {"messages": [{"role": "user", "content": "hi"}], "stream": stream})
+            assert code == 400, text
+            error = json.loads(text)["error"]
+            assert error["code"] == "context_length_exceeded" and "maximum context length is 32768" in error["message"]
+    finally:
+        server.shutdown()
+
+
 def test_anthropic_prompt_too_long_is_an_error_before_the_stream():
     from raceline.chat import ContextFull
 

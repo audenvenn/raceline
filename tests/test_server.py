@@ -145,7 +145,7 @@ def test_bad_request_and_unknown_path():
 
 def test_client_that_disconnects_ends_the_generation_at_once():
     rt = ScriptedRuntime()
-    rt.script = [("content", "x")] + ["slow", ("content", "y")] * 40 + [("done", STATS)]
+    rt.script = [("content", "x")] + ["slow", ("content", "y")] * 2000 + [("done", STATS)]   # 100 s if not cut short
     server, port = start(rt)
     try:
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "stream": True}).encode()
@@ -155,7 +155,7 @@ def test_client_that_disconnects_ends_the_generation_at_once():
         sock.recv(256)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         sock.close()                            # the client goes away mid-answer (with a reset)
-        for _ in range(100):
+        for _ in range(600):                    # a slow CI machine gets 30 s to notice
             if rt.ended:
                 break
             time.sleep(0.05)

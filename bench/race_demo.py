@@ -10,6 +10,10 @@ to each other, so what the numbers in the README mean can be seen.
   bench/race_demo.py record models/qwen3.8-27b.rlm race_raceline.json
   bench/race_demo.py render race_mlx.json race_raceline.json docs/race.gif --title "Qwen3.8-27B on a 24 GB M6 Mac mini"
 
+`record-agent` records the terminal agent doing one of the tasks of
+bench/agent_tasks.py instead (everything it prints, tools included), and
+`render --speed 4` replays at four times the measured speed.
+
 Measure with nothing else using the GPU.
 """
 
@@ -50,6 +54,63 @@ def record(model, out, max_tokens):
           f"first token after {stats['time_to_first_token']:.2f}s")
 
 
+def record_agent(model, out, task_name):
+    """The agent's whole printed session on one task, each piece with the time it appeared."""
+    import shutil
+    import tempfile
+
+    sys.path.insert(0, ROOT)
+    sys.path.insert(0, os.path.join(ROOT, "bench"))
+    from agent_eval import FIXED_TIME
+    from agent_tasks import TASKS
+    from raceline.agent import Agent
+    from raceline.backends import load_backend
+    from raceline.chat import Runtime
+    from raceline.cli import agent_sampling
+
+    task = TASKS[task_name]
+    backend = load_backend(model)
+    sampling = agent_sampling(model, backend, True)
+    sampling.seed = 1
+    rt = Runtime(backend, sampling)
+    for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):   # warm up
+        pass
+    work = os.path.join(tempfile.gettempdir(), "raceline-race")
+    shutil.rmtree(work, ignore_errors=True)
+    os.makedirs(work)
+    for path, text in task["files"].items():
+        with open(os.path.join(work, path), "w", encoding="utf-8") as f:
+            f.write(text)
+        os.utime(os.path.join(work, path), (FIXED_TIME, FIXED_TIME))
+
+    class Recorder:
+        def __init__(self):
+            self.events, self.t0 = [], time.perf_counter()
+
+        def write(self, text):
+            if text:
+                self.events.append([time.perf_counter() - self.t0, text])
+
+        def flush(self):
+            pass
+
+    agent = Agent(rt, work, auto_approve=True, thinking=True, interactive=False, color=False)
+    rec, saved = Recorder(), sys.stdout
+    sys.stdout = rec
+    try:
+        totals = agent.turn(task["prompt"])
+    finally:
+        sys.stdout = saved
+    label = {"mlx": "mlx-lm", "raceline": "raceline"}.get(backend.name, backend.name)
+    events = [[0.0, f"> {task['prompt']}\n"]] + rec.events
+    with open(out, "w") as f:
+        json.dump(dict(label=label, model=os.path.basename(os.path.normpath(model)), events=events,
+                       tokens=totals["completion_tokens"],
+                       decode_tps=totals["completion_tokens"] / max(totals["decode_seconds"], 1e-9),
+                       first_token=0.0), f, indent=1)
+    print(f"{label}: {totals['steps']} steps, {totals['completion_tokens']} tokens, {rec.events[-1][0]:.1f}s")
+
+
 def wrap(text, width):
     """Lines of at most `width` characters, breaking at spaces where possible, keeping newlines."""
     lines = []
@@ -63,7 +124,8 @@ def wrap(text, width):
     return lines
 
 
-def render(runs, out, title, fps=12, width=1280, height=720, hold=2.5, max_seconds=None):
+def render(runs, out, title, fps=12, width=1280, height=720, hold=2.5, max_seconds=None, speed=1.0,
+           subtitle="same request, greedy decoding, measured on this machine and replayed at real speed"):
     from PIL import Image, ImageDraw, ImageFont
 
     font = ImageFont.truetype("/System/Library/Fonts/Menlo.ttc", 15)
@@ -79,19 +141,18 @@ def render(runs, out, title, fps=12, width=1280, height=720, hold=2.5, max_secon
 
     finish = [r["events"][-1][0] if r["events"] else 0.0 for r in runs]
     end = max(finish) if max_seconds is None else min(max(finish), max_seconds)
-    n_frames = int((end + hold) * fps)
+    n_frames = int((end / speed + hold) * fps)
     frames = []
     for i in range(n_frames):
-        t = i / fps
+        t = i / fps * speed
         im = Image.new("RGB", (width, height), bg)
         d = ImageDraw.Draw(im)
         d.text((pad, 24), title, font=big, fill=fg)
-        d.text((pad, 56), "same request, greedy decoding, measured on this machine and replayed at real speed",
-               font=font, fill=dim)
+        d.text((pad, 56), subtitle, font=font, fill=dim)
         for j, r in enumerate(runs):
             x0 = pad + j * (pane_w + pad)
             d.rounded_rectangle((x0, top, x0 + pane_w, height - pad), radius=10, fill=panel)
-            text = "".join(v for ts, v in r["events"] if ts <= t)
+            text = "".join(v for ts, v in r["events"] if ts <= t).replace("\t", "  ")
             done = t >= finish[j]
             shown = sum(1 for ts, _ in r["events"] if ts <= t)
             elapsed = min(t, finish[j])
@@ -118,18 +179,27 @@ def main():
     p.add_argument("model")
     p.add_argument("out")
     p.add_argument("--max-tokens", type=int, default=400)
+    p = sub.add_parser("record-agent")
+    p.add_argument("model")
+    p.add_argument("out")
+    p.add_argument("--task", default="inventory")
     p = sub.add_parser("render")
     p.add_argument("left")
     p.add_argument("right")
     p.add_argument("out")
     p.add_argument("--title", default="")
     p.add_argument("--max-seconds", type=float)
+    p.add_argument("--speed", type=float, default=1.0, help="replay this many times faster than measured")
+    p.add_argument("--subtitle")
     args = ap.parse_args()
     if args.cmd == "record":
         record(args.model, args.out, args.max_tokens)
+    elif args.cmd == "record-agent":
+        record_agent(args.model, args.out, args.task)
     else:
+        extra = {"subtitle": args.subtitle} if args.subtitle else {}
         render([json.load(open(args.left)), json.load(open(args.right))], args.out, args.title,
-               max_seconds=args.max_seconds)
+               max_seconds=args.max_seconds, speed=args.speed, **extra)
 
 
 if __name__ == "__main__":

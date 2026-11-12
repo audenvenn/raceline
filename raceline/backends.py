@@ -203,13 +203,14 @@ class MLXBackend(Backend):
         self._logits = snap.logits
 
 
-def load_backend(model: str, backend: Optional[str] = None) -> Backend:
+def load_backend(model: str, backend: Optional[str] = None, max_ctx: Optional[int] = None) -> Backend:
     """`model` is an MLX model directory or a .rlm file (with tokenizer files
-    next to it or in the directory given by RACELINE_TOKENIZER)."""
+    next to it or in the directory given by RACELINE_TOKENIZER). `max_ctx`:
+    the engine's context window (default 32768 tokens; MLX's cache grows as needed)."""
     kind = backend or ("raceline" if model.endswith(".rlm") else "mlx")
     if kind == "mlx":
         return MLXBackend(model)
     if kind == "raceline":
         from .engine import RacelineBackend
-        return RacelineBackend(model)
+        return RacelineBackend(model, **({"max_ctx": max_ctx} if max_ctx else {}))
     raise ValueError(f"unknown backend '{kind}'")

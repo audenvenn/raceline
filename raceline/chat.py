@@ -30,13 +30,27 @@ _FUNCTION = re.compile(r"<function=([^>\n]+)>(.*?)(?:</function>|\Z)", re.S)
 _PARAMETER = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
 
 
+class ContextFull(ValueError):
+    """The conversation does not fit the context window."""
+
+    def __init__(self, tokens: int, limit: int):
+        super().__init__(f"the conversation is {tokens} tokens; the context window holds {limit}")
+        self.tokens, self.limit = tokens, limit
+
+
 def normalize_messages(messages: list) -> list:
-    """OpenAI-style messages -> what the chat template expects."""
+    """OpenAI-style messages -> what the chat template expects.
+
+    The Qwen templates take one system message, first. Several at the start
+    are joined; one that comes later in the conversation (clients insert
+    them, such as reminders) becomes a user message at that point."""
     out = []
     for m in messages:
         m = dict(m)
         if m.get("role") == "developer":   # OpenAI's newer name for system instructions
             m["role"] = "system"
+        if m.get("role") == "system" and any(x["role"] != "system" for x in out):
+            m["role"] = "user"
         content = m.get("content")
         if isinstance(content, list):  # text parts only
             if any(p.get("type") not in ("text", None) for p in content if isinstance(p, dict)):
@@ -58,6 +72,9 @@ def normalize_messages(messages: list) -> list:
             m["tool_calls"] = calls
         else:
             m.pop("tool_calls", None)
+        if m["role"] == "system" and out:    # only system messages so far: one system prompt
+            out[0]["content"] = (out[0]["content"] + "\n\n" + m["content"]).strip("\n")
+            continue
         out.append(m)
     return out
 
@@ -171,13 +188,14 @@ class Runtime:
         limit = self.backend.max_context
         if limit is not None:
             if len(prompt) + 8 > limit:
-                raise ValueError(f"the conversation is {len(prompt)} tokens; the context window holds {limit}")
+                raise ContextFull(len(prompt), limit)
             max_tokens = min(max_tokens, limit - len(prompt) - 2)
         counters = dict(getattr(self.backend, "counters", {}))
         experts = getattr(self.backend, "expert_cache", lambda: None)
         experts0 = experts()
         t0 = time.perf_counter()
         usage = self.session.sync(prompt, points, pin, progress)
+        self.prompt_usage = usage     # for a reply that reports it before the first token (Anthropic's stream)
         t_prefill = time.perf_counter() - t0
 
         channel = "reasoning" if thinking else "content"
@@ -185,7 +203,7 @@ class Runtime:
         call_ids: list = []
         answer = ""
         fresh = True            # at the start of a channel: drop leading newlines
-        n_out, t_first, finish = 0, None, "length"
+        n_out, t_first, finish, stop_sequence = 0, None, "length", None
         t1 = time.perf_counter()
 
         def emit(kind, text):
@@ -227,12 +245,12 @@ class Runtime:
                 continue
             if channel == "content" and stop:
                 answer += text
-                cut = min((answer.find(s) for s in stop if s in answer), default=-1)
+                cut, matched = min(((answer.find(s), s) for s in stop if s in answer), default=(-1, None))
                 if cut >= 0:        # a stop string completed: emit only what precedes it
                     keep = len(text) - (len(answer) - cut)
                     if keep > 0:
                         yield ("content", text[:keep])
-                    finish = "stop"
+                    finish, stop_sequence = "stop", matched
                     break
             ev = emit(channel, text)
             if ev:
@@ -259,7 +277,8 @@ class Runtime:
             **({"drafts": drafts["drafts"], "drafts_accepted": drafts["accepted"]} if drafts.get("drafts") else {}),
             **({"copied_drafts": drafts["lookup_drafts"], "copied_drafts_accepted": drafts["lookup_accepted"]}
                if drafts.get("lookup_drafts") else {}),
-            finish_reason=finish, prompt_tokens=usage["prompt_tokens"], cached_tokens=usage["cached_tokens"],
+            finish_reason=finish, stop_sequence=stop_sequence,
+            prompt_tokens=usage["prompt_tokens"], cached_tokens=usage["cached_tokens"],
             completion_tokens=n_out, prefill_seconds=t_prefill, decode_seconds=t_decode,
             time_to_first_token=t_first if t_first is not None else t_prefill,
             prefill_tokens_per_second=fed / t_prefill if fed and t_prefill > 0 else 0.0,

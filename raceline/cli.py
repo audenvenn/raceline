@@ -43,7 +43,7 @@ def _runtime(args, agent: bool = False):
     args.model = resolve(args.model)
     if getattr(args, "expert_cache", None) is not None:
         os.environ["RACELINE_EXPERT_CACHE"] = str(args.expert_cache)
-    backend = load_backend(args.model, args.backend)
+    backend = load_backend(args.model, args.backend, getattr(args, "ctx", None))
     cache = getattr(backend, "expert_cache_size", lambda: None)()
     if cache:
         print(f"raceline: {100 * cache[1]:.0f}% of the model's experts are kept in memory ({cache[0]:.1f} GB); the others "
@@ -79,6 +79,9 @@ def _main(argv=None):
                        help="mixture-of-experts models: keep the experts on disk and the ones in use in a cache "
                             "of this size (0: all in memory; default: decided from this Mac's memory; "
                             "RACELINE_EXPERT_CACHE)")
+        p.add_argument("--ctx", type=int, metavar="TOKENS",
+                       help="context window of the engine (default 32768; the models take up to 262144, at "
+                            "22 KB of attention cache per token for the 35B-A3B models and 68 KB for Qwen3.8-27B)")
 
     p = sub.add_parser("serve", help="OpenAI-compatible API on localhost")
     common(p)

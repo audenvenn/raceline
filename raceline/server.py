@@ -1,6 +1,8 @@
-"""OpenAI-compatible HTTP API for one local user.
+"""OpenAI-compatible HTTP API for one local user, plus Anthropic's Messages API.
 
   POST /v1/chat/completions   streaming and non-streaming, tools, reasoning
+  POST /v1/messages           the same in Anthropic's format (raceline/anthropic.py)
+  POST /v1/messages/count_tokens
   GET  /v1/models
   GET  /health
 
@@ -17,6 +19,7 @@ where its chat template has one (Qwen3.8); none / minimal turns thinking off.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 import time
@@ -24,7 +27,7 @@ import uuid
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .chat import Runtime
+from .chat import ContextFull, Runtime
 
 
 def _sampling(runtime: Runtime, body: dict):
@@ -91,7 +94,10 @@ def make_handler(runtime: Runtime, model_id: str):
                 self._error(404, "not found")
 
         def do_POST(self):
-            if self.path not in ("/v1/chat/completions", "/chat/completions"):
+            path = self.path.split("?", 1)[0]      # Anthropic clients add ?beta=true
+            if path in ("/v1/messages", "/v1/messages/count_tokens"):
+                return self._anthropic(path)
+            if path not in ("/v1/chat/completions", "/chat/completions"):
                 return self._error(404, "not found")
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
@@ -202,6 +208,83 @@ def make_handler(runtime: Runtime, model_id: str):
             self.wfile.write(b"0\r\n\r\n")
             self._log(stats)
 
+        # ------------------------------------------- Anthropic Messages API
+        def _anthropic_error(self, code: int, message: str, kind: str = "invalid_request_error"):
+            self._json(code, {"type": "error", "error": {"type": kind, "message": message}})
+
+        def _sse(self, event: str, payload: dict):
+            data = f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
+
+        def _anthropic(self, path: str):
+            from . import anthropic
+
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                args = anthropic.to_runtime(body)
+                if path.endswith("/count_tokens"):
+                    tokens, _, _ = runtime.render(args["messages"], args["tools"], args["thinking"])
+                    return self._json(200, {"input_tokens": len(tokens)})
+                max_tokens = int(body["max_tokens"])
+            except (ValueError, KeyError, TypeError, AttributeError) as e:
+                return self._anthropic_error(400, f"bad request: {e}")
+            self._started = False
+            events = runtime.chat(args["messages"], args["tools"], _sampling(runtime, body), max_tokens,
+                                  args["thinking"], args["stop"])
+            try:
+                if body.get("stream"):
+                    # The first event comes once the prompt has been read: a prompt that does not fit fails
+                    # here, before anything is sent, and gets an error the client can act on.
+                    first = next(events, None)
+                    self._anthropic_stream(itertools.chain([first] if first else [], events),
+                                           anthropic.Streamer(model_id))
+                else:
+                    message, stats = anthropic.complete(events, model_id)
+                    self._log(stats)
+                    self._json(200, message)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            except ContextFull as e:       # in Anthropic's words, which clients look for to compact
+                self._anthropic_error(400, f"prompt is too long: {e.tokens} tokens > {e.limit} maximum")
+            except Exception as e:
+                message = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
+                try:
+                    if self._started:
+                        self._sse("error", {"type": "error", "error": {"type": "api_error", "message": message}})
+                        self.wfile.write(b"0\r\n\r\n")
+                    else:
+                        self._anthropic_error(400 if isinstance(e, ValueError) else 500, message,
+                                              "invalid_request_error" if isinstance(e, ValueError) else "api_error")
+                except Exception:
+                    pass
+            finally:
+                events.close()
+
+        def _anthropic_stream(self, events, streamer):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self._started = True
+            begun, stats = False, None
+            for kind, value in events:
+                if not begun:       # the prompt has been read: its size is known
+                    u = runtime.prompt_usage
+                    for ev in streamer.start(u["prompt_tokens"], u["cached_tokens"]):
+                        self._sse(*ev)
+                    begun = True
+                if kind == "done":
+                    stats = value
+                else:
+                    for ev in streamer.event(kind, value):
+                        self._sse(*ev)
+            for ev in streamer.finish(stats):
+                self._sse(*ev)
+            self.wfile.write(b"0\r\n\r\n")
+            self._log(stats)
+
         def _log(self, s):
             print(f"[{time.strftime('%H:%M:%S')}] prompt {s['prompt_tokens']} tok ({s['cached_tokens']} cached, "
                   f"{s['prefill_seconds']:.2f}s)  out {s['completion_tokens']} tok at "
@@ -223,7 +306,8 @@ class Server(ThreadingHTTPServer):
 def serve(runtime: Runtime, model_id: str, host: str = "127.0.0.1", port: int = 8080):
     server = Server((host, port), make_handler(runtime, model_id))
     print(f"raceline: {model_id} on the {runtime.backend.name} backend")
-    print(f"OpenAI-compatible API at http://{host}:{port}/v1  (Ctrl-C to stop)", flush=True)
+    print(f"OpenAI-compatible API at http://{host}:{port}/v1, Anthropic's Messages API at /v1/messages "
+          "(Ctrl-C to stop)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

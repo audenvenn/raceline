@@ -64,9 +64,10 @@ void set_params(id<MTLComputeCommandEncoder> enc, const P &p, int index) {
 // that watches the event loads what is missing (least recently used slots
 // first; each layer's shared expert has a slot of its own), updates the table
 // and signals. What is computed does not change, only where the weights are read.
-static double expert_cache_gb() {
+// -1: decide from the memory the GPU may use (Engine::Engine).
+static double expert_cache_setting() {
   const char *v = getenv("RACELINE_EXPERT_CACHE");
-  return v ? atof(v) : 0.0;
+  return v && *v ? atof(v) : -1.0;
 }
 
 struct Engine::ExpertCache {
@@ -174,8 +175,28 @@ struct Engine::ExpertCache {
 Engine::~Engine() = default;
 
 Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
-    : model_(new ModelFile(mt_, model_path, expert_cache_gb() <= 0)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
+    : model_(new ModelFile(mt_, model_path, false)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
   const Config &c = config();
+  // Experts in memory, or on disk with a cache: the cache when the whole model,
+  // its attention cache and scratch would not fit in 85% of what Metal
+  // recommends the GPU use, or when RACELINE_EXPERT_CACHE says so (0: never).
+  double cache_gb = 0;
+  if (c.is_moe()) {
+    const double setting = expert_cache_setting();
+    const double budget = 0.85 * (double)mt_.device().recommendedMaxWorkingSetSize;
+    const double experts = (double)model_->expert_bytes(), rest = (double)model_->file_bytes() - experts;
+    int attn_layers = 1;  // the draft head's
+    for (int i = 0; i < c.layers; i++) attn_layers += !c.is_linear_layer(i);
+    const double kv = 2.0 * attn_layers * c.kv_heads * c.head_dim * ((max_ctx + 255) / 256 * 256) * sizeof(_Float16);
+    const double scratch = 1.5e9;
+    if (setting > 0) cache_gb = setting;
+    else if (setting < 0 && rest + experts + kv + scratch > budget) {
+      cache_gb = (budget - rest - kv - scratch) / 1e9;
+      if (cache_gb < 1) fatal("this model needs about %.1f GB of GPU memory outside its experts; this Mac allows %.1f",
+                              (rest + kv + scratch) / 1e9, budget / 1e9);
+    }
+  }
+  if (cache_gb <= 0) model_->map_expert_sections(mt_);
   if (c.lin_k_dim != 128 || c.head_dim != 256 || c.rope_dims() != 64 || c.conv_taps != 4 || c.group != 64 ||
       c.block != 256 || c.lin_v_dim % 8 != 0 || c.heads % c.kv_heads != 0)
     fatal("unsupported model geometry (kernels assume Dk=128, head_dim=256, 64 rotary dims, 4 conv taps)");
@@ -232,7 +253,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     moe_identity_ = mt_.alloc((c.experts + 1) * sizeof(int32_t));
     for (int e = 0; e <= c.experts; e++) ((int32_t *)moe_identity_.contents)[e] = e;
 
-    if (expert_cache_gb() > 0) {
+    if (cache_gb > 0) {
       cache_ = std::make_unique<ExpertCache>();
       ExpertCache &x = *cache_;
       x.layers = c.layers;
@@ -249,7 +270,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
         }
       }
       const size_t per_slot = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);
-      x.slots = std::max((int)(expert_cache_gb() * 1e9 / per_slot), c.layers + c.experts);
+      x.slots = std::max((int)(cache_gb * 1e9 / per_slot), c.layers + c.experts);
       for (int kind = 0; kind < 2; kind++) {
         x.w[kind] = mt_.alloc((size_t)x.slots * x.w_bytes[kind]);
         x.s[kind] = mt_.alloc((size_t)x.slots * x.s_floats[kind] * sizeof(float));

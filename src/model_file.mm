@@ -90,6 +90,7 @@ ModelFile::ModelFile(Metal &mt, const std::string &path, bool map_experts) {
     if (off + n > Metal::round_up(size_, Metal::page_size())) fatal("section '%s' runs past the end of the file", [s[@"name"] UTF8String]);
     bufs.push_back(!map_experts && [s[@"name"] hasPrefix:@"experts."] ? nil : mt.wrap((void *)(base + off), n));
     sec_off.push_back(off);
+    sections_.push_back({[s[@"name"] UTF8String], off, n, bufs.back()});
   }
 
   NSDictionary *tensors = h[@"tensors"];
@@ -125,8 +126,23 @@ ModelFile::ModelFile(Metal &mt, const std::string &path, bool map_experts) {
       for (NSString *pn in parts)
         qt.parts[pn.UTF8String] = {geti(parts[pn], @"offset"), geti(parts[pn], @"n")};
       q_[name.UTF8String] = qt;
+      q_section_[name.UTF8String] = sec;
     }
   }
+}
+
+void ModelFile::map_expert_sections(Metal &mt) {
+  for (auto &s : sections_)
+    if (!s.buf && s.name.rfind("experts.", 0) == 0) s.buf = mt.wrap((uint8_t *)map_ + s.offset, s.nbytes);
+  for (auto &[name, sec] : q_section_)
+    if (!q_[name].buf) q_[name].buf = sections_[sec].buf;
+}
+
+size_t ModelFile::expert_bytes() const {
+  size_t n = 0;
+  for (const auto &s : sections_)
+    if (s.name.rfind("experts.", 0) == 0) n += s.nbytes;
+  return n;
 }
 
 ModelFile::~ModelFile() {

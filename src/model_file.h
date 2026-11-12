@@ -66,7 +66,10 @@ class ModelFile {
   // map_experts = false: sections named "experts.*" get no Metal buffer (their
   // tensors have buf == nil and are read through `host`): the engine copies the
   // experts it needs into its own cache instead, and Metal never holds them all.
+  // map_expert_sections() hands them to Metal after all.
   ModelFile(Metal &mt, const std::string &path, bool map_experts = true);
+  void map_expert_sections(Metal &mt);
+  size_t expert_bytes() const;   // in "experts.*" sections
   ~ModelFile();
   ModelFile(const ModelFile &) = delete;
 
@@ -80,6 +83,13 @@ class ModelFile {
   Config cfg_;
   void *map_ = nullptr;
   size_t size_ = 0;
+  struct Section {
+    std::string name;
+    size_t offset, nbytes;
+    id<MTLBuffer> buf;
+  };
+  std::vector<Section> sections_;
+  std::map<std::string, int> q_section_;   // tensor -> its section
   std::map<std::string, QTensor> q_;
   std::map<std::string, FTensor> f_;
 };

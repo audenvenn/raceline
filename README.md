@@ -454,6 +454,12 @@ in a cache: after each layer's routing the GPU waits while a CPU thread reads
 the missing experts from the SSD into the least recently used slots (all of
 a layer's misses at once) and updates the slot table the grouped matmuls read
 through. What is computed does not change, only where the weights come from.
+A prompt chunk needs nearly every expert of every layer, a cyclic scan in which
+least-recently-used replacement evicts just what the next layers need; prompt
+chunks therefore do not count as uses, and what they load goes in at the cold
+end of the cache. Replayed on synthetic agent sessions
+(`bench/expert_cache_sim.py`) with 73% of the experts cached, that reads 58%
+fewer experts for prompts than plain LRU and 6% fewer while decoding.
 `--expert-cache GB` sets the cache's size by hand.
 
 **Hardware limits.** `raceline probe` prints them for your Mac:

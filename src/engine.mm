@@ -67,6 +67,17 @@ void set_params(id<MTLComputeCommandEncoder> enc, const P &p, int index) {
 // that watches the event loads what is missing (least recently used slots
 // first; each layer's shared expert has a slot of its own), updates the table
 // and signals. What is computed does not change, only where the weights are read.
+//
+// A prompt chunk needs nearly every expert of every layer: a cyclic scan, in
+// which least-recently-used replacement evicts exactly the experts the next
+// layers are about to need, so every chunk would read every expert. Passes of
+// more than kMaxDrafts + 1 rows therefore do not count as uses: their hits stay
+// where they are in the recency order and what they load goes in at the cold
+// end, first to be replaced (LRU insertion policy). A chunk then reads about
+// the experts the cache does not hold, cycling them through the coldest slots,
+// and the cache keeps what decoding uses. (Replayed on synthetic agent
+// sessions with 73% of the experts cached, bench/expert_cache_sim.py: 58% fewer
+// reads for prompts than plain LRU, and 6% fewer while decoding.)
 // -1: decide from the memory the GPU may use (Engine::Engine).
 static double expert_cache_setting() {
   const char *v = getenv("RACELINE_EXPERT_CACHE");
@@ -79,6 +90,8 @@ struct Engine::ExpertCache {
     uint64_t ready, go;
   };
   int layers = 0, E = 0, S = 0, slots = 0;
+  int big_rows = 16;                       // passes with more rows do not count as uses
+  FILE *trace = nullptr;                   // RACELINE_EXPERT_TRACE: what every layer needed
   size_t w_bytes[2] = {0, 0};
   int s_floats[2] = {0, 0};
   std::vector<size_t> src_w[2], src_s[2];   // file offsets of each layer's stacks: codes, row scales
@@ -86,8 +99,9 @@ struct Engine::ExpertCache {
   id<MTLBuffer> w[2], s[2], table, sel;   // sel: the routing kernel's expert per assignment
   id<MTLBuffer> cols;                      // [layer][I] the down stacks' column scales (for SwiGLU)
   std::vector<std::pair<int, int>> owner;  // slot -> (layer, expert)
-  std::vector<uint64_t> used;              // slot -> time of last use
-  uint64_t clock = 0;
+  // The cached slots in order of use, hottest first: a doubly linked list
+  // through prev/next with a sentinel at index `slots` (pinned slots are not in it).
+  std::vector<int> prev, next;
   int next_free = 0;
   uint64_t loads = 0, hits = 0;
   id<MTLSharedEvent> ev;
@@ -118,13 +132,26 @@ struct Engine::ExpertCache {
     }
   }
 
-  int take_slot() {
+  void unlink(int i) {
+    next[prev[i]] = next[i];
+    prev[next[i]] = prev[i];
+  }
+  void insert(int i, bool hot) {             // at the hot or the cold end
+    const int a = hot ? slots : prev[slots], b = next[a];
+    prev[i] = a, next[i] = b, next[a] = i, prev[b] = i;
+  }
+
+  // A free slot, or the coldest one that holds nothing this request needs.
+  int take_slot(int layer, const std::vector<char> &need) {
     if (next_free < slots) return next_free++;
-    int best = -1;                          // the least recently used slot that is not pinned
-    for (int i = layers; i < slots; i++)
-      if (best < 0 || used[i] < used[best]) best = i;
-    tab(owner[best].first)[owner[best].second] = -1;
-    return best;
+    for (int i = prev[slots]; i != slots; i = prev[i]) {
+      const auto [l, e] = owner[i];
+      if (l == layer && need[e]) continue;
+      unlink(i);
+      tab(l)[e] = -1;
+      return i;
+    }
+    fatal("expert cache: no slot to reuse");
   }
 
   void handle(const Request &r) {
@@ -133,17 +160,27 @@ struct Engine::ExpertCache {
     std::vector<char> need(E, 0);
     for (int a = 0; a < r.T * S; a++)
       if (pick[a] < E) need[pick[a]] = 1;
-    const uint64_t now = ++clock;
-    for (int e = 0; e < E; e++)              // stamp first, so nothing needed now is evicted
-      if (need[e] && t[e] >= 0) used[t[e]] = now, hits++;
+    if (trace) {
+      std::vector<uint8_t> bits((E + 7) / 8, 0);
+      for (int e = 0; e < E; e++) bits[e / 8] |= need[e] << (e % 8);
+      const int32_t head[2] = {r.layer, r.T};
+      fwrite(head, sizeof head, 1, trace);
+      fwrite(bits.data(), 1, bits.size(), trace);
+    }
+    const bool big = r.T > big_rows;
+    for (int e = 0; e < E; e++)
+      if (need[e] && t[e] >= 0) {
+        hits++;
+        if (!big) unlink(t[e]), insert(t[e], true);
+      }
     // Slots for the missing experts first, then all of them read at once: the
     // SSD serves parallel requests far faster than one after another.
     std::vector<std::pair<int, int>> todo;   // (expert, slot)
     for (int e = 0; e < E; e++) {
       if (!need[e] || t[e] >= 0) continue;
-      const int slot = take_slot();
+      const int slot = take_slot(r.layer, need);
       owner[slot] = {r.layer, e};
-      used[slot] = now;
+      insert(slot, !big);
       todo.push_back({e, slot});
     }
     if (!todo.empty()) {
@@ -184,6 +221,7 @@ struct Engine::ExpertCache {
 
   ~ExpertCache() {
     if (fd >= 0) close(fd);
+    if (trace) fclose(trace);
     {
       std::lock_guard<std::mutex> lock(mu);
       stop = true;
@@ -301,7 +339,10 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
         }
       }
       const size_t per_slot = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);
-      x.slots = std::max((int)(cache_gb * 1e9 / per_slot), c.layers + c.experts);
+      // At least the shared experts and one layer's worth; at most every expert.
+      x.slots = std::min(std::max((int)(cache_gb * 1e9 / per_slot), c.layers + c.experts), c.layers * (c.experts + 1));
+      x.big_rows = kMaxDrafts + 1;
+      if (const char *path = getenv("RACELINE_EXPERT_TRACE"); path && *path) x.trace = fopen(path, "wb");
       for (int kind = 0; kind < 2; kind++) {
         x.w[kind] = mt_.alloc((size_t)x.slots * x.w_bytes[kind]);
         x.s[kind] = mt_.alloc((size_t)x.slots * x.s_floats[kind] * sizeof(float));
@@ -314,7 +355,8 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       x.table = mt_.alloc((size_t)c.layers * (c.experts + 1) * sizeof(int32_t));
       memset(x.table.contents, 0xff, x.table.length);   // -1: not loaded
       x.owner.assign(x.slots, {-1, -1});
-      x.used.assign(x.slots, 0);
+      x.prev.assign(x.slots + 1, x.slots);
+      x.next.assign(x.slots + 1, x.slots);
       for (int i = 0; i < c.layers; i++) {             // each layer's shared expert: a pinned slot
         x.load(i, c.experts, i);
         x.tab(i)[c.experts] = i;

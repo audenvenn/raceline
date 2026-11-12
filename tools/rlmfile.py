@@ -37,6 +37,11 @@ class Native:
         return (np.frombuffer(self.mm, dtype=np.float32, count=n, offset=t["s"]),
                 np.frombuffer(self.mm, dtype=np.float32, count=t["k"], offset=t["c"]))
 
+    def column_scales(self, name) -> np.ndarray:
+        """The scale per input column of a native matrix."""
+        t = self.hdr["tensors"][name]
+        return np.frombuffer(self.mm, dtype=np.float32, count=t["k"], offset=t["c"]).copy()
+
     def row_codes(self, name):
         """A row-major matrix as stored -> (codes [N][K] uint8, row scales, column scales)."""
         t = self.hdr["tensors"][name]

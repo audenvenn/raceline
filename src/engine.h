@@ -129,6 +129,10 @@ class Engine {
                   int rows, size_t out_offset);
   void bind_column_scale(const QTensor &consumer, int index);
   void encode_mlp(int layer, int T);
+  // A mixture-of-experts MLP over rows 0..T-1 of h_ (kernels/moe.metal).
+  void encode_moe(int layer, int T);
+  // The name of a layer's first MLP matrix: "mlp.gate_up", or "moe.gate_up" for a MoE layer.
+  std::string mlp_in(int layer) const;
   void encode_linear_attn(int layer, int T, bool spec);
   void encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope);
   void encode_copy_rows(id<MTLBuffer> dst, int dst_row, int src_row, int rows);  // rows of h_
@@ -144,6 +148,8 @@ class Engine {
   void flush(bool reopen);      // commits, waits, accumulates GPU time
   void run_threads(int w, int h);
   void run_groups(int w, int h, int threads_per_group = 32, int depth = 1);
+  // Threadgroups as a GPU-written MTLDispatchThreadgroupsIndirectArguments says.
+  void run_indirect(id<MTLBuffer> args, size_t offset, int threads_per_group);
   void redo();                  // issues the last dispatch again
   void mark(const char *what);  // names the dispatch just issued (for set_repeat)
   bool repeating(const char *what) const { return repeat_times_ > 0 && repeat_ == what; }
@@ -159,6 +165,8 @@ class Engine {
   struct Dispatch {
     bool threads;
     MTLSize grid, per_group;
+    id<MTLBuffer> indirect = nil;     // set: the grid comes from this buffer
+    size_t indirect_offset = 0;
   } last_{};
   id<MTLBuffer> scratch_state_ = nil, scratch_yo_ = nil;
   id<MTLCommandBuffer> cb_ = nil;
@@ -167,6 +175,11 @@ class Engine {
   // Scratch activations, all [rows_cap_][stride].
   int x_stride_, proj_stride_;
   id<MTLBuffer> tok_, h_, xn_, gsum_, proj_, y_, qk_, bg_, yo_, rope_, logits_;
+  // Mixture of experts: router logits [rows][router rows], routing results
+  // [rows * slots], the work list and its dispatch sizes, and the sorted rows'
+  // inputs and outputs [rows * slots][width].
+  id<MTLBuffer> moe_logits_ = nil, moe_tok_ = nil, moe_inv_ = nil, moe_w_ = nil, moe_sel_ = nil, moe_items_ = nil,
+                moe_args_ = nil, moe_x_ = nil, moe_gu_ = nil, moe_act_ = nil, moe_y_ = nil;
   // Attention: queries [KVH][q_rows_][head_dim] half, and for one group of rows
   // the scores (float), unnormalized probabilities (half) and their row sums.
   id<MTLBuffer> aq_, as_, ap_, al_;

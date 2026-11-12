@@ -58,7 +58,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   x_stride_ = std::max({c.hidden, c.intermediate, c.lin_value_dim(), c.attn_dim(), has_mtp_ ? 2 * c.hidden : 0});
   proj_stride_ = 0;
   for (int i = 0; i < n_layers; i++) {
-    proj_stride_ = std::max(proj_stride_, model_->q(lname(i, "mlp.gate_up")).n_pad);
+    if (!c.is_moe()) proj_stride_ = std::max(proj_stride_, model_->q(lname(i, "mlp.gate_up")).n_pad);
     proj_stride_ = std::max(proj_stride_, model_->q(lname(i, is_linear(i) ? "lin.in_proj" : "attn.qkv")).n_pad);
   }
 
@@ -84,6 +84,22 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   ap_ = mt_.alloc(score_cap_ * sizeof(_Float16));
   rope_ = mt_.alloc(R * 64 * sizeof(float));
   logits_ = mt_.alloc((size_t)16 * model_->q("lm_head").n_pad * sizeof(float));
+  if (c.is_moe()) {
+    const size_t S = c.experts_per_tok + 1, A = R * S, tm = 16;
+    const int router = model_->q(lname(0, "moe.router")).n_pad;
+    moe_logits_ = mt_.alloc(R * router * sizeof(float));
+    moe_tok_ = mt_.alloc(A * sizeof(int32_t));
+    moe_inv_ = mt_.alloc(A * sizeof(int32_t));
+    moe_w_ = mt_.alloc(A * sizeof(float));
+    moe_sel_ = mt_.alloc(A * sizeof(int32_t));
+    moe_items_ = mt_.alloc((A / tm + c.experts + 2) * 4 * sizeof(int32_t));
+    moe_args_ = mt_.alloc(6 * sizeof(uint32_t));
+    // The grouped matmuls read whole tiles of TM rows: room for one past the last row.
+    moe_x_ = mt_.alloc((A + tm) * c.hidden * sizeof(_Float16));
+    moe_gu_ = mt_.alloc(A * 2 * c.moe_inter * sizeof(float));
+    moe_act_ = mt_.alloc((A + tm) * c.moe_inter * sizeof(_Float16));
+    moe_y_ = mt_.alloc(A * c.hidden * sizeof(float));
+  }
 
   ones_ = mt_.alloc((size_t)x_stride_ * sizeof(float));
   std::fill_n((float *)ones_.contents, x_stride_, 1.0f);
@@ -100,7 +116,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     for (int i = 0; i < n_layers; i++) {
       norm_in_.push_back(fold(model_->f(lname(i, "in_norm")),
                               model_->q(lname(i, is_linear(i) ? "lin.in_proj" : "attn.qkv"))));
-      norm_post_.push_back(fold(model_->f(lname(i, "post_norm")), model_->q(lname(i, "mlp.gate_up"))));
+      norm_post_.push_back(fold(model_->f(lname(i, "post_norm")), model_->q(mlp_in(i))));
     }
     norm_final_ = fold(model_->f("final_norm"), model_->q("lm_head"));
     if (has_mtp_) {
@@ -401,8 +417,11 @@ void Engine::bind_column_scale(const QTensor &consumer, int index) {
   else [enc_ setBuffer:ones_ offset:0 atIndex:index];
 }
 
+std::string Engine::mlp_in(int layer) const { return lname(layer, config().is_moe() ? "moe.gate_up" : "mlp.gate_up"); }
+
 void Engine::encode_mlp(int layer, int T) {
   const Config &c = config();
+  if (c.is_moe()) return encode_moe(layer, T);
   encode_norm(1, layer, T, 0);
   encode_linear(model_->q(lname(layer, "mlp.gate_up")), T, proj_, 0, proj_stride_, false, "linear:gate_up");
 
@@ -415,6 +434,85 @@ void Engine::encode_mlp(int layer, int T) {
   mark("swiglu");
 
   encode_linear(model_->q(lname(layer, "mlp.down")), T, h_, 0, c.hidden, true, "linear:down");
+}
+
+// A mixture-of-experts MLP: router -> routing (top k, counting sort by expert,
+// work list) -> gather the routed rows -> every expert's gate/up over its rows
+// in one indirect dispatch -> SwiGLU -> the same for down -> each token's
+// weighted sum added to the residual stream. The shared expert is expert
+// number E with its own gate, so it runs through the same kernels.
+void Engine::encode_moe(int layer, int T) {
+  const Config &c = config();
+  const int S = c.experts_per_tok + 1, A = T * S, TM = 16, TN = 64, NSG = 2;
+  const QTensor &router = model_->q(lname(layer, "moe.router"));
+  const QTensor &gu = model_->q(lname(layer, "moe.gate_up"));
+  const QTensor &dn = model_->q(lname(layer, "moe.down"));
+
+  encode_norm(1, layer, T, 0);  // xn_: the normed rows times the gate/up stack's column scales
+  encode_linear(router, T, moe_logits_, 0, router.n_pad, false, "moe:router");
+
+  const Macros route = {{"TOPK", std::to_string(c.experts_per_tok)},
+                        {"E_MAX", std::to_string((c.experts + 31) / 32 * 32)}, {"TM", std::to_string(TM)}};
+  [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_route", route)];
+  [enc_ setBuffer:moe_logits_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_tok_ offset:0 atIndex:1];
+  [enc_ setBuffer:moe_inv_ offset:0 atIndex:2];
+  [enc_ setBuffer:moe_w_ offset:0 atIndex:3];
+  [enc_ setBuffer:moe_items_ offset:0 atIndex:4];
+  [enc_ setBuffer:moe_args_ offset:0 atIndex:5];
+  set_params(enc_, MoeRouteParams{T, c.experts, router.n_pad, 2 * c.moe_inter / TN, c.hidden / TN, c.norm_topk ? 1 : 0},
+             6);
+  [enc_ setBuffer:moe_sel_ offset:0 atIndex:7];
+  run_groups(1, 1, 1024);
+  mark("moe_route");
+
+  [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_gather", route)];
+  [enc_ setBuffer:xn_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_tok_ offset:0 atIndex:1];
+  [enc_ setBuffer:moe_x_ offset:0 atIndex:2];
+  set_params(enc_, MoeGatherParams{A, c.hidden, x_stride_}, 3);
+  run_threads(c.hidden / 8, A);
+  mark("moe_gather");
+
+  const Macros mm = {{"TM", std::to_string(TM)}, {"TN", std::to_string(TN)}, {"NSG", std::to_string(NSG)},
+                     {"GROUP", "64"}, {"BLOCK", "256"}, {"OUT_T", "float"}, {"ACCUM", "0"},
+                     {"W_T", c.book == "fp4" ? "metal_fp4_e2m1_format" : "int4b_format"}};
+  [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_q4n_moe", mm)];
+  [enc_ setBuffer:moe_x_ offset:0 atIndex:0];
+  [enc_ setBuffer:gu.buf offset:gu.w atIndex:1];
+  [enc_ setBuffer:gu.buf offset:gu.s atIndex:2];
+  [enc_ setBuffer:moe_items_ offset:0 atIndex:3];
+  [enc_ setBuffer:moe_gu_ offset:0 atIndex:4];
+  set_params(enc_, MoeLinearParams{c.hidden, 2 * c.moe_inter, c.hidden, 2 * c.moe_inter}, 5);
+  run_indirect(moe_args_, 0, 32 * NSG);
+  mark("moe:gate_up");
+
+  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "swiglu")];
+  [enc_ setBuffer:moe_gu_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_act_ offset:0 atIndex:1];
+  set_params(enc_, SwigluParams{A, c.moe_inter, 2 * c.moe_inter, c.moe_inter}, 2);
+  bind_column_scale(dn, 3);
+  run_threads(c.moe_inter, A);
+  mark("moe_swiglu");
+
+  [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_q4n_moe", mm)];
+  [enc_ setBuffer:moe_act_ offset:0 atIndex:0];
+  [enc_ setBuffer:dn.buf offset:dn.w atIndex:1];
+  [enc_ setBuffer:dn.buf offset:dn.s atIndex:2];
+  [enc_ setBuffer:moe_items_ offset:0 atIndex:3];
+  [enc_ setBuffer:moe_y_ offset:0 atIndex:4];
+  set_params(enc_, MoeLinearParams{c.moe_inter, c.hidden, c.moe_inter, c.hidden}, 5);
+  run_indirect(moe_args_, 3 * sizeof(uint32_t), 32 * NSG);
+  mark("moe:down");
+
+  [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_combine", route)];
+  [enc_ setBuffer:moe_y_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_inv_ offset:0 atIndex:1];
+  [enc_ setBuffer:moe_w_ offset:0 atIndex:2];
+  [enc_ setBuffer:h_ offset:0 atIndex:3];
+  set_params(enc_, MoeCombineParams{T, c.hidden, c.hidden}, 4);
+  run_threads(c.hidden, T);
+  mark("moe_combine");
 }
 
 void Engine::encode_linear_attn(int layer, int T, bool spec) {
@@ -580,6 +678,11 @@ void Engine::run_threads(int w, int h) {
   redo();
 }
 
+void Engine::run_indirect(id<MTLBuffer> args, size_t offset, int threads_per_group) {
+  last_ = {false, MTLSizeMake(0, 0, 0), MTLSizeMake(threads_per_group, 1, 1), args, offset};
+  redo();
+}
+
 // `threads_per_group` threads (a whole number of 32-thread SIMD-groups) per grid cell.
 void Engine::run_groups(int w, int h, int threads_per_group, int depth) {
   last_ = {false, MTLSizeMake(w, h, depth), MTLSizeMake(threads_per_group, 1, 1)};
@@ -587,7 +690,11 @@ void Engine::run_groups(int w, int h, int threads_per_group, int depth) {
 }
 
 void Engine::redo() {
-  if (last_.threads) [enc_ dispatchThreads:last_.grid threadsPerThreadgroup:last_.per_group];
+  if (last_.indirect)
+    [enc_ dispatchThreadgroupsWithIndirectBuffer:last_.indirect
+                            indirectBufferOffset:last_.indirect_offset
+                           threadsPerThreadgroup:last_.per_group];
+  else if (last_.threads) [enc_ dispatchThreads:last_.grid threadsPerThreadgroup:last_.per_group];
   else [enc_ dispatchThreadgroups:last_.grid threadsPerThreadgroup:last_.per_group];
 }
 

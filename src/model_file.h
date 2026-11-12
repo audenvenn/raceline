@@ -22,6 +22,11 @@ struct Config {
   bool native = false;     // scale-free 4-bit weights (see kernels/linear.metal) instead of MLX's affine groups
   std::string book;        // native codebook: "fp4", "int15" or "int16"
   int rot_block = 0;       // residual stream rotated by signed Hadamard blocks of this size (0: not rotated)
+  // Mixture of experts (0 experts: dense MLPs). Each MLP routes a token to
+  // experts_per_tok of `experts` experts plus one shared expert, all of width
+  // moe_inter (`intermediate` holds the same width).
+  int experts = 0, experts_per_tok = 0, moe_inter = 0;
+  bool norm_topk = true;   // the chosen experts' weights are renormalized to sum to one
 
   bool is_linear_layer(int i) const { return (i + 1) % full_attn_interval != 0; }
   int lin_key_dim() const { return lin_k_heads * lin_k_dim; }
@@ -29,6 +34,7 @@ struct Config {
   int lin_conv_dim() const { return 2 * lin_key_dim() + lin_value_dim(); }
   int attn_dim() const { return heads * head_dim; }
   int rope_dims() const { return (int)(head_dim * partial_rotary); }
+  bool is_moe() const { return experts > 0; }
 };
 
 // A quantized 4-bit matrix. `blocked` matrices use the kernel layout described

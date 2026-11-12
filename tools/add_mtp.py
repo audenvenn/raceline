@@ -36,8 +36,8 @@ sys.path.insert(1, os.path.dirname(HERE))
 import quantlib  # noqa: E402
 from convert import Writer  # noqa: E402
 from rlmfile import Native  # noqa: E402
-from quantize import (T, Source, build_layer, default_texts, input_moments, quantize_stack,  # noqa: E402
-                      rotation, rotation_signs, stacks_of, token_sequences)
+from quantize import (T, Source, build_layer, default_texts, input_moments, is_moe, quantize_stack,  # noqa: E402
+                      rotation, rotation_signs, stack_moments, stacks_of, token_sequences)
 
 NORM_E, NORM_H, NORM_OUT = "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight", "mtp.norm.weight"
 
@@ -48,6 +48,13 @@ def mtp_weights(src: Source):
     norms = {k: src.st.get(k).astype(np.float32) + off for k in (NORM_E, NORM_H, NORM_OUT)}
     pre = "mtp.layers.0."
     layer = {k[len(pre):]: src.get(k) for k in src.st.index if k.startswith(pre)}
+    if "mlp.experts.0.gate_proj.weight" in layer:
+        # A MoE head's experts are stored one by one: fuse them as the model's layers have them.
+        E = 1 + max(int(k.split(".")[2]) for k in layer if k.startswith("mlp.experts."))
+        take = lambda part: [layer.pop(f"mlp.experts.{e}.{part}.weight") for e in range(E)]  # noqa: E731
+        gate, up, down = take("gate_proj"), take("up_proj"), take("down_proj")
+        layer["mlp.experts.gate_up_proj"] = np.stack([np.concatenate([g, u]) for g, u in zip(gate, up)])
+        layer["mlp.experts.down_proj"] = np.stack(down)
     return src.st.get("mtp.fc.weight").astype(np.float32), norms, layer
 
 
@@ -97,7 +104,7 @@ def quantize_head(args, fc, lw, x_cal, book, gptq=True):
     mx.eval(h)
     moments = input_moments(layer, h)
     for name, parts in stacks_of(layer):
-        _, q = quantize_stack(parts, moments[id(parts[0][1])], book, gptq)
+        _, q = quantize_stack(parts, stack_moments(parts, moments), book, gptq)
         out["mtp." + name] = ([(pn, m.weight.shape[0]) for pn, m in parts], q)
         Wq, row = quantlib.dequant(*q, book), 0
         for _, m in parts:
@@ -191,6 +198,9 @@ def main():
     out.add_dense("mtp.fc", fc_file)
     for name, (parts, (codes, s, c)) in tensors.items():
         out.add_native(name, parts, codes, s, c, book)
+    if is_moe(layer_q):   # the router and the shared expert's gate, the gate/up stack's column scales divided out
+        router = np.concatenate([lw["mlp.gate.weight"], lw["mlp.shared_expert_gate.weight"]], axis=0)
+        out.add_dense("mtp.moe.router", router / tensors["mtp.moe.gate_up"][1][2][None, :])
     out.end()
     if "tokenizer.json" not in out.files:      # older files, or dropped together with a previous head
         out.add_files(cli.src)

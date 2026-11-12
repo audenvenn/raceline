@@ -20,6 +20,11 @@ static int geti(NSDictionary *d, NSString *key) {
   return [v intValue];
 }
 
+static int geti_or(NSDictionary *d, NSString *key, int fallback) {
+  id v = d[key];
+  return [v isKindOfClass:[NSNumber class]] ? [v intValue] : fallback;
+}
+
 ModelFile::ModelFile(Metal &mt, const std::string &path) {
   int fd = open(path.c_str(), O_RDONLY);
   if (fd < 0) fatal("cannot open %s", path.c_str());
@@ -57,6 +62,14 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   cfg_.rope_theta = [c[@"rope_theta"] doubleValue];
   cfg_.partial_rotary = [c[@"partial_rotary_factor"] floatValue];
   if ([c[@"eos_token_id"] isKindOfClass:[NSNumber class]]) cfg_.eos = [c[@"eos_token_id"] intValue];
+  cfg_.experts = geti_or(c, @"num_experts", 0);
+  if (cfg_.experts) {
+    cfg_.experts_per_tok = geti(c, @"num_experts_per_tok");
+    cfg_.moe_inter = geti(c, @"moe_intermediate_size");
+    cfg_.norm_topk = geti_or(c, @"norm_topk_prob", 1) != 0;
+    if (cfg_.experts % 32 || cfg_.experts > 1024 || cfg_.experts_per_tok < 1 || cfg_.experts_per_tok > 16)
+      fatal("unsupported mixture of experts: %d experts, %d per token", cfg_.experts, cfg_.experts_per_tok);
+  }
   NSDictionary *qc = h[@"quant"];
   cfg_.block = geti(qc, @"block");
   cfg_.native = [qc[@"mode"] isEqual:@"native"];

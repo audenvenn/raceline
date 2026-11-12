@@ -250,3 +250,55 @@ kernel void linear_q4n_raw(device half *a [[buffer(0)]],
   auto tC = C.slice(n0, m0);
   op.run(tA, tW, tC);
 }
+
+// ---------------------------------------------------------------------------
+// The experts of a mixture of experts, all in one dispatch (see moe.metal).
+//
+// W stacks the experts' matrices of one kind, expert after expert, in the
+// native blocked layout: expert e owns rows e * Ne .. (e + 1) * Ne - 1, a whole
+// number of blocks. A holds the token rows sorted by expert. Each threadgroup
+// takes one work item (expert, first row, rows: at most TM rows, all routed to
+// that expert) and one tile of TN output columns of that expert:
+//   C[r][n] = s[e * Ne + n] * (A[r] * L(q[e * Ne + n])^T)     for r in the item's rows
+// The grid is (Ne / TN, work items), dispatched indirectly with the sizes the
+// routing kernel wrote. A row's result does not depend on the rows it shares
+// a tile with.
+kernel void linear_q4n_moe(device half *a [[buffer(0)]],
+                           device uchar *w [[buffer(1)]],
+                           device float *s [[buffer(2)]],
+                           device const int4 *items [[buffer(3)]],
+                           device OUT_T *c [[buffer(4)]],
+                           constant MoeLinearParams &p [[buffer(5)]],
+                           uint3 tgid [[threadgroup_position_in_grid]])
+{
+  const int4 item = items[tgid.y];
+  const int e = item.x, r0 = item.y, rows = item.z;
+  const int n0 = int(tgid.x) * TN;
+  const int gn = e * p.Ne + n0;      // row of the stacked matrix
+  const int blk = gn / BLOCK;
+  const int col = gn % BLOCK;
+
+  constexpr auto desc = matmul2d_descriptor(TM, TN, static_cast<int>(dynamic_extent), false, false, true,
+                                            matmul2d_descriptor::mode::multiply);
+  matmul2d<desc, execution_simdgroups<NSG>> op;
+
+  array<int, 2> a_str = {1, p.a_stride};
+  array<int, 2> w_str = {1, BLOCK};
+  tensor<device half, dextents<int, 2>, tensor_inline> A(a + size_t(r0) * p.a_stride, dextents<int, 2>(p.K, TM), a_str);
+  tensor<device W_T, dextents<int, 2>, tensor_inline> W(
+      w + size_t(blk) * size_t(p.K) * (BLOCK / 2), dextents<int, 2>(BLOCK, p.K), w_str);
+
+  auto tA = A.slice(0, 0);
+  auto tW = W.slice(col, 0);
+  auto acc = op.get_destination_cooperative_tensor<decltype(tA), decltype(tW), float>();
+  op.run(tA, tW, acc);
+
+  const device float *sn = s + gn;
+#pragma clang loop unroll(full)
+  for (ushort i = 0; i < acc.get_capacity(); ++i) {
+    if (acc.is_valid_element(i)) {
+      auto idx = acc.get_multidimensional_index(i);   // {column, row} within the tile
+      if (idx[1] < rows) c[size_t(r0 + idx[1]) * p.c_stride + n0 + idx[0]] = OUT_T(sn[idx[0]] * acc[i]);
+    }
+  }
+}

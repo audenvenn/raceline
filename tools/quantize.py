@@ -41,6 +41,7 @@ import mlx.nn as nn
 import numpy as np
 from mlx_lm.models import qwen3_5
 from mlx_lm.models.base import create_attention_mask
+from mlx_lm.models.switch_layers import SwitchLinear
 from tokenizers import Tokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -144,25 +145,52 @@ def run_layer(layer, h, batch=8):
 
 
 def input_moments(layer, h, batch=8):
-    """E[x x^T] for the input of every Linear in the layer, by module id."""
-    sums = {}
-    lin_call = nn.Linear.__call__
+    """E[x x^T] for the input of every Linear in the layer, by module id. For
+    the experts' down projections, whose inputs differ per expert, the sums
+    of x x^T per expert and how many inputs each expert saw, under
+    ("experts", module id); "tokens" is the number of tokens."""
+    sums, experts = {}, {}
+    lin_call, switch_call = nn.Linear.__call__, SwitchLinear.__call__
+    down = layer.mlp.switch_mlp.down_proj if is_moe(layer) else None
 
     def hooked(self, a):
         a2 = a.astype(mx.float32).reshape(-1, a.shape[-1])
         sums[id(self)] = sums.get(id(self), 0) + a2.T @ a2
         return lin_call(self, a)
 
-    nn.Linear.__call__ = hooked
+    def switch_hooked(self, x, indices, sorted_indices=False):
+        if self is down:                     # one row of x per (token, chosen expert)
+            E = self.weight.shape[0]
+            a = x.astype(mx.float32).reshape(-1, x.shape[-1])
+            idx = np.array(indices).reshape(-1)
+            order = np.argsort(idx, kind="stable")
+            bounds = np.searchsorted(idx[order], np.arange(E + 1))
+            a = a[mx.array(order)]
+            acc, count = experts.setdefault(id(self), ([0] * E, np.zeros(E)))
+            for e in range(E):
+                if bounds[e + 1] > bounds[e]:
+                    part = a[bounds[e]:bounds[e + 1]]
+                    acc[e] = acc[e] + part.T @ part
+                    count[e] += bounds[e + 1] - bounds[e]
+        return switch_call(self, x, indices, sorted_indices)
+
+    nn.Linear.__call__, SwitchLinear.__call__ = hooked, switch_hooked
     try:
         for i in range(0, h.shape[0], batch):
             x = h[i:i + batch]
             mask = None if layer.is_linear else create_attention_mask(x, None)
-            mx.eval(layer(x, mask=mask, cache=None), *sums.values())
+            mx.eval(layer(x, mask=mask, cache=None), *sums.values(),
+                    *[p for acc, _ in experts.values() for p in acc if not isinstance(p, int)])
     finally:
-        nn.Linear.__call__ = lin_call
+        nn.Linear.__call__, SwitchLinear.__call__ = lin_call, switch_call
     n = h.shape[0] * h.shape[1]
-    return {k: np.array(v) / n for k, v in sums.items()}
+    out = {k: np.array(v) / n for k, v in sums.items()}
+    for k, (acc, count) in experts.items():
+        K = down.weight.shape[-1]
+        out[("experts", k)] = (np.stack([np.zeros((K, K), np.float32) if isinstance(p, int) else np.array(p)
+                                         for p in acc]), count)
+    out["tokens"] = n
+    return out
 
 
 class ExpertStack:
@@ -172,8 +200,8 @@ class ExpertStack:
     engine's SwiGLU reads), "down" each expert's down rows. Reading `weight`
     stacks them; assigning it writes a stacked matrix back into the experts.
     The gate/up stack reads what the router reads, so it takes the router's
-    input statistics (`moment_key`); the down stack's inputs differ per expert
-    and it is rounded to nearest."""
+    input statistics (`moment_key`); the down stack's inputs differ per expert,
+    and each expert's rows are quantized with its own (stack_moments)."""
 
     def __init__(self, moe, kind):
         self.moe, self.kind = moe, kind
@@ -225,8 +253,17 @@ def stacks_of(layer):
 
 
 def stack_moments(parts, moments):
-    """The input second moments a stack is quantized with (None: round to nearest)."""
+    """The input second moments a stack is quantized with (None: round to nearest).
+    For the experts' down stack: (sums of x x^T, counts) per expert, the shared
+    expert last, which quantize_matrix hands to quantlib.quantize_gptq_experts."""
     m = parts[0][1]
+    if isinstance(m, ExpertStack) and m.kind == "down":
+        routed = moments.get(("experts", id(m.moe.switch_mlp.down_proj)))
+        shared = moments.get(id(m.moe.shared_expert.down_proj))
+        if routed is None or shared is None:
+            return None
+        n = moments["tokens"]
+        return np.concatenate([routed[0], shared[None] * n]), np.append(routed[1], n)
     key = getattr(m, "moment_key", id(m))
     return None if key is None else moments.get(key)
 
@@ -241,9 +278,16 @@ def affine4(W, group=64):
 
 
 def quantize_matrix(W, H, book, gptq):
-    """-> (dequantized W, None) for the baseline format, else (None, (codes, s, c))."""
+    """-> (dequantized W, None) for the baseline format, else (None, (codes, s, c)).
+    H is E[x x^T] of the input, or for a stack of experts with inputs of their
+    own (sums of x x^T, counts) per expert."""
     if book == "mlx-affine4":
         return affine4(W), None
+    if isinstance(H, tuple):
+        sums, counts = H
+        if gptq:
+            return None, quantlib.quantize_gptq_experts(W, sums, counts, book, A_GRID, B_GRID, act_order=ACT_ORDER)
+        H = sums.sum(axis=0) / counts.sum()
     if gptq and H is not None:
         return None, quantlib.quantize_gptq(W, H, book, A_GRID, B_GRID, act_order=ACT_ORDER)
     return None, quantlib.quantize_rtn(W, None if H is None else np.diag(H).copy(), book, A_GRID, B_GRID)

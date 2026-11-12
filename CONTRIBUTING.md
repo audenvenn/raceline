@@ -41,6 +41,7 @@ a stale binary and new kernel sources disagree silently and give wrong results.
 | Plain against 1 to 15 drafts per pass | GPU, model | `build/cmake/raceline-engine spec <model.rlm> <tokens.i32> --drafts 1 2 4 7 11 15` |
 | Engine against MLX on the same weights | GPU, model, the original checkpoint | `python tests/verify_native.py`, `python tests/verify_mtp.py` |
 | Mixture of experts: conversion, engine against MLX, chunking and speculation exact, experts in memory and offloaded | GPU, any Qwen tokenizer directory | `python tests/check_moe.py models/Qwen3.5-4B <tokens.i32>` |
+| Quantizer numerics (per-expert GPTQ) | MLX | `python tests/test_quantlib.py` |
 | Speed | idle GPU, model, an MLX conversion as the baseline | `bench/agent_bench.py`, `bench/chat_bench.py` |
 | The agent end to end: tasks solved, time, drafts | idle GPU, model | `bench/agent_eval.py <model>` |
 

@@ -11,6 +11,9 @@ import json
 import os
 import platform
 import re
+import selectors
+import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -82,6 +85,71 @@ def _clip(text: str) -> str:
     return f"{text[:head]}\n[... {len(text) - head - tail} characters omitted ...]\n{text[-tail:]}"
 
 
+def run_command(command, cwd: str, timeout: float, shell: bool = True):
+    """Runs a command in a process group of its own; -> CompletedProcess, or None
+    if it timed out, in which case the whole group is killed, so nothing it
+    started (a test stuck in a loop, a server) keeps running.
+
+    The child is started with posix_spawn, never fork: this process has many
+    threads (Metal, the tokenizer), and a forked copy of it can die before it
+    gets to exec (on macOS 27 the allocator's fork handler traps, and the
+    command fails with SIGTRAP now and then). subprocess forks whenever a
+    working directory or a new process group is asked for, so this does it by
+    hand: /bin/sh changes the directory, then runs the command."""
+    if shell:
+        argv = ["/bin/sh", "-c", f"cd {shlex.quote(cwd)} || exit 127; {command}"]
+    else:
+        argv = ["/bin/sh", "-c", 'cd "$0" || exit 127; exec "$@"', cwd, *command]
+    out_r, out_w = os.pipe()
+    err_r, err_w = os.pipe()
+    try:
+        pid = os.posix_spawn(argv[0], argv, os.environ, setpgroup=0, file_actions=[
+            (os.POSIX_SPAWN_OPEN, 0, "/dev/null", os.O_RDONLY, 0),
+            (os.POSIX_SPAWN_DUP2, out_w, 1), (os.POSIX_SPAWN_DUP2, err_w, 2)])
+    finally:
+        os.close(out_w)
+        os.close(err_w)
+    deadline = time.monotonic() + timeout
+    chunks = {out_r: [], err_r: []}
+    sel = selectors.DefaultSelector()
+    for fd in chunks:
+        sel.register(fd, selectors.EVENT_READ)
+    timed_out = False
+    try:
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                timed_out = True
+                break
+            for key, _ in sel.select(left):
+                data = os.read(key.fd, 1 << 16)
+                if data:
+                    chunks[key.fd].append(data)
+                else:
+                    sel.unregister(key.fd)
+        while not timed_out:              # the output is closed; wait for the exit
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done:
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            time.sleep(0.01)
+        if timed_out:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+            return None
+    finally:
+        sel.close()
+        os.close(out_r)
+        os.close(err_r)
+    text = lambda fd: b"".join(chunks[fd]).decode("utf-8", errors="replace").replace("\r\n", "\n")
+    return subprocess.CompletedProcess(command, os.waitstatus_to_exitcode(status), text(out_r), text(err_r))
+
+
 class Tools:
     def __init__(self, cwd: str, approve):
         self.cwd = cwd
@@ -109,12 +177,18 @@ class Tools:
     def tool_bash(self, command: str, timeout: int = 60) -> str:
         if not self.approve(f"run: {command}"):
             return "The user declined to run this command."
-        try:
-            r = subprocess.run(command, shell=True, cwd=self.cwd, capture_output=True, text=True, timeout=timeout)
-        except subprocess.TimeoutExpired:
+        r = run_command(command, self.cwd, timeout)
+        if r is None:
             return f"The command was stopped after {timeout} seconds."
         out = (r.stdout + (("\n[stderr]\n" + r.stderr) if r.stderr.strip() else "")).strip()
-        return f"[exit code {r.returncode}]\n{out}" if out else f"[exit code {r.returncode}, no output]"
+        if r.returncode < 0:          # killed by a signal: say which, not a negative exit code
+            try:
+                how = f"stopped by signal {-r.returncode} ({signal.Signals(-r.returncode).name})"
+            except ValueError:
+                how = f"stopped by signal {-r.returncode}"
+        else:
+            how = f"exit code {r.returncode}"
+        return f"[{how}]\n{out}" if out else f"[{how}, no output]"
 
     def tool_read_file(self, path: str, offset: int = 1, limit: int = 400) -> str:
         with open(self._path(path), encoding="utf-8", errors="replace") as f:
@@ -235,7 +309,8 @@ class Agent:
     def turn(self, text: str) -> dict:
         """Runs one user request to completion (the model may take many tool steps)."""
         self.messages.append({"role": "user", "content": text})
-        totals = dict(prompt_tokens=0, cached_tokens=0, completion_tokens=0, steps=0, seconds=0.0)
+        totals = dict(prompt_tokens=0, cached_tokens=0, completion_tokens=0, steps=0, seconds=0.0,
+                      prefill_seconds=0.0, decode_seconds=0.0)
         out = sys.stdout
         for _ in range(self.max_steps):
             content, reasoning, calls, stats, shown = "", "", [], None, None
@@ -269,7 +344,7 @@ class Agent:
                 break
             totals["seconds"] += time.perf_counter() - t0
             totals["steps"] += 1
-            for k in ("prompt_tokens", "cached_tokens", "completion_tokens"):
+            for k in ("prompt_tokens", "cached_tokens", "completion_tokens", "prefill_seconds", "decode_seconds"):
                 totals[k] += stats[k]
             totals["last"] = stats
 

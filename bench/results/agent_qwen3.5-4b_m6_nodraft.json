@@ -3,11 +3,13 @@
   "model": "models/qwen3.5-4b.rot.rlm",
   "backend": "raceline",
   "mtp": false,
-  "load_s": 0.5691222499590367,
+  "load_s": 0.5575708749820478,
   "prompt_tokens": 1024,
-  "gen_tokens": 256,
-  "prefill_tps": 2001.297880782741,
-  "decode_tps": 49.341361487642715,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 1858.0124959410298,
+  "decode_tps": 46.547566823026074,
   "tokens": [
    318,
    17,
@@ -26,17 +28,19 @@
    681,
    198
   ],
-  "peak_gb": 1.785760264
+  "peak_gb": 1.786006024
  },
  {
   "model": "models/qwen3.5-4b.rot.rlm",
   "backend": "raceline",
   "mtp": false,
-  "load_s": 0.565070915967226,
+  "load_s": 0.5533858749549836,
   "prompt_tokens": 8192,
-  "gen_tokens": 256,
-  "prefill_tps": 1766.9234340707826,
-  "decode_tps": 43.55395571400489,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 1629.5018068429986,
+  "decode_tps": 41.23133572883303,
   "tokens": [
    198,
    262,
@@ -55,6 +59,6 @@
    271,
    262
   ],
-  "peak_gb": 1.788692976
+  "peak_gb": 1.789299304
  }
 ]

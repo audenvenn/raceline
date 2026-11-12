@@ -9,7 +9,14 @@ speculative: the head drafts the tokens that follow the next one, the engine
 checks the next token and the drafts in one pass over the weights, and every
 draft the model confirms is a token that cost no pass of its own. The output
 is exactly what one-token-at-a-time decoding produces. RACELINE_MTP=0 turns
-this off; RACELINE_DRAFTS sets the most drafts per pass.
+this off; RACELINE_DRAFTS sets the most drafts per pass from the head.
+
+Drafts can also come from the context itself. An agent repeats a lot of what
+it has read: the lines an edit replaces, a file it rewrites with one change,
+code it quotes. When the last few tokens occurred earlier in the context and
+what followed them then agrees with the head's first guess, that earlier
+continuation is drafted instead, up to 15 tokens at once (RACELINE_LOOKUP sets
+the most; 0 turns it off).
 """
 
 from __future__ import annotations
@@ -27,6 +34,34 @@ from typing import Optional
 import numpy as np
 
 from .backends import Backend, Sampling, Snapshot
+
+
+def unsupported_reason() -> Optional[str]:
+    """Why the engine cannot run on this Mac, or None.
+
+    The kernels hand 4-bit weights to the GPU's neural accelerators through
+    Metal 4.1 tensor operations: Apple M5 or later, macOS 27 or later. Older
+    chips have no such units; whether the operations work there at all has
+    not been tried (RACELINE_ANY_GPU=1 skips this check)."""
+    import platform
+    import re
+
+    from .sysinfo import sysctl_str
+
+    if os.environ.get("RACELINE_ANY_GPU") == "1":
+        return None
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return "it needs a Mac with Apple Silicon"
+    major = int((platform.mac_ver()[0] or "0").split(".")[0])
+    if major < 27:
+        return f"it needs macOS 27 or later (this Mac runs macOS {platform.mac_ver()[0]})"
+    chip = sysctl_str("machdep.cpu.brand_string")
+    m = re.match(r"Apple M(\d+)", chip)
+    if m and int(m.group(1)) < 5:
+        return (f"it needs the GPU neural accelerators of an Apple M5 or later (this Mac has an {chip}). "
+                "To try it anyway, set RACELINE_ANY_GPU=1, and please tell us what happens in "
+                "https://github.com/audenvenn/raceline/issues/2")
+    return None
 
 
 @functools.lru_cache(maxsize=1)
@@ -64,9 +99,11 @@ def _library() -> ctypes.CDLL:
     lib.rl_forward_draft.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int]
     lib.rl_keep_drafts.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.rl_set_draft_vocab.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.rl_set_draft_tail.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.rl_logits_stride.restype = ctypes.c_size_t
     lib.rl_hidden.restype = ctypes.POINTER(ctypes.c_float)
-    for fn in ("rl_has_mtp", "rl_max_drafts", "rl_draft_vocab", "rl_logits_stride", "rl_hidden", "rl_hidden_size"):
+    for fn in ("rl_has_mtp", "rl_max_drafts", "rl_draft_vocab", "rl_draft_main", "rl_draft_tail", "rl_logits_stride",
+               "rl_hidden", "rl_hidden_size"):
         getattr(lib, fn).argtypes = [ctypes.c_void_p]
     lib.rl_top_k.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     return lib
@@ -118,6 +155,11 @@ class RacelineBackend(Backend):
     def __init__(self, model_path: str, max_ctx: int = 32768, chunk: int = 1024, mtp: Optional[bool] = None):
         from transformers import AutoTokenizer
 
+        why = unsupported_reason()
+        if why:
+            raise RuntimeError(f"raceline's engine does not run on this Mac: {why}. MLX models still run here, "
+                               "without the engine's speedups: raceline chat <MLX model directory>, for example "
+                               "one of mlx-community's Qwen3.5 / Qwen3.8 4-bit models")
         self.files_dir = _tokenizer_dir(model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(self.files_dir)
         self.eos_ids = {i for i in (self.tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>"))
@@ -138,8 +180,19 @@ class RacelineBackend(Backend):
         # A draft only has to find likely tokens, and low token ids are the
         # frequent ones: its pass over the output matrix covers ids below 64k
         # (98% of English and code), 128k (99% of Chinese too) or everything,
-        # whichever the recent context calls for.
+        # whichever the recent context calls for (at most 3% of its text
+        # tokens left out; an agent's own output is 1 to 1.5% beyond 64k).
         self.draft_vocab = int(os.environ.get("RACELINE_DRAFT_VOCAB", "-1"))     # -1: choose per generation
+        # The chat template's special tokens (<|im_start|>, <tool_call>, <think>
+        # ...) sit at the top of the id range; they say nothing about which part
+        # of the vocabulary the text uses, so they are left out of that choice.
+        added = getattr(self.tokenizer, "added_tokens_decoder", None) or {}
+        self._text_ids = min(added) if added else self._vocab
+        # ... and every draft looks at them anyway: an agent's output turns on
+        # them (<tool_call>, </think>, <|im_end|>), and a draft that cannot
+        # name them ends its chain there.
+        if self.mtp and added:
+            self._lib.rl_set_draft_tail(self._e, self._text_ids)
         # Drafting stops early once the chance that the drafts so far all hold
         # (the product of their probabilities under the head) falls below a
         # threshold. Another draft pays off when that chance exceeds what the
@@ -150,9 +203,12 @@ class RacelineBackend(Backend):
         fixed = os.environ.get("RACELINE_MIN_CONFIDENCE")
         self.min_confidence = float(fixed) if fixed else None
         self._t_draft = self._t_token = None      # running averages, seconds
+        # Drafts copied from the context (see _Lookup): a pass of 16 rows costs
+        # a few percent more than a pass of one, so a long copy is drafted whole.
+        self.lookup_drafts = min(int(os.environ.get("RACELINE_LOOKUP", "15")), self._lib.rl_max_drafts(self._e))
         self._stride = self._lib.rl_logits_stride(self._e)
         self.gpu_seconds = 0.0
-        self.counters = dict(passes=0, drafts=0, accepted=0)
+        self.counters = dict(passes=0, drafts=0, accepted=0, lookup_passes=0, lookup_drafts=0, lookup_accepted=0)
 
     def __del__(self):
         if getattr(self, "_e", None):
@@ -205,15 +261,22 @@ class RacelineBackend(Backend):
             limit = self.draft_vocab
             if limit < 0:
                 seen_ids = np.asarray(history[-1024:] or [0])
-                limit = next((n for n in (65536, 131072) if np.mean(seen_ids >= n) <= 0.01), 0)
+                seen_ids = seen_ids[seen_ids < self._text_ids]
+                limit = next((n for n in (65536, 131072) if not seen_ids.size or np.mean(seen_ids >= n) <= 0.03), 0)
             lib.rl_set_draft_vocab(e, limit)
             D = lib.rl_draft_vocab(e)          # logits a draft call returns
+            first = lib.rl_draft_tail(e)
+            tail = (lib.rl_draft_main(e), first) if first >= 0 else None
+        look = _Lookup(history) if self.mtp and self.lookup_drafts > 0 else None
         try:
             while produced < max_tokens:
-                k = min(self.max_drafts, max_tokens - produced - 1, self._max_ctx - self.position - 1) if self.mtp else 0
+                room = min(max_tokens - produced - 1, self._max_ctx - self.position - 1)
+                k = min(self.max_drafts, room) if self.mtp else 0
                 if k < 1 or token in self.eos_ids:
                     self._forward([token])
                     recent.append(token)
+                    if look:
+                        look.push(token)
                     produced, pos = produced + 1, pos + 1
                     yield token
                     token = _sample(self._logits, sampling, recent, seed, pos)
@@ -228,15 +291,24 @@ class RacelineBackend(Backend):
                 row, seen, confidence = [token], recent + [token], 1.0
                 guess = np.ctypeslib.as_array(lib.rl_draft_logits(e, token), shape=(D,))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
-                while True:
-                    draft, p = _sample(guess, sampling, seen, seed, pos + len(row), with_probability=True)
-                    confidence *= p
-                    row.append(draft)
-                    seen.append(draft)
-                    if len(row) > k or draft in self.eos_ids or confidence < threshold:
-                        break
-                    guess = np.ctypeslib.as_array(lib.rl_draft_more(e, draft), shape=(D,))
-                    self.gpu_seconds += lib.rl_last_gpu_seconds(e)
+                draft, p = _sample(guess, sampling, seen, seed, pos + 1, with_probability=True, tail=tail)
+                copied = look.propose(token, min(self.lookup_drafts, room)) if look else []
+                if len(copied) > 1 and copied[0] == draft:
+                    # The context and the head agree on the next token: draft what followed there.
+                    end = next((j + 1 for j, t in enumerate(copied) if t in self.eos_ids), len(copied))
+                    row += copied[:end]
+                else:
+                    copied = None
+                    while True:
+                        confidence *= p
+                        row.append(draft)
+                        seen.append(draft)
+                        if len(row) > k or draft in self.eos_ids or confidence < threshold:
+                            break
+                        guess = np.ctypeslib.as_array(lib.rl_draft_more(e, draft), shape=(D,))
+                        self.gpu_seconds += lib.rl_last_gpu_seconds(e)
+                        draft, p = _sample(guess, sampling, seen, seed, pos + len(row), with_probability=True,
+                                           tail=tail)
                 t_drafts = time.perf_counter() - t_cycle
 
                 n = len(row)
@@ -247,7 +319,12 @@ class RacelineBackend(Backend):
                 self._logits = rows[0, :V]
                 self.counters["passes"] += 1
                 self.counters["drafts"] += n - 1
+                if copied:
+                    self.counters["lookup_passes"] += 1
+                    self.counters["lookup_drafts"] += n - 1
                 recent.append(token)
+                if look:
+                    look.push(token)
                 produced, pos = produced + 1, pos + 1
                 yield token
 
@@ -259,17 +336,23 @@ class RacelineBackend(Backend):
                     self._open[1] = accepted + 1
                     self._logits = rows[accepted, :V]
                     self.counters["accepted"] += 1
+                    if copied:
+                        self.counters["lookup_accepted"] += 1
                     recent.append(nxt)
+                    if look:
+                        look.push(nxt)
                     produced, pos = produced + 1, pos + 1
                     yield nxt
                     nxt = _sample(rows[accepted, :V], sampling, recent, seed, pos)
                 self._settle()
                 token = nxt
-                # What a draft and a token cost here, for the next cycles' threshold
-                # (time the consumer spends between yields is counted too; it is small).
-                per_draft, per_token = t_drafts / (n - 1), (time.perf_counter() - t_cycle) / (accepted + 1)
-                self._t_draft = per_draft if self._t_draft is None else 0.9 * self._t_draft + 0.1 * per_draft
-                self._t_token = per_token if self._t_token is None else 0.9 * self._t_token + 0.1 * per_token
+                # What a draft from the head and a token cost here, for the next
+                # cycles' threshold (time the consumer spends between yields is
+                # counted too; it is small). Copied drafts cost nothing to make.
+                if not copied:
+                    per_draft, per_token = t_drafts / (n - 1), (time.perf_counter() - t_cycle) / (accepted + 1)
+                    self._t_draft = per_draft if self._t_draft is None else 0.9 * self._t_draft + 0.1 * per_draft
+                    self._t_token = per_token if self._t_token is None else 0.9 * self._t_token + 0.1 * per_token
         finally:
             self._settle()
 
@@ -284,6 +367,39 @@ class RacelineBackend(Backend):
         self._settle()
         self._lib.rl_load_state(self._e, snap.state.ctypes.data, snap.position)
         self._logits = snap.logits
+
+
+class _Lookup:
+    """Continuations copied from the context.
+
+    Remembers, for every run of three tokens in the context, where it last
+    occurred. When the newest three tokens occurred before, what followed them
+    then is the proposal: the rest of a line being quoted, the code around an
+    edit, a file being rewritten. Three tokens catch a quote early; chance
+    matches are weeded out by the caller, which drafts a proposal only when
+    the head agrees with its first token.
+    """
+
+    def __init__(self, tokens):
+        self.toks = list(tokens)
+        t = self.toks
+        self.where = {(t[i - 3], t[i - 2], t[i - 1]): i for i in range(3, len(t))}
+
+    def push(self, token: int) -> None:
+        """Appends a token of the context; the run of three before it now has a known continuation."""
+        t = self.toks
+        t.append(token)
+        i = len(t) - 1
+        if i >= 3:
+            self.where[(t[i - 3], t[i - 2], t[i - 1])] = i
+
+    def propose(self, nxt: int, k: int) -> list:
+        """Up to k tokens that followed (the last two tokens, nxt) the most recent time they occurred."""
+        t = self.toks
+        if len(t) < 2 or k < 1:
+            return []
+        i = self.where.get((t[-2], t[-1], nxt))
+        return [] if i is None else t[i:i + k]
 
 
 def _top_k(logits: np.ndarray, k: int):
@@ -306,9 +422,14 @@ def _uniform(seed: int, position: int, ids: np.ndarray) -> np.ndarray:
     return ((x >> np.uint64(11)).astype(np.float64) + 0.5) / float(1 << 53)
 
 
-def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: int, with_probability: bool = False):
+def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: int, with_probability: bool = False,
+            tail=None):
     """Draws the token for `position` from the truncated distribution; with
     `with_probability`, also returns the probability it had there.
+
+    `logits` holds one entry per token id, or with `tail` = (main, first) a
+    draft's restricted vocabulary: entries for ids 0 .. main-1 followed by
+    entries for ids first, first+1, ... Tokens outside it cannot be drawn.
 
     The draw is a Gumbel-max over the candidates with noise that depends only
     on (seed, position, token id). That is an ordinary sample from the
@@ -318,13 +439,23 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
     drafts keep being accepted at temperatures where the model's pick is not
     simply its most likely token.
     """
+    def ids(entries):   # entries of `logits` -> token ids
+        if tail is None:
+            return entries
+        main, first = tail
+        return np.where(entries < main, entries, entries - main + first)
+
     greedy = s.temperature <= 0
     k = (8 if with_probability else 1) if greedy else (s.top_k if s.top_k > 0 else 1024)   # 1024: the tail carries no mass
-    top, z = _top_k(logits, k)
+    top, z = _top_k(logits, k)          # entries, not yet token ids
     if recent and (s.repetition_penalty != 1.0 or s.presence_penalty):
         # Penalties touch only recently seen tokens, so the penalized top k is
         # among the plain top k + |seen| and the seen tokens themselves.
         seen = np.unique(np.asarray(recent[-64:], dtype=np.int64))
+        if tail is not None:            # token ids -> entries; ids the logits do not cover drop out
+            main, first = tail
+            seen = np.concatenate([seen[seen < main], seen[seen >= first] - first + main])
+        seen = seen[seen < logits.size]
         top = np.union1d(_top_k(logits, k + len(seen))[0], seen)
         z = logits[top].astype(np.float64)
         hit = np.isin(top, seen)
@@ -336,8 +467,8 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
         top, z = top[order], z[order]
     if greedy:
         if not with_probability:
-            return int(top[0])
-        return int(top[0]), float(1.0 / np.exp((z - z[0]).astype(np.float64)).sum())   # its share among the top few
+            return int(ids(top[0]))
+        return int(ids(top[0])), float(1.0 / np.exp((z - z[0]).astype(np.float64)).sum())   # its share among the top few
     logp = (z - z[0]).astype(np.float64) / s.temperature
     p = np.exp(logp)
     p /= p.sum()
@@ -346,7 +477,7 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
         keep = min(keep, int(np.searchsorted(np.cumsum(p), s.top_p)) + 1)
     if s.min_p > 0:
         keep = min(keep, int(np.count_nonzero(p >= s.min_p * p[0])))
-    top, logp = top[:keep], logp[:keep]
+    top, logp = ids(top[:keep]), logp[:keep]
     gumbel = -np.log(-np.log(_uniform(seed, position, top)))
     pick = int(np.argmax(logp + gumbel))
     if not with_probability:

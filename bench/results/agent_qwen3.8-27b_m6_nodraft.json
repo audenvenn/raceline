@@ -3,11 +3,13 @@
   "model": "models/qwen3.8-27b.rot.rlm",
   "backend": "raceline",
   "mtp": false,
-  "load_s": 0.8305434580543078,
+  "load_s": 0.8596063749864697,
   "prompt_tokens": 1024,
   "gen_tokens": 128,
-  "prefill_tps": 296.1093108915417,
-  "decode_tps": 9.750414557126424,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 246.90209256057432,
+  "decode_tps": 9.126619745489842,
   "tokens": [
    318,
    17,
@@ -26,17 +28,19 @@
    681,
    198
   ],
-  "peak_gb": 3.10778832
+  "peak_gb": 3.110852752
  },
  {
   "model": "models/qwen3.8-27b.rot.rlm",
   "backend": "raceline",
   "mtp": false,
-  "load_s": 0.8511211670120247,
+  "load_s": 0.8775807080091909,
   "prompt_tokens": 4096,
   "gen_tokens": 128,
-  "prefill_tps": 266.2582040296097,
-  "decode_tps": 9.491780649175986,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 230.37712229674048,
+  "decode_tps": 8.929507502706304,
   "tokens": [
    15705,
    369,
@@ -55,6 +59,6 @@
    13,
    1946
   ],
-  "peak_gb": 3.112409184
+  "peak_gb": 3.113031824
  }
 ]

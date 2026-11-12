@@ -4,8 +4,9 @@
   GET  /v1/models
   GET  /health
 
-Standard library only. Requests are served one at a time: the model has one
-context, and reusing it across turns is the point.
+Standard library only. Generation requests are served one at a time (the
+runtime's lock makes one that arrives meanwhile wait its turn): the model has
+one context, and reusing it across turns is the point.
 
 Extensions to the OpenAI schema, all optional: `top_k`, `repetition_penalty`,
 `enable_thinking` (also read from `chat_template_kwargs`), and in responses
@@ -17,6 +18,7 @@ where its chat template has one (Qwen3.8); none / minimal turns thinking off.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import uuid
 from dataclasses import replace
@@ -100,25 +102,40 @@ def make_handler(runtime: Runtime, model_id: str):
             stop = body.get("stop")
             stop = [stop] if isinstance(stop, str) else stop
             max_tokens = body.get("max_completion_tokens") or body.get("max_tokens") or 4096
+            self._started = False
+            events = runtime.chat(messages, tools, _sampling(runtime, body), int(max_tokens), _thinking(body), stop,
+                                  effort=_effort(body))
             try:
-                events = runtime.chat(messages, tools, _sampling(runtime, body), int(max_tokens), _thinking(body), stop,
-                                      effort=_effort(body))
                 if body.get("stream"):
                     self._stream(events, body)
                 else:
                     self._complete(events)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the client went away; the session keeps whatever was generated
-            except ValueError as e:
-                try:
-                    self._error(400, str(e))
-                except Exception:
-                    pass
             except Exception as e:  # report instead of dropping the connection
-                try:
-                    self._error(500, f"{type(e).__name__}: {e}")
-                except Exception:
-                    pass
+                self._fail(400 if isinstance(e, ValueError) else 500,
+                           str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}")
+            finally:
+                # Ends the generation now (and releases the runtime's lock), not
+                # whenever the abandoned generator happens to be collected.
+                events.close()
+
+        def _fail(self, code: int, message: str):
+            try:
+                if self._started:   # mid-stream: the status line is out, so say it in the stream
+                    self._send_event({"error": {"message": message, "type": "server_error"}})
+                    self._send_event("[DONE]")
+                    self.wfile.write(b"0\r\n\r\n")
+                else:
+                    self._error(code, message)
+            except Exception:
+                pass
+
+        def _send_event(self, payload):
+            data = ("data: " + (payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False))
+                    + "\n\n").encode()
+            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+            self.wfile.flush()
 
         # -------------------------------------------------- non-streaming
         def _complete(self, events):
@@ -154,13 +171,9 @@ def make_handler(runtime: Runtime, model_id: str):
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
+            self._started = True
             rid, created = "chatcmpl-" + uuid.uuid4().hex[:24], int(time.time())
-
-            def send(payload):
-                data = ("data: " + (payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False))
-                        + "\n\n").encode()
-                self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
-                self.wfile.flush()
+            send = self._send_event
 
             def chunk(delta, finish=None, **extra):
                 return {"id": rid, "object": "chat.completion.chunk", "created": created, "model": model_id,
@@ -198,8 +211,17 @@ def make_handler(runtime: Runtime, model_id: str):
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            return   # a client that went away; nothing to report
+        super().handle_error(request, client_address)
+
+
 def serve(runtime: Runtime, model_id: str, host: str = "127.0.0.1", port: int = 8080):
-    server = ThreadingHTTPServer((host, port), make_handler(runtime, model_id))
+    server = Server((host, port), make_handler(runtime, model_id))
     print(f"raceline: {model_id} on the {runtime.backend.name} backend")
     print(f"OpenAI-compatible API at http://{host}:{port}/v1  (Ctrl-C to stop)", flush=True)
     try:

@@ -5,8 +5,8 @@
   "mtp": true,
   "sampling": "greedy",
   "tokens": 770,
-  "decode_tps": 94.41569193775732,
-  "drafts_accepted": 0.7519623233908949
+  "decode_tps": 100.16208263312959,
+  "drafts_accepted": 0.6253164556962025
  },
  {
   "model": "models/qwen3.5-4b.rot.rlm",
@@ -14,8 +14,8 @@
   "mtp": true,
   "sampling": "temperature 0.7, top_p 0.8, top_k 20",
   "tokens": 759,
-  "decode_tps": 91.29512417843493,
-  "drafts_accepted": 0.6145181476846058
+  "decode_tps": 98.13225857482865,
+  "drafts_accepted": 0.5506607929515418
  },
  {
   "model": "models/qwen3.5-4b.rot.rlm",
@@ -23,7 +23,7 @@
   "mtp": true,
   "sampling": "temperature 1.0, top_p 0.95, top_k 20",
   "tokens": 794,
-  "decode_tps": 90.40797052216962,
-  "drafts_accepted": 0.7109144542772862
+  "decode_tps": 93.48512624586242,
+  "drafts_accepted": 0.5917375455650061
  }
 ]

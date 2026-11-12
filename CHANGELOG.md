@@ -8,6 +8,66 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Added
+
+- Drafts copied from the context. When the last three tokens occurred
+  earlier in the context and what followed them there agrees with the draft
+  head's first guess, that earlier continuation is drafted instead: the lines
+  an edit replaces, a file rewritten with one change, quoted code. A pass
+  checks up to 15 drafts (up from 7; 16 rows cost 3 to 6% more than one).
+  `RACELINE_LOOKUP` sets the most per pass, `0` turns copying off. Output is
+  unchanged, as with every draft. On the agent tasks of
+  `bench/agent_eval.py`, Qwen3.5-4B decodes at 184 tok/s with them and 151
+  without; Qwen3.8-27B at 32.1 and 31.5.
+- `bench/agent_eval.py`: eight small coding tasks (`bench/agent_tasks.py`)
+  run by the agent with every tool call approved, each judged by a hidden
+  check; a fixed seed makes runs that differ only in drafting write the same
+  tokens. `tests/test_agent_tasks.py` checks that every task fails as handed
+  out and passes with a reference solution.
+- `tests/test_server.py`: the OpenAI-compatible server against a scripted
+  runtime, run by CI.
+- `bench/agent_bench.py --corpus unseen --samples N`: continue code the
+  models cannot have seen (frozen copies of this project's own files in
+  `bench/corpus/`) instead of the standard library, which they partly
+  remember, over several stretches of text. The benchmark scripts warn when
+  other processes load the machine.
+- Every draft can name the chat template's special tokens (`<tool_call>`,
+  `</think>`, `<|im_end|>`, ...): the block of the output matrix that holds
+  them is appended to a draft's restricted vocabulary (512 rows). Before, an
+  agent's turn ended a draft chain at each of them (1 to 1.5% of its output).
+
+### Changed
+
+- The draft vocabulary is chosen from the context's text tokens only, and
+  64k ids are used while at most 3% of them lie beyond (before: 1% of all
+  tokens, special ones included). Agent conversations mostly got the whole
+  248k-row pass for their drafts: 7.4 ms per draft on Qwen3.8-27B, against
+  3.9 ms for the 64k one.
+- The engine refuses, with an explanation, to start on a Mac before Apple M5
+  or on macOS before 27, instead of failing in the Metal compiler; MLX models
+  still run there. `RACELINE_ANY_GPU=1` skips the check.
+- `raceline pull` says when a model is too large for the Mac's memory.
+- The server ends a generation as soon as its client disconnects, reports an
+  error that happens mid-stream as a stream event, and accepts the
+  `developer` role as system instructions.
+
+### Fixed
+
+- Every shell command the agent ran forked the agent's whole process, which
+  with Qwen3.8-27B maps 14 GB of weights and GPU buffers. That cost seconds
+  per command and made the prompt processing after it about nine times
+  slower: the eight agent tasks of `bench/agent_eval.py` took 752 s, now 317
+  s. The forked copy could also die before it ran the command (SIGTRAP in the
+  allocator's fork handler on macOS 27, for about 2% of commands). Commands
+  are started with `posix_spawn` now, never `fork`; `raceline probe` and the
+  hardware check read `sysctl` values directly instead of running `sysctl`.
+- A shell command that timed out left whatever it had started running: a
+  test stuck in a loop kept a CPU core busy after the agent moved on. Commands
+  run in a process group of their own, and the whole group is killed.
+- Sampling with `presence_penalty` or `repetition_penalty` crashed in the
+  draft step when a recent token lay outside the draft's vocabulary (an
+  IndexError on the first draft after `<|im_start|>`).
+
 ## [0.2.0] - 2026-11-12
 
 ### Changed

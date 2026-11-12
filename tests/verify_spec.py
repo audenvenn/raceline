@@ -81,16 +81,19 @@ def main():
         ref[i] = e.forward([toks[i]])
     e.close()
 
-    # 1. Speculative passes with a prescribed number of right drafts.
-    for k in range(1, K + 1):
+    # 1. Speculative passes with a prescribed number of right drafts: drafts the
+    # head chained (draft_more), and drafts from elsewhere (copied from the
+    # context: the head is asked for its first guess only).
+    for k, chained in [(k, True) for k in range(1, K + 1)] + [(K // 2, False), (K, False)]:
         e = Eng(lib, args.rlm)
         same = np.array_equal(e.forward(toks[:n0]), ref[n0 - 1])
         i, right, passes, partial = n0, 0, 0, 0
         while i + k < n:
             same = same and np.array_equal(e.draft(toks[i]), ref_draft[i])
             drafts = [toks[i + 1 + j] if j < right else (toks[i + 1 + j] + 1 + j) % e.V for j in range(k)]
-            for d in drafts[:-1]:
-                e.more(d)
+            if chained:
+                for d in drafts[:-1]:
+                    e.more(d)
             rows = e.forward_draft([toks[i]] + drafts)
             same = same and all(np.array_equal(rows[r], ref[i + r]) for r in range(right + 1))
             e.keep(right)
@@ -101,7 +104,9 @@ def main():
             same = same and np.array_equal(e.forward([toks[i]]), ref[i])
             i += 1
         e.close()
-        check(f"{k} draft{'s' if k > 1 else ''} per pass: {passes} passes ({partial} partly accepted), logits and drafts identical", same)
+        how = "chained by the head" if chained else "not from the head"
+        check(f"{k} draft{'s' if k > 1 else ''} per pass, {how}: {passes} passes ({partial} partly accepted), "
+              f"logits and drafts identical", same)
 
     # 2. An abandoned draft chain.
     e = Eng(lib, args.rlm)
@@ -130,6 +135,24 @@ def main():
     same = same and all(np.array_equal(e.forward([toks[j]]), ref[j]) for j in range(at, at + 5))
     e.close()
     check(f"state saved at {at}, decoded past it, loaded back: identical ({size / 1e6:.0f} MB of state)", same)
+
+    # 4. A restricted draft vocabulary with the top block(s) appended: its logits are
+    # the whole pass's at the ids they stand for.
+    e = Eng(lib, args.rlm)
+    e.forward(toks[:n0])
+    full = e.draft(toks[n0])
+    e.close()
+    e = Eng(lib, args.rlm)
+    lib.rl_set_draft_vocab(e.e, 65536)
+    lib.rl_set_draft_tail(e.e, e.V - 300)
+    main, first, D = lib.rl_draft_main(e.e), lib.rl_draft_tail(e.e), lib.rl_draft_vocab(e.e)
+    e.forward(toks[:n0])
+    part = np.ctypeslib.as_array(lib.rl_draft_logits(e.e, toks[n0]), shape=(D,)).copy()
+    e.close()
+    n_tail = min(D - main, e.V - first)
+    same = (main == 65536 and first >= 0 and np.array_equal(part[:main], full[:main])
+            and np.array_equal(part[main:main + n_tail], full[first:first + n_tail]))
+    check(f"draft over ids below {main} plus {D - main} rows from {first}: the full pass's logits there", same)
 
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)

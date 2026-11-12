@@ -46,6 +46,12 @@ size_t rl_logits_stride(const rl_engine *e);
 // Restricts drafts to token ids below `rows` (0 = the whole vocabulary); the
 // draft calls then return rl_draft_vocab() logits.
 void rl_set_draft_vocab(rl_engine *e, int rows);
+// Appends the rows from the block holding token `first` to the end of the
+// vocabulary to every draft (-1: none). Draft logits are then rl_draft_main()
+// entries for ids 0.., followed by entries for ids rl_draft_tail()...
+void rl_set_draft_tail(rl_engine *e, int first);
+int rl_draft_main(const rl_engine *e);
+int rl_draft_tail(const rl_engine *e);
 int rl_draft_vocab(const rl_engine *e);
 
 // The k largest of n logits in descending order (ties: lowest index first).

@@ -3,11 +3,13 @@
   "model": "models/qwen3.8-27b.rot.rlm",
   "backend": "raceline",
   "mtp": true,
-  "load_s": 0.9176674580085091,
+  "load_s": 0.8631310419877991,
   "prompt_tokens": 1024,
   "gen_tokens": 128,
-  "prefill_tps": 283.11952050798385,
-  "decode_tps": 44.330861373738394,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 245.13279100438172,
+  "decode_tps": 40.15113347154177,
   "tokens": [
    318,
    17,
@@ -26,18 +28,20 @@
    681,
    198
   ],
-  "drafts_accepted": 0.8217054263565892,
-  "peak_gb": 3.475658776
+  "drafts_accepted": 0.47465437788018433,
+  "peak_gb": 3.513342024
  },
  {
   "model": "models/Qwen3.8-27B-4bit",
   "backend": "mlx",
   "mtp": false,
-  "load_s": 3.6051433750544675,
+  "load_s": 3.514941999979783,
   "prompt_tokens": 1024,
   "gen_tokens": 128,
-  "prefill_tps": 305.75564098695446,
-  "decode_tps": 9.247011323179972,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 276.87265041183576,
+  "decode_tps": 8.711163459768189,
   "tokens": [
    318,
    17,
@@ -56,17 +60,19 @@
    681,
    198
   ],
-  "peak_gb": 18.183368512
+  "peak_gb": 18.179043136
  },
  {
   "model": "models/qwen3.8-27b.rot.rlm",
   "backend": "raceline",
   "mtp": true,
-  "load_s": 0.8163936250493862,
+  "load_s": 0.8202639170340262,
   "prompt_tokens": 4096,
   "gen_tokens": 128,
-  "prefill_tps": 270.24347288561336,
-  "decode_tps": 30.557213772359514,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 236.50879584537273,
+  "decode_tps": 29.387820418882107,
   "tokens": [
    15705,
    369,
@@ -85,18 +91,20 @@
    13,
    1946
   ],
-  "drafts_accepted": 0.7723577235772358,
-  "peak_gb": 3.479672904
+  "drafts_accepted": 0.6737588652482269,
+  "peak_gb": 3.519830112
  },
  {
   "model": "models/Qwen3.8-27B-4bit",
   "backend": "mlx",
   "mtp": false,
-  "load_s": 3.5773045000387356,
+  "load_s": 3.6009989170124754,
   "prompt_tokens": 4096,
   "gen_tokens": 128,
-  "prefill_tps": 287.8609668083208,
-  "decode_tps": 9.006146017434176,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 260.7248537628296,
+  "decode_tps": 8.355703926712266,
   "tokens": [
    15705,
    369,
@@ -115,6 +123,6 @@
    6397,
    13
   ],
-  "peak_gb": 19.64018464
+  "peak_gb": 19.643019096
  }
 ]

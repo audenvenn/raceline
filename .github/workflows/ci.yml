@@ -22,5 +22,9 @@ jobs:
         run: python -m compileall -q raceline tools tests bench
       - name: Runtime tests (no GPU, no model)
         run: python tests/test_runtime.py
+      - name: Agent tasks are solvable and checked fairly
+        run: python tests/test_agent_tasks.py
+      - name: OpenAI-compatible server against a scripted runtime
+        run: python tests/test_server.py
       - name: Repository contains English only
         run: python tools/check_english.py

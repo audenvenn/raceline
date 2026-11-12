@@ -38,6 +38,9 @@ void rl_keep_drafts(rl_engine *e, int accepted) { e->engine.keep_drafts(accepted
 int rl_max_drafts(const rl_engine *) { return rl::Engine::kMaxDrafts; }
 void rl_set_draft_vocab(rl_engine *e, int rows) { e->engine.set_draft_vocab(rows); }
 int rl_draft_vocab(const rl_engine *e) { return e->engine.draft_vocab(); }
+void rl_set_draft_tail(rl_engine *e, int first) { e->engine.set_draft_tail(first); }
+int rl_draft_main(const rl_engine *e) { return e->engine.draft_main(); }
+int rl_draft_tail(const rl_engine *e) { return e->engine.draft_tail(); }
 size_t rl_logits_stride(const rl_engine *e) { return (size_t)(e->engine.logits(1) - e->engine.logits(0)); }
 
 const float *rl_hidden(const rl_engine *e) { return e->engine.hidden(); }

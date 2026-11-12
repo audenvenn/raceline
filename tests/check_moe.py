@@ -40,7 +40,7 @@ def main():
     args = ap.parse_args()
     work = tempfile.mkdtemp(prefix="raceline-moe-")
     src, rlm = os.path.join(work, "tiny-moe"), os.path.join(work, "tiny-moe.rlm")
-    small = {"RACELINE_EXPERT_CACHE": "0.001"}
+    resident, small = {"RACELINE_EXPERT_CACHE": "0"}, {"RACELINE_EXPERT_CACHE": "0.001"}
     ok = run("tiny MoE checkpoint", [PY, "tests/tiny_moe.py", args.tokenizer_from, src])
     ok = ok and run("conversion", [PY, "tools/quantize.py", src, rlm, "--calib-seqs", "4", "--eval-seqs", "2"])
     ok = ok and run("MTP head", [PY, "tools/add_mtp.py", src, rlm, "--calib-seqs", "4", "--eval-seqs", "2"])
@@ -49,7 +49,7 @@ def main():
     ok = run("engine against MLX on the decoded weights", [PY, "tests/verify_moe.py", rlm, args.tokens])
 
     outs = {}
-    for label, env in (("in memory", {}), ("offloaded", small)):
+    for label, env in (("in memory", resident), ("offloaded", small)):
         for chunk in (96, 17, 1):
             out = os.path.join(work, f"logits_{label[:3]}_{chunk}.f32")
             ok = run(f"logits, experts {label}, chunks of {chunk}",
@@ -60,7 +60,8 @@ def main():
     print(f"{'ok  ' if same else 'FAIL'}  all six logits bit-identical")
     ok = ok and same
 
-    ok = run("speculative decoding exact, experts in memory", [PY, "tests/verify_spec.py", rlm, args.tokens]) and ok
+    ok = run("speculative decoding exact, experts in memory", [PY, "tests/verify_spec.py", rlm, args.tokens],
+             resident) and ok
     ok = run("speculative decoding exact, experts offloaded", [PY, "tests/verify_spec.py", rlm, args.tokens], small) and ok
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)

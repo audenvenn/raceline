@@ -311,6 +311,7 @@ Environment variables, all optional:
 | `RACELINE_RELEASES` | A base URL `raceline pull` downloads from instead. |
 | `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
+| `RACELINE_EXPERT_CACHE` | Mixture-of-experts models: GB of experts kept in memory, the rest read from disk when needed (`0`: all in memory; by default the engine decides from the memory the GPU may use). |
 | `RACELINE_ANY_GPU` | `1` lets the engine try a Mac it does not support (before Apple M5); please report the result in #2. |
 
 ## What is checked
@@ -434,6 +435,27 @@ tokens at once: a pass of 16 rows costs 3% more than a pass of one on the
 filters out chance matches. Like every draft, a copied one only stands if it
 is the token the model picks.
 
+**Mixture of experts.** In Qwen3.5-35B-A3B every layer's MLP is 256
+experts, of which a router picks 8 per token, plus a shared expert that every
+token uses. The converter stacks a layer's experts into two 4-bit tensors
+(gate/up and down, the shared expert last, so it runs through the same code)
+in a file section of their own. In the engine a routing kernel picks each
+token's experts, sorts the (token, expert) pairs by expert and writes a work
+list on the GPU; one grouped matmul then runs every expert over just the rows
+routed to it, dispatched with the sizes the GPU computed, and a last kernel
+adds each token's nine results in a fixed order. Nothing a token gets depends
+on the other tokens in the pass, so prompts fed in chunks and speculative
+passes stay bit-identical, as with the dense models.
+
+**Experts on disk.** The experts are most of a MoE model's weights, and a
+token touches few of them. When a model does not fit in the memory the GPU
+may use, the engine leaves the experts in the file and keeps the ones in use
+in a cache: after each layer's routing the GPU waits while a CPU thread reads
+the missing experts from the SSD into the least recently used slots (all of
+a layer's misses at once) and updates the slot table the grouped matmuls read
+through. What is computed does not change, only where the weights come from.
+`--expert-cache GB` sets the cache's size by hand.
+
 **Hardware limits.** `raceline probe` prints them for your Mac:
 
 ```
@@ -465,8 +487,8 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 
 ## Limits
 
-- One model family: dense Qwen3.5 / Qwen3.8 text models. No MoE variants, no
-  vision input.
+- One model family: Qwen3.5 / Qwen3.8 text models, dense and mixture of
+  experts. No vision input (#28).
 - The 27B conversion loses more quality than MLX's 4-bit format does (KL
   0.148 against 0.105 nats to the float model on held-out text, #15; a
   power-of-two scale per 32 weights, which the accelerators could apply, did

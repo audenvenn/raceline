@@ -14,7 +14,7 @@ agent on mlx-lm takes 39, and with the 9B, which fits a 16 GB Mac, in 2. The tex
 bit-for-bit what decoding one token at a time produces, at any sampling
 temperature.
 
-![The same request answered by mlx-lm and by raceline, replayed at the measured speed](docs/race.gif)
+![The same agent fixing the same bug with Qwen3.8-27B on mlx-lm and on raceline, replayed at three times the measured speed](docs/agent_race.gif)
 
 ```
 $ raceline chat qwen3.8-27b --yes -p "Run test_inventory.py. If a test fails, find the cause in inventory.py, fix it, and run the tests again until they all pass."
@@ -109,7 +109,10 @@ written after the model was:
 | | | **raceline** | 230 tok/s | **29.4 tok/s** | |
 
 Chat answers, thinking off, three requests of up to 300 tokens
-(`bench/chat_bench.py`):
+(`bench/chat_bench.py`; `bench/race_demo.py` replays one of them side by
+side):
+
+![The same request answered by mlx-lm and by raceline, replayed at the measured speed](docs/race.gif)
 
 | Sampling | mlx-lm | raceline | raceline, drafts off |
 |---|---|---|---|

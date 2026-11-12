@@ -216,44 +216,10 @@ def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=
     time; here the scales do not depend on the order, so it is free.
     Returns (codes, s, c).
     """
+    N, K = W.shape
     h, c = search_scales(W, np.diag(H).astype(np.float32).copy(), book, alphas, betas)
     s, _ = row_scales(W, c, h * c * c, book)
-    return _gptq_codes(W, H, c, s, book, damp, block, chunk, act_order), s, c
 
-
-def quantize_gptq_experts(W: np.ndarray, sums: np.ndarray, counts: np.ndarray, book: str, alphas=(0.0,),
-                          betas=(0.0,), damp: float = 0.01, block: int = 128, act_order: bool = True,
-                          prior: float = 64.0):
-    """GPTQ for a stack of experts that share their column scales but not their inputs.
-
-    W holds len(counts) blocks of rows, one per expert; sums[e] is the sum of
-    x x^T over the inputs expert e saw and counts[e] how many there were. The
-    column scales are searched with the inputs of all experts pooled (the
-    engine applies one c to a stack); each expert's row scales and its GPTQ
-    error propagation use its own second moment. An expert that saw few
-    inputs has a poorly determined moment: it is pulled towards the pooled
-    one as if `prior` pooled inputs had been added to its own.
-    Returns (codes, s, c).
-    """
-    E, K = len(counts), W.shape[1]
-    R = W.shape[0] // E
-    assert R * E == W.shape[0] and sums.shape == (E, K, K)
-    pooled = sums.sum(axis=0, dtype=np.float64) / max(1.0, float(counts.sum()))
-    _, c = search_scales(W, np.diag(pooled).astype(np.float32).copy(), book, alphas, betas)
-    codes, s = np.empty(W.shape, dtype=np.uint8), np.empty(W.shape[0], dtype=np.float32)
-    for e in range(E):
-        H = ((sums[e] + prior * pooled) / (counts[e] + prior)).astype(np.float32)
-        h = np.diag(H).copy()
-        h = h / h.mean() if h.mean() > 0 else np.ones(K, dtype=np.float32)
-        We = W[e * R:(e + 1) * R]
-        s[e * R:(e + 1) * R], _ = row_scales(We, c, h * c * c, book)
-        codes[e * R:(e + 1) * R] = _gptq_codes(We, H, c, s[e * R:(e + 1) * R], book, damp, block, R, act_order)
-    return codes, s, c
-
-
-def _gptq_codes(W, H, c, s, book, damp, block, chunk, act_order):
-    """The GPTQ column loop for fixed scales -> codes[N][K]."""
-    N, K = W.shape
     # Work on W / c, whose input is c * x: Hc = diag(c) H diag(c).
     Hc = (H.astype(np.float32) * c[None, :]) * c[:, None]
     dead = np.diag(Hc) <= 0                       # inputs that never fire: their weights do not matter
@@ -280,4 +246,4 @@ def _gptq_codes(W, H, c, s, book, damp, block, chunk, act_order):
             else:
                 mx.eval(lev)
             codes[r0:r0 + chunk, perm[i1:i2]] = encode(np.array(lev), book)
-    return codes
+    return codes, s, c

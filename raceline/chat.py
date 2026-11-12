@@ -116,10 +116,12 @@ class _Decoder:
 class Runtime:
     """A loaded model plus one reusable session. Shared by the server and the terminal agent."""
 
-    def __init__(self, backend: Backend, defaults: Optional[Sampling] = None):
+    def __init__(self, backend: Backend, defaults: Optional[Sampling] = None, park_bytes: Optional[int] = None):
+        """`park_bytes`: memory for conversations set aside (Session; default RACELINE_PARK_GB, 2 GB)."""
         self.backend = backend
-        park = float(os.environ.get("RACELINE_PARK_GB", "2"))     # conversations set aside (Session)
-        self.session = Session(backend, max_parked_bytes=int(park * 2**30))
+        if park_bytes is None:
+            park_bytes = int(float(os.environ.get("RACELINE_PARK_GB", "2")) * 2**30)
+        self.session = Session(backend, max_parked_bytes=park_bytes)
         self.defaults = defaults or Sampling()
         self.lock = threading.Lock()   # one generation at a time: this is a single-user runtime
         tok = backend.tokenizer

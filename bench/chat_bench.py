@@ -49,7 +49,7 @@ def main():
     warn_if_busy()
     backend = load_backend(args.model)
     results = []
-    rt = Runtime(backend, Sampling(temperature=0.0))
+    rt = Runtime(backend, Sampling(temperature=0.0), park_bytes=0)
     for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):   # warm up
         pass
     experts = getattr(backend, "expert_cache", lambda: None)   # a MoE model with its experts on disk

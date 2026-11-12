@@ -102,7 +102,7 @@ class Session:
         else:
             # Everything of the current conversation past this point is about to be overwritten.
             lost = common if back is None else min(common, _common(self.tokens, back.tokens))
-            if b.kv_block and len(self.tokens) - lost >= self.min_park_tokens:
+            if b.kv_block and self.max_parked_bytes and len(self.tokens) - lost >= self.min_park_tokens:
                 self._park(lost)
             if back is not None:
                 shared = _common(self.tokens, back.tokens)    # snapshots up to here hold for both

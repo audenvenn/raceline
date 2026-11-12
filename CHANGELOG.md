@@ -10,16 +10,17 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Added
 
-- Conversations set aside (#8). When a request starts another conversation
-  (a second chat, or a side request such as a title in the middle of a long
-  session), the session keeps the one it leaves: its recurrent state and
-  its attention entries from where the two part. When a later request
-  continues it, they are put back and nothing of it is computed again;
-  before, the whole conversation was. Kept within 2 GB
-  (`RACELINE_PARK_GB`), least recently used first out; conversations
-  under 512 tokens past the shared start are cheaper to recompute and are
-  not kept. Engine: `rl_save_kv` / `rl_load_kv` copy the attention entries
-  of a range of positions in blocks of 256.
+- `raceline serve` keeps conversations set aside (#8). When a request starts
+  another conversation (a second chat, or a side request such as a title in
+  the middle of a long session), the server keeps the one it leaves: its
+  recurrent state and its attention entries from where the two part. When a
+  later request continues it, they are put back and nothing of it is
+  computed again; before, the whole conversation was. Kept within 2 GB
+  (`RACELINE_PARK_GB`), least recently used first out; conversations under
+  512 tokens past the shared start are cheaper to recompute and are not
+  kept. The terminal agent holds one conversation and keeps none. Engine:
+  `rl_save_kv` / `rl_load_kv` copy the attention entries of a range of
+  positions in blocks of 256.
 
 - `raceline pull` without a model lists the models it can fetch, their
   sizes, and how each fits this Mac's memory.

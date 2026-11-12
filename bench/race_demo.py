@@ -36,7 +36,7 @@ def record(model, out, max_tokens):
     from raceline.chat import Runtime
 
     backend = load_backend(model)
-    rt = Runtime(backend, Sampling(temperature=0.0))
+    rt = Runtime(backend, Sampling(temperature=0.0), park_bytes=0)
     for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):   # warm up
         pass
     events, stats = [], None
@@ -73,7 +73,7 @@ def record_agent(model, out, task_name):
     backend = load_backend(model)
     sampling = agent_sampling(model, backend, True)
     sampling.seed = 1
-    rt = Runtime(backend, sampling)
+    rt = Runtime(backend, sampling, park_bytes=0)
     for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):   # warm up
         pass
     work = os.path.join(tempfile.gettempdir(), "raceline-race")

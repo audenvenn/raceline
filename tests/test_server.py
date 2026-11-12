@@ -152,7 +152,11 @@ def test_client_that_disconnects_ends_the_generation_at_once():
         sock = socket.create_connection(("127.0.0.1", port), timeout=10)
         sock.sendall(b"POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
                      b"Content-Length: %d\r\n\r\n%s" % (len(body), body))
-        sock.recv(256)
+        got = b""
+        while b'"content": "x"' not in got:   # mid-answer: the generation has started
+            data = sock.recv(4096)
+            assert data, got
+            got += data
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
         sock.close()                            # the client goes away mid-answer (with a reset)
         for _ in range(600):                    # a slow CI machine gets 30 s to notice

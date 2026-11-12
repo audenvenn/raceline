@@ -398,6 +398,29 @@ def test_a_conversation_set_aside_comes_back_without_recomputing():
     assert usage["cached_tokens"] == len(system) and out_b2 == _fresh(b + out_b + [23])
 
 
+def test_a_parked_chat_comes_back_from_where_its_last_reply_began():
+    """As a chat client does it: the last reply comes back rendered differently from how it was
+    written (without its reasoning), so the conversation resumes where that reply began."""
+    system = list(range(1, 11))
+    history = system + [30 + i % 9 for i in range(40)]
+    gen_start, prompt_end = len(history), len(history) + 3          # a generation prompt of 3 tokens
+    first = history + [90, 91, 92]
+    s = Session(KVFakeBackend(), min_park_tokens=8)
+    s.sync(first, (len(system), gen_start), len(system))
+    reply = list(s.generate(Sampling(), 6))
+    s.sync([77] * 20, (), None)                                     # a side request with its own system prompt
+    s.generate(Sampling(), 3)
+    assert s.parked == 1
+    again = history + [90, 95] + [5, 6, 7, 8]                       # the reply rendered otherwise, then more
+    usage = s.sync(again, (len(system), len(again) - 2), len(system))
+    assert usage["cached_tokens"] == gen_start, usage               # not 0: from where the reply began
+    out = list(s.generate(Sampling(), 5))
+    ref = Session(KVFakeBackend())
+    ref.sync(again)
+    assert out == list(ref.generate(Sampling(), 5))
+    del reply, prompt_end
+
+
 def test_a_parked_conversation_needs_its_shared_start_in_the_context():
     a = list(range(1, 41))
     s = Session(KVFakeBackend(), min_park_tokens=8)

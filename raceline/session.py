@@ -51,6 +51,7 @@ class _Parked:
     kv_from: int
     kv: Any
     nbytes: int
+    branches: set       # which of those positions are branch points
 
 
 class Session:
@@ -59,6 +60,7 @@ class Session:
         self.backend = backend
         self.tokens: list = []          # exactly the tokens in the backend's context
         self._snaps: list = []          # ascending position
+        self._branches: set = set()     # positions of snapshots taken at a caller's branch point
         self._pinned: Optional[int] = None
         self._parked: list = []         # least recently used first
         self.max_snapshots = max_snapshots
@@ -69,6 +71,7 @@ class Session:
     def reset(self) -> None:
         self.backend.reset()
         self.tokens, self._snaps, self._pinned, self._parked = [], [], None, []
+        self._branches = set()
 
     def sync(self, prompt: Sequence[int], branch_points: Sequence[int] = (), pin: Optional[int] = None,
              progress: Optional[Callable[[int, int], None]] = None) -> dict:
@@ -127,6 +130,8 @@ class Session:
                 self._snaps = mine + [s for s in back.snaps if s.position <= start and
                                       all(m.position != s.position for m in mine)]
                 self._snaps.sort(key=lambda s: s.position)
+                self._branches = ({p for p in self._branches if p <= min(shared, start)} |
+                                  {p for p in back.branches if p <= start})
                 self.tokens = back.tokens[:start]
             elif snap is not None:
                 b.restore(snap)
@@ -142,13 +147,15 @@ class Session:
 
         if pin is not None and start <= pin < len(prompt):
             self._pinned = pin
-        cuts = sorted({p for p in branch_points if start < p < len(prompt)} | {len(prompt)})
+        branches = {p for p in branch_points if start < p < len(prompt)}
+        cuts = sorted(branches | {len(prompt)})
         position = start
         for cut in cuts:
             if cut > position:
                 b.prefill(list(prompt[position:cut]), progress)
                 position = cut
             self._remember(b.snapshot())
+        self._branches = {p for p in self._branches if p <= start} | branches
         self.tokens = list(prompt)
         return dict(prompt_tokens=len(prompt), cached_tokens=start - redone)
 
@@ -176,14 +183,18 @@ class Session:
         b = self.backend
         kv_from = lost // b.kv_block * b.kv_block
         end = b.snapshot()          # the model is at the end of the conversation
-        # Its end, to continue it, and the last branch point before that, should a client re-render
-        # the last reply differently (a recurrent state is 50 to 150 MB, so no more).
-        snaps = [s for s in self._snaps if kv_from < s.position < end.position][-1:] + [end]
+        # Its end, to continue it; the last branch point (the start of the last reply, which a chat client
+        # sends back rendered without its reasoning); and the end of the last prompt, for a client that
+        # asks again. A recurrent state is 50 to 150 MB, so no more.
+        before = [s for s in self._snaps if kv_from < s.position < end.position]
+        keep = {id(s) for s in [s for s in before if s.position in self._branches][-1:] + before[-1:]}
+        snaps = [s for s in before if id(s) in keep] + [end]
         kv = b.save_kv(kv_from, end.position)
         nbytes = kv.nbytes + sum(s.nbytes for s in snaps)
         if nbytes > self.max_parked_bytes:
             return
-        self._parked.append(_Parked(list(self.tokens), snaps, kv_from, kv, nbytes))
+        self._parked.append(_Parked(list(self.tokens), snaps, kv_from, kv, nbytes,
+                                    {s.position for s in snaps} & self._branches))
         while sum(p.nbytes for p in self._parked) > self.max_parked_bytes:
             self._parked.pop(0)
 

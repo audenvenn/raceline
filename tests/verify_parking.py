@@ -41,7 +41,7 @@ def main():
     b = system + toks[2800:2900]          # a side request after the shared start
     c = toks[5000:5600]                   # shares nothing
 
-    backend = RacelineBackend(args.model, max_ctx=8192)
+    backend = RacelineBackend(args.model, max_ctx=8192)     # one engine: a MoE model is too large for two
     s = Session(backend)
     ok = True
 
@@ -50,32 +50,34 @@ def main():
         ok &= bool(cond)
         print(f"{'ok  ' if cond else 'FAIL'}  {what}{('  ' + detail) if detail else ''}", flush=True)
 
+    def fresh(prompt):
+        """What the engine writes after reading `prompt` from scratch."""
+        _, out, logits = run(Session(backend), prompt)    # a new session resets the engine
+        return out, logits
+
     _, out_a, _ = run(s, a)
     usage_b, out_b, _ = run(s, b)
     check("the long conversation was set aside", s.parked == 1, f"parked {s.parked}")
     check("the side request started from the shared system prompt", usage_b["cached_tokens"] == 300,
           f"cached {usage_b['cached_tokens']}")
     a2 = a + out_a + toks[3000:3040]
-    usage, out_a2, logits = run(s, a2)
-    check("it came back without recomputing", usage["cached_tokens"] == len(a) + len(out_a),
-          f"cached {usage['cached_tokens']} of {len(a2)}")
-
-    fresh = Session(RacelineBackend(args.model, max_ctx=8192))
-    _, ref_out, ref_logits = run(fresh, a2)
-    check("it writes what a fresh run writes", out_a2 == ref_out,
-          "" if out_a2 == ref_out else f"first difference at {next(i for i, (x, y) in enumerate(zip(out_a2, ref_out)) if x != y)}")
-    same = logits is not None and ref_logits is not None and np.array_equal(logits, ref_logits)
-    check("with bit-identical logits", same)
-
+    usage2, out_a2, logits2 = run(s, a2)
+    check("it came back without recomputing", usage2["cached_tokens"] == len(a) + len(out_a),
+          f"cached {usage2['cached_tokens']} of {len(a2)}")
     run(s, b + out_b + toks[2950:2960])    # sets A aside again, from the block its 300 shared tokens end in
     run(s, c)                              # shares nothing: overwrites that start
     a3 = a2 + out_a2 + toks[3100:3110]
-    usage, out, logits = run(s, a3)
-    _, ref, ref_logits = run(Session(RacelineBackend(args.model, max_ctx=8192)), a3)
+    usage3, out_a3, logits3 = run(s, a3)
     check("after its start was overwritten, only that start is computed again",
-          usage["cached_tokens"] == len(a2) + len(out_a2) - 256, f"cached {usage['cached_tokens']} of {len(a3)}")
-    check("and it writes what a fresh run writes, bit for bit",
-          out == ref and logits is not None and np.array_equal(logits, ref_logits))
+          usage3["cached_tokens"] == len(a2) + len(out_a2) - 256, f"cached {usage3['cached_tokens']} of {len(a3)}")
+
+    ref2, ref_logits2 = fresh(a2)
+    check("it writes what a fresh run writes", out_a2 == ref2,
+          "" if out_a2 == ref2 else f"first difference at {next(i for i, (x, y) in enumerate(zip(out_a2, ref2)) if x != y)}")
+    check("with bit-identical logits", logits2 is not None and np.array_equal(logits2, ref_logits2))
+    ref3, ref_logits3 = fresh(a3)
+    check("and so does it after its start was computed again, bit for bit",
+          out_a3 == ref3 and logits3 is not None and np.array_equal(logits3, ref_logits3))
     print("all checks passed" if ok else "SOME CHECKS FAILED")
     sys.exit(0 if ok else 1)
 

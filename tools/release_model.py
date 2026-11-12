@@ -80,7 +80,7 @@ The model file is the engine's native format: 4-bit FP4 weights with a scale per
 column ({bits} bits per weight), quantized with GPTQ after a {rotation}; the model's
 multi-token-prediction head, which raceline uses for exact speculative decoding; and the tokenizer
 and chat template. It is split into parts of under 2 GB described by `{name}.json`. It needs
-raceline 0.2.0 or later and is not usable with other runtimes.
+raceline {needs} or later and is not usable with other runtimes.
 
 ## Use
 
@@ -108,7 +108,7 @@ Apache-2.0, as the original model.
 """
 
 
-def write_card(outdir, manifest, base, alias):
+def write_card(outdir, manifest, base, alias, needs="0.2.0"):
     q, m, quant = manifest["quality"], manifest.get("mtp") or {}, manifest["quant"]
     rot = (quant.get("rotation") or {}).get("kind")
     title = base.split("/")[-1]
@@ -117,7 +117,7 @@ def write_card(outdir, manifest, base, alias):
                                  if rot else "search of the row and column scales"),
                        positions=q["positions"], kl=q["kl"], ppl=q["ppl"], top1=100 * q["top1"],
                        agree=100 * m.get("agreement", float("nan")), size=manifest["size"] / 1e9,
-                       sha=manifest["sha256"])
+                       sha=manifest["sha256"], needs=needs)
     with open(os.path.join(outdir, "README.md"), "w") as f:
         f.write(text)
 
@@ -129,10 +129,11 @@ def main():
     ap.add_argument("--name", help="file name users will get (default: the model's own)")
     ap.add_argument("--part-size", type=int, default=PART)
     ap.add_argument("--card", metavar="BASE_MODEL", help="also write a model card for this base model (e.g. Qwen/Qwen3.5-4B)")
+    ap.add_argument("--needs", default="0.2.0", help="the first raceline version that pulls and runs the model")
     args = ap.parse_args()
     manifest = cut(args.model, args.outdir, args.name, args.part_size)
     if args.card:
-        write_card(args.outdir, manifest, args.card, manifest["name"].rsplit(".rlm", 1)[0])
+        write_card(args.outdir, manifest, args.card, manifest["name"].rsplit(".rlm", 1)[0], args.needs)
     for part in manifest["parts"]:
         print(f"  {part['name']}  {part['size'] / 1e9:.2f} GB")
     print(f"{manifest['name']}: {manifest['size'] / 1e9:.2f} GB in {len(manifest['parts'])} parts, "

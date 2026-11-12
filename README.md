@@ -7,9 +7,10 @@ A local agent runtime for Apple Silicon with its own inference engine, built
 to get as much out of one Mac, for one user, as the hardware allows.
 
 On an M6 Mac mini with 24 GB it runs **Qwen3.8-27B at 25 to 40 tokens/s,
-where mlx-lm manages 8 to 9** on the same machine, and Qwen3.5-4B at 94 to 178
-against 46 to 51. Its agent finishes eight small coding tasks with the 27B in
-5 minutes where the same agent on mlx-lm takes 39. The text it produces is
+where mlx-lm manages 8 to 9** on the same machine, Qwen3.5-9B at 57 to 114
+against 27 to 29, and Qwen3.5-4B at 94 to 178 against 46 to 51. Its agent
+finishes eight small coding tasks with the 27B in 5 minutes where the same
+agent on mlx-lm takes 39, and with the 9B, which fits a 16 GB Mac, in 2. The text it produces is
 bit-for-bit what decoding one token at a time produces, at any sampling
 temperature.
 
@@ -67,8 +68,8 @@ for a config loader, docstrings without code changes, a rewrite from
 `os.path` to `pathlib`, a binary-search bug), approves every tool call, and
 lets a hidden check decide each task. Thinking on (effort low), seed 1, each
 model's general-purpose sampling (temperature 1.0, top-p 0.95 for the 27B;
-0.7, 0.8 for the 4B; `raceline chat` now uses Qwen's coding setting, which
-solves as many). The time is the whole run: prompt processing,
+0.7, 0.8 for the 4B), except the 9B, measured later with the coding setting
+`raceline chat` uses now (0.6, 0.95; it solves as many on the other two). The time is the whole run: prompt processing,
 writing and the tools. Drafting never changes what is written, so the two
 raceline rows of a model wrote the same tokens; mlx-lm runs other 4-bit
 weights, which write other text:
@@ -78,6 +79,9 @@ weights, which write other text:
 | Qwen3.8-27B | mlx-lm, MLX 4-bit weights | 7 of 8 | 19,823 | 8.8 tok/s | 2316 s |
 | | **raceline** | 7 of 8 | 9,038 | **32.1 tok/s** | **317 s** |
 | | raceline, copied drafts off | 7 of 8 | 9,038 | 31.5 tok/s | 322 s |
+| Qwen3.5-9B | mlx-lm, MLX 4-bit weights | 5 of 8 | 13,318 | 27.4 tok/s | 500 s |
+| | **raceline** | 7 of 8 | 11,513 | **99.9 tok/s** | **128 s** |
+| | raceline, copied drafts off | 7 of 8 | 11,513 | 89.9 tok/s | 140 s |
 | Qwen3.5-4B | mlx-lm, MLX 4-bit weights | 4 of 8 | 20,174 | 46.8 tok/s | 443 s |
 | | **raceline** | 5 of 8 | 16,924 | **183.6 tok/s** | **161 s** |
 | | raceline, copied drafts off | 5 of 8 | 16,924 | 150.5 tok/s | 181 s |
@@ -113,6 +117,25 @@ Chat answers, thinking off, three requests of up to 300 tokens
 | temperature 0.7, top-p 0.8, top-k 20 | 8.7 tok/s | **25.4 tok/s** | 9.2 tok/s |
 | temperature 1.0, top-p 0.95, top-k 20 | 8.7 tok/s | **25.9 tok/s** | 9.2 tok/s |
 
+**Qwen3.5-9B.** The same benchmarks:
+
+| Text | Context | Runtime | Prompt processing | Decoding | Memory |
+|---|---|---|---|---|---|
+| standard library | 1,024 tokens | mlx-lm, MLX 4-bit weights | 939 tok/s | 29.0 tok/s | 7.3 GB |
+| | | **raceline** | 933 tok/s | **113.6 tok/s** | 2.1 GB + 4.7 GB file mapped |
+| | | raceline, drafts off | 968 tok/s | 28.3 tok/s | |
+| | 8,192 tokens | mlx-lm, MLX 4-bit weights | 869 tok/s | 26.5 tok/s | 8.6 GB |
+| | | **raceline** | 862 tok/s | **66.4 tok/s** | 2.1 GB + 4.7 GB file mapped |
+| | | raceline, drafts off | 867 tok/s | 26.4 tok/s | |
+| unseen code, 4 stretches | 1,024 tokens | mlx-lm, MLX 4-bit weights | 938 tok/s | 27.9 tok/s | |
+| | | **raceline** | 892 tok/s | **71.4 tok/s** | |
+
+| Sampling | mlx-lm | raceline | raceline, drafts off |
+|---|---|---|---|
+| greedy | 27.8 tok/s | **61.3 tok/s** | 29.0 tok/s |
+| temperature 0.7, top-p 0.8, top-k 20 | 27.6 tok/s | **60.8 tok/s** | 28.6 tok/s |
+| temperature 1.0, top-p 0.95, top-k 20 | 27.8 tok/s | **56.8 tok/s** | 28.6 tok/s |
+
 **Qwen3.5-4B.** The same benchmarks:
 
 | Text | Context | Runtime | Prompt processing | Decoding | Memory |
@@ -134,10 +157,11 @@ Chat answers, thinking off, three requests of up to 300 tokens
 
 How to read this. Without drafts the engine decodes at about MLX's speed, and
 it processes prompts at about MLX's speed with or without them (up to 12%
-slower for the 27B, up to 8% faster for the 4B): there is no advantage there.
-The gain is the drafts, and it depends on how predictable the text is: 3.4x
-to 4.6x for source code and about 3x for prose on the 27B, less on the 4B,
-where a draft costs more relative to a pass. The files measured are the
+slower for the 27B, level for the 9B, up to 8% faster for the 4B): there is
+no advantage there. The gain is the drafts, and it depends on how
+predictable the text is: 3.4x to 4.6x for source code and about 3x for prose
+on the 27B, 2x to 4x on the 9B and the 4B, where a draft costs more relative
+to a pass. The files measured are the
 published ones. Memory is the peak footprint of the process; the model file
 is mapped read-only on top of that and its pages can be dropped and re-read
 by the system.
@@ -180,7 +204,13 @@ machine. The engine is built around getting more than one token out of a pass.
 5. **Nothing is recomputed between turns.** The runtime keeps the model where
    the last request left it and snapshots the recurrent state at the points a
    conversation can branch from, so a follow-up request only processes what
-   is new (2871 of 2912 context tokens reused in the run above).
+   is new (2732 of 2757 context tokens reused in the run above).
+6. **Tools do not copy the engine.** A shell command started the usual way
+   forks the agent's process first, and with the 27B that process maps 14 GB
+   of weights and GPU buffers: the fork takes seconds and the prompt
+   processing after it runs several times slower. The agent starts commands
+   with `posix_spawn`, in a process group of their own; on the agent tasks
+   above that is the difference between 752 and 317 seconds.
 
 MTP speculative decoding is not new on the Mac (llama.cpp and several MLX
 based servers have it). What this project adds is an engine in which the
@@ -202,7 +232,8 @@ raceline chat  qwen3.5-4b     # terminal agent in the current directory
 raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
 raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
 
-raceline pull  qwen3.8-27b    # 13.8 GB; wants a Mac with 24 GB or more
+raceline pull  qwen3.5-9b     # 4.7 GB; fits a 16 GB Mac, and the best agent per second
+raceline pull  qwen3.8-27b    # 13.8 GB: the best; wants a Mac with 24 GB or more
 ```
 
 Without the Xcode command line tools, install the wheel attached to the
@@ -305,6 +336,11 @@ positions (`tools/quantize.py` reports this for every conversion):
 | FP4, GPTQ, not rotated (raceline 0.1.0) | 4.0 | 0.083 | 3.379 | 88.6% |
 | FP4, round to nearest, not rotated | 4.0 | 0.103 | 3.478 | 88.9% |
 
+| Qwen3.5-9B | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
+|---|---|---|---|---|
+| MLX affine 4-bit, groups of 64 | 4.5 | 0.093 | 2.846 | 89.8% |
+| **FP4, GPTQ, rotated (the published file)** | 4.0 | 0.080 | 2.836 | 91.1% |
+
 | Qwen3.8-27B | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
 |---|---|---|---|---|
 | MLX affine 4-bit, groups of 64 | 4.5 | 0.105 | 1.861 | 92.2% |
@@ -312,7 +348,7 @@ positions (`tools/quantize.py` reports this for every conversion):
 | FP4, GPTQ, not rotated (raceline 0.1.0) | 4.0 | 0.152 | 1.999 | 91.5% |
 
 For the 4B model the rotation brings the 4-bit format level with MLX's at 0.5
-bits per weight less. For the 27B it does not: the published file is still
+bits per weight less, and for the 9B ahead of it. For the 27B it does not: the published file is still
 measurably further from the float model than MLX's format, so the speed
 tables compare weights of somewhat different quality there. Measured on what
 the runtimes compute (`bench/kl_compare.py`), the typical position is close
@@ -428,7 +464,9 @@ Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 - One model family: dense Qwen3.5 / Qwen3.8 text models. No MoE variants, no
   vision input.
 - The 27B conversion loses more quality than MLX's 4-bit format does (KL
-  0.148 against 0.105 nats to the float model on held-out text, #15).
+  0.148 against 0.105 nats to the float model on held-out text, #15; a
+  power-of-two scale per 32 weights, which the accelerators could apply, did
+  not help in simulation). The 4B is level with MLX's format and the 9B ahead.
 - Without drafts, decoding is at 70% of the bandwidth ceiling for the 4B
   model and 84% for the 27B: a pass is some 380 to 760 GPU dispatches, many
   of them small kernels.

@@ -10,6 +10,11 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Added
 
+- Qwen3.5-9B: `raceline pull qwen3.5-9b` (4.7 GB, from the `models-v2`
+  release or Hugging Face). It fits a 16 GB Mac; on the agent tasks it solves
+  as many as Qwen3.8-27B (7 of 8) in 128 s instead of 317, and decodes at 57
+  to 114 tok/s where mlx-lm does 27 to 29. `tools/release_model.py --needs`
+  sets the raceline version a model card asks for.
 - Drafts copied from the context. When the last three tokens occurred
   earlier in the context and what followed them there agrees with the draft
   head's first guess, that earlier continuation is drafted instead: the lines

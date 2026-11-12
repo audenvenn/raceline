@@ -19,6 +19,7 @@ import urllib.request
 
 MODELS = {  # alias -> file name in the release
     "qwen3.5-4b": "qwen3.5-4b.rlm",
+    "qwen3.5-9b": "qwen3.5-9b.rlm",
     "qwen3.8-27b": "qwen3.8-27b.rlm",
 }
 SOURCES = {  # where the files of model {alias} are, by source

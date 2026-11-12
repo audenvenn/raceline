@@ -1,0 +1,29 @@
+[
+ {
+  "model": "models/qwen3.5-9b.rlm",
+  "backend": "raceline",
+  "mtp": true,
+  "sampling": "greedy",
+  "tokens": 753,
+  "decode_tps": 61.32763975479673,
+  "drafts_accepted": 0.6563758389261745
+ },
+ {
+  "model": "models/qwen3.5-9b.rlm",
+  "backend": "raceline",
+  "mtp": true,
+  "sampling": "temperature 0.7, top_p 0.8, top_k 20",
+  "tokens": 789,
+  "decode_tps": 60.819491780500684,
+  "drafts_accepted": 0.5776805251641138
+ },
+ {
+  "model": "models/qwen3.5-9b.rlm",
+  "backend": "raceline",
+  "mtp": true,
+  "sampling": "temperature 1.0, top_p 0.95, top_k 20",
+  "tokens": 743,
+  "decode_tps": 56.78631167737499,
+  "drafts_accepted": 0.6217687074829932
+ }
+]

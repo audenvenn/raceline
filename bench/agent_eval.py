@@ -6,7 +6,8 @@ at the same path (so the system prompt and its cached state carry over from
 task to task, as in a session), with every tool call approved. When the agent
 stops, the task's hidden check decides whether it was solved.
 
-Sampling uses the model's defaults with a fixed seed. Drafts never change
+Sampling is what `raceline chat` uses (raceline.cli.agent_sampling) with a
+fixed seed; --temperature and the like override it. Drafts never change
 what is generated, so two runs that differ only in how drafts are made (for
 example RACELINE_LOOKUP=0) write the same tokens, and their times compare
 directly.
@@ -83,12 +84,12 @@ def main():
     from raceline.agent import Agent
     from raceline.backends import load_backend
     from raceline.chat import Runtime
-    from raceline.cli import _defaults
+    from raceline.cli import agent_sampling
 
     warn_if_busy()
     names = args.tasks.split(",") if args.tasks else list(TASKS)
     backend = load_backend(args.model)
-    sampling = _defaults(args.model, backend)
+    sampling = agent_sampling(args.model, backend, not args.no_think)   # what `raceline chat` uses
     sampling.seed = args.seed
     for key in ("temperature", "top_p", "top_k", "presence_penalty"):
         if getattr(args, key) is not None:

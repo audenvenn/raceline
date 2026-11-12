@@ -98,16 +98,20 @@ def _main(argv=None):
     p.add_argument("model", nargs="?", help="optional: a model to measure against the limits")
     p.add_argument("--backend", choices=["mlx", "raceline"])
 
-    p = sub.add_parser("pull", help="download a converted model: " + ", ".join(sorted(__import__("raceline.pull", fromlist=["MODELS"]).MODELS)))
-    p.add_argument("model")
+    models = ", ".join(__import__("raceline.pull", fromlist=["MODELS"]).MODELS)
+    p = sub.add_parser("pull", help="download a converted model: " + models)
+    p.add_argument("model", nargs="?", help=f"one of {models} (none: list them, with how each fits this Mac)")
     p.add_argument("--dest", help="file or directory to save to (default: the raceline cache)")
     p.add_argument("--source", choices=["github", "huggingface"],
                    help="where to download from (default: github, or $RACELINE_SOURCE)")
 
     args = ap.parse_args(argv)
     if args.command == "pull":
-        from .pull import pull
-        pull(args.model, args.dest, args.source)
+        from .pull import list_models, pull
+        if args.model is None:
+            list_models()
+        else:
+            pull(args.model, args.dest, args.source)
         return
     if args.command == "probe":
         from .probe import run

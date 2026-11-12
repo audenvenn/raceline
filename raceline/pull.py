@@ -23,6 +23,12 @@ MODELS = {  # alias -> file name in the release
     "qwen3.8-27b": "qwen3.8-27b.rlm",
     "qwen3.5-35b-a3b": "qwen3.5-35b-a3b.rlm",
 }
+CATALOG = {  # alias -> (file size, bytes of it that are experts and may stay on disk, what it is); `raceline pull` lists it
+    "qwen3.5-4b": (2.5e9, 0, "small and quick"),
+    "qwen3.5-9b": (4.7e9, 0, "the best agent per second; fits a 16 GB Mac"),
+    "qwen3.8-27b": (13.8e9, 0, "dense, the strongest of the dense ones; wants 24 GB or more"),
+    "qwen3.5-35b-a3b": (18.3e9, 16.3e9, "mixture of experts, 3B active: its experts can stay on the SSD"),
+}
 SOURCES = {  # where the files of model {alias} are, by source
     "github": "https://github.com/audenvenn/raceline/releases/download/models-v2",
     "huggingface": "https://huggingface.co/audenvenn/raceline-{alias}/resolve/main",
@@ -55,6 +61,21 @@ def default_model():
     d = models_dir()
     found = sorted(f for f in os.listdir(d) if f.endswith(".rlm")) if os.path.isdir(d) else []
     return os.path.join(d, found[0]) if len(found) == 1 else None
+
+
+def list_models() -> None:
+    """What `raceline pull` can fetch, and how each one fits this Mac."""
+    ram = _memory_bytes()
+    print(f"Models{f' (this Mac has {ram / 2**30:.0f} GB of memory)' if ram else ''}:")
+    for alias, (size, experts, what) in CATALOG.items():
+        here = os.path.isfile(os.path.join(models_dir(), MODELS[alias]))
+        fit = ""
+        if ram and size - experts > 0.7 * ram:
+            fit = "  [too large for this Mac]"
+        elif ram and experts and size > 0.7 * ram:
+            fit = "  [experts partly on the SSD here]"
+        print(f"  {alias:18s} {size / 1e9:5.1f} GB  {what}{fit}{'  (downloaded)' if here else ''}")
+    print("raceline pull <model> downloads one, from GitHub (--source huggingface: from Hugging Face).")
 
 
 def _memory_bytes() -> int:

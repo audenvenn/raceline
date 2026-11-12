@@ -8,6 +8,11 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Added
+
+- `raceline pull` without a model lists the models it can fetch, their
+  sizes, and how each fits this Mac's memory.
+
 ### Fixed
 
 - On a new install, `raceline chat` and `serve` started with transformers'

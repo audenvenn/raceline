@@ -195,6 +195,11 @@ struct Engine::ExpertCache {
 
 Engine::~Engine() = default;
 
+Engine::ExpertStats Engine::expert_stats() const {
+  if (!cache_) return {0, 0, 0};
+  return {cache_->slots, cache_->hits, cache_->loads};
+}
+
 Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     : model_(new ModelFile(mt_, model_path, false)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
   const Config &c = config();

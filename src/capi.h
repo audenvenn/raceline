@@ -50,6 +50,9 @@ void rl_set_draft_vocab(rl_engine *e, int rows);
 // vocabulary to every draft (-1: none). Draft logits are then rl_draft_main()
 // entries for ids 0.., followed by entries for ids rl_draft_tail()...
 void rl_set_draft_tail(rl_engine *e, int first);
+// Mixture of experts on disk: slots in the expert cache (0: all experts in
+// memory) and, since the engine opened, routed experts found loaded / read.
+int rl_expert_cache(const rl_engine *e, unsigned long long *hits, unsigned long long *loads);
 int rl_draft_main(const rl_engine *e);
 int rl_draft_tail(const rl_engine *e);
 int rl_draft_vocab(const rl_engine *e);

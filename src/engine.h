@@ -36,6 +36,15 @@ class Engine {
   // GPU seconds spent in the last forward().
   double last_gpu_seconds() const { return gpu_seconds_; }
 
+  // Mixture of experts on disk (RACELINE_EXPERT_CACHE): slots in the cache, and
+  // since the engine opened how many routed experts a layer found loaded and how
+  // many it had to read. slots == 0: the experts are all in memory.
+  struct ExpertStats {
+    int slots;
+    uint64_t hits, loads;
+  };
+  ExpertStats expert_stats() const;
+
   // The recurrent layers' state (conv window and DeltaNet matrices), which is
   // all that is needed to return to an earlier position: attention entries
   // past that position are overwritten as new tokens arrive. A state saved at

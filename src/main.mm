@@ -204,6 +204,11 @@ int main(int argc, char **argv) {
       dt = now() - t0;
       printf("%s decode:  %d tokens in %.3fs = %.1f tok/s (GPU time %.3fs = %.1f tok/s; %d passes)\n",
              rep ? "warm" : "cold", n_gen, dt, n_gen / dt, gpu, n_gen / gpu, passes);
+      if (rep && e.expert_stats().slots) {
+        const auto st = e.expert_stats();
+        printf("expert cache: %d slots, %.1f%% of routed experts found loaded (%llu read from disk)\n", st.slots,
+               100.0 * st.hits / std::max<uint64_t>(1, st.hits + st.loads), (unsigned long long)st.loads);
+      }
       if (rep) {
         printf("tokens:");
         for (size_t i = 0; i < out.size() && i < 24; i++) printf(" %d", out[i]);

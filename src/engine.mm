@@ -107,7 +107,7 @@ struct Engine::ExpertCache {
   // through prev/next with a sentinel at index `slots` (pinned slots are not in it).
   std::vector<int> prev, next;
   int next_free = 0;
-  uint64_t loads = 0, hits = 0;
+  std::atomic<uint64_t> loads{0}, hits{0};   // read by expert_stats() on another thread
   id<MTLSharedEvent> ev;
   uint64_t value = 0;
   std::thread worker;
@@ -252,14 +252,14 @@ struct Engine::ExpertCache {
   }
 
   ~ExpertCache() {
-    if (fd >= 0) close(fd);
-    if (trace) fclose(trace);
     {
       std::lock_guard<std::mutex> lock(mu);
       stop = true;
     }
     cv.notify_one();
-    if (worker.joinable()) worker.join();
+    if (worker.joinable()) worker.join();   // before the file it reads from is closed
+    if (fd >= 0) close(fd);
+    if (trace) fclose(trace);
   }
 };
 

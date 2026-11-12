@@ -56,7 +56,7 @@ class Engine {
   //   forward_draft({next, d[0], ..., d[k-1]})      // logits(r): after row r
   //   a = 0; while (a < k && pick(logits(a)) == d[a]) a++;
   //   next = pick(logits(a)); keep_drafts(a);       // rows after the a-th draft are taken back
-  static constexpr int kMaxDrafts = 7;
+  static constexpr int kMaxDrafts = 15;
   bool has_mtp() const { return has_mtp_; }
   // On by default when the file has a head. Only at position 0. When on, every
   // forward also runs the head over the new positions (one extra layer).
@@ -72,7 +72,15 @@ class Engine {
   // most of what a draft costs. A token outside the range is simply never
   // drafted. draft_logits / draft_more then return that many logits.
   void set_draft_vocab(int rows);
-  int draft_vocab() const;
+  // The chat template's special tokens sit at the top of the id range, outside
+  // any such restriction. set_draft_tail(first) appends the rows from the block
+  // of 256 holding token `first` to the end of the vocabulary to every draft's
+  // pass (-1: none): a draft call then returns draft_main() logits for ids
+  // 0.. followed by the appended rows, from id draft_tail() on.
+  void set_draft_tail(int first);
+  int draft_vocab() const;   // logits a draft call returns
+  int draft_main() const;    // of which the first draft_main() are for ids 0 ..
+  int draft_tail() const;    // and the rest for ids draft_tail() .. (-1: no rest)
   // Feeds tokens[0] and, speculatively, tokens[1..n-1] (n <= kMaxDrafts + 1).
   const float *forward_draft(const int32_t *tokens, int n);
   // Keeps the first `accepted` drafts of the last forward_draft and takes the
@@ -183,6 +191,7 @@ class Engine {
   int mtp_pos_ = 0;
   int draft_next_ = -1, draft_rows_ = 0, draft_depth_ = 0;  // the draft_logits / draft_more chain in progress
   int draft_vocab_ = 0;               // rows of the output matrix a draft looks at (0 = all)
+  int draft_tail_ = -1;               // first row of the block of rows appended to them (-1 = none)
   std::vector<int32_t> pend_tok_;
   id<MTLBuffer> mtp_h_ = nil, mtp_out_ = nil, mtp_tok_ = nil, mtp_rope_ = nil, mtp_logits_ = nil;
   id<MTLBuffer> mtp_norm_e_ = nil, mtp_norm_h_ = nil, mtp_norm_out_ = nil;

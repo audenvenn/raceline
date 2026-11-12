@@ -33,12 +33,15 @@ a stale binary and new kernel sources disagree silently and give wrong results.
 
 | What | Needs | Command |
 |---|---|---|
-| Runtime logic: sessions, snapshots, tool-call parsing, sampler, conversion resume | nothing | `python tests/test_runtime.py` |
+| Runtime logic: sessions, snapshots, tool-call parsing, sampler, copied drafts, conversion resume | nothing | `python tests/test_runtime.py` |
+| The OpenAI-compatible server | nothing | `python tests/test_server.py` |
+| The agent tasks fail as handed out and pass when solved | nothing | `python tests/test_agent_tasks.py` |
 | Linear kernels against a CPU reference | GPU | `build/cmake/test_linear` |
 | Speculative decoding is bit-exact | GPU, a model with an MTP head | `python tests/verify_spec.py <model.rlm> <tokens.i32>` |
-| Plain against 1 to 7 drafts per pass | GPU, model | `build/cmake/raceline-engine spec <model.rlm> <tokens.i32> --drafts 1 2 3 4 5 6 7` |
+| Plain against 1 to 15 drafts per pass | GPU, model | `build/cmake/raceline-engine spec <model.rlm> <tokens.i32> --drafts 1 2 4 7 11 15` |
 | Engine against MLX on the same weights | GPU, model, the original checkpoint | `python tests/verify_native.py`, `python tests/verify_mtp.py` |
 | Speed | idle GPU, model, an MLX conversion as the baseline | `bench/agent_bench.py`, `bench/chat_bench.py` |
+| The agent end to end: tasks solved, time, drafts | idle GPU, model | `bench/agent_eval.py <model>` |
 
 Token files are raw little-endian int32. `tools/make_tokens.py <model.rlm>
 README.md tokens.i32 --count 96` makes one from any text; 96 tokens are enough

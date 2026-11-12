@@ -55,6 +55,13 @@ def default_model():
     return os.path.join(d, found[0]) if len(found) == 1 else None
 
 
+def _memory_bytes() -> int:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (OSError, ValueError, AttributeError):
+        return 0
+
+
 def _open(url: str):
     return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "raceline"}), timeout=60)
 
@@ -86,6 +93,10 @@ def pull(model: str, dest: str | None = None, source: str | None = None) -> str:
     total, got = manifest["size"], sum(p["size"] for i, p in enumerate(manifest["parts"]) if i in done)
     print(f"{manifest['name']}: {total / 1e9:.2f} GB in {len(manifest['parts'])} parts"
           + (f", {got / 1e9:.2f} GB already here" if got else ""))
+    ram = _memory_bytes()
+    if ram and total > 0.7 * ram:
+        print(f"  note: this Mac has {ram / 2**30:.0f} GB of memory; a {total / 1e9:.1f} GB model leaves too little "
+              "for the system and the context, so it will page from disk and run far below its speed")
     t0, fresh = time.time(), 0
     with open(partial, "r+b" if os.path.isfile(partial) else "w+b") as f:
         offset = 0

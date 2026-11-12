@@ -5,7 +5,7 @@
   "mtp": false,
   "sampling": "greedy",
   "tokens": 790,
-  "decode_tps": 9.807061448932199,
+  "decode_tps": 9.214882235429782,
   "drafts_accepted": null
  },
  {
@@ -14,7 +14,7 @@
   "mtp": false,
   "sampling": "temperature 0.7, top_p 0.8, top_k 20",
   "tokens": 790,
-  "decode_tps": 9.713496471614292,
+  "decode_tps": 9.152282027179805,
   "drafts_accepted": null
  },
  {
@@ -23,7 +23,7 @@
   "mtp": false,
   "sampling": "temperature 1.0, top_p 0.95, top_k 20",
   "tokens": 781,
-  "decode_tps": 9.737340133039336,
+  "decode_tps": 9.167155321664593,
   "drafts_accepted": null
  }
 ]

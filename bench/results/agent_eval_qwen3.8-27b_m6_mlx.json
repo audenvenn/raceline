@@ -1,0 +1,106 @@
+{
+ "model": "models/Qwen3.8-27B-4bit",
+ "backend": "mlx",
+ "sampling": {
+  "temperature": 1.0,
+  "top_p": 0.95,
+  "top_k": 20,
+  "min_p": 0.0,
+  "repetition_penalty": 1.0,
+  "presence_penalty": 0.0,
+  "seed": 1
+ },
+ "thinking": true,
+ "effort": "low",
+ "lookup": null,
+ "tasks": [
+  {
+   "task": "inventory",
+   "solved": true,
+   "why": "",
+   "steps": 8,
+   "seconds": 144.38018612499582,
+   "completion_tokens": 1142,
+   "decode_seconds": 131.63222937297542,
+   "prefill_seconds": 12.66035666508833,
+   "context_tokens": 3171
+  },
+  {
+   "task": "rename",
+   "solved": true,
+   "why": "",
+   "steps": 6,
+   "seconds": 125.10157462500501,
+   "completion_tokens": 1042,
+   "decode_seconds": 120.28289170801872,
+   "prefill_seconds": 4.730738001933787,
+   "context_tokens": 2921
+  },
+  {
+   "task": "slugify",
+   "solved": false,
+   "why": "AssertionError: (('one two three', 7), 'one', 'one-two')",
+   "steps": 7,
+   "seconds": 386.51559870899655,
+   "completion_tokens": 3293,
+   "decode_seconds": 381.03040491603315,
+   "prefill_seconds": 5.323038499976974,
+   "context_tokens": 5115
+  },
+  {
+   "task": "cli-flag",
+   "solved": true,
+   "why": "",
+   "steps": 5,
+   "seconds": 100.54188787500607,
+   "completion_tokens": 849,
+   "decode_seconds": 97.40817825088743,
+   "prefill_seconds": 2.9984303330420516,
+   "context_tokens": 2253
+  },
+  {
+   "task": "config-defaults",
+   "solved": true,
+   "why": "",
+   "steps": 5,
+   "seconds": 73.84043804201065,
+   "completion_tokens": 619,
+   "decode_seconds": 70.67566141614225,
+   "prefill_seconds": 3.1248211660422385,
+   "context_tokens": 2166
+  },
+  {
+   "task": "docstrings",
+   "solved": true,
+   "why": "",
+   "steps": 5,
+   "seconds": 150.90417466702638,
+   "completion_tokens": 1351,
+   "decode_seconds": 147.12076129205525,
+   "prefill_seconds": 3.702952458988875,
+   "context_tokens": 2970
+  },
+  {
+   "task": "pathlib",
+   "solved": true,
+   "why": "",
+   "steps": 7,
+   "seconds": 1070.661933666037,
+   "completion_tokens": 9274,
+   "decode_seconds": 1047.3511253329343,
+   "prefill_seconds": 23.03746112488443,
+   "context_tokens": 11058
+  },
+  {
+   "task": "bisect",
+   "solved": true,
+   "why": "",
+   "steps": 5,
+   "seconds": 263.9693525410257,
+   "completion_tokens": 2253,
+   "decode_seconds": 260.0641910840641,
+   "prefill_seconds": 3.798489793029148,
+   "context_tokens": 3842
+  }
+ ]
+}

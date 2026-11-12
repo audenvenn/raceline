@@ -3,11 +3,13 @@
   "model": "models/qwen3.5-4b.rot.rlm",
   "backend": "raceline",
   "mtp": true,
-  "load_s": 0.8783703339868225,
+  "load_s": 0.8750149170518853,
   "prompt_tokens": 1024,
-  "gen_tokens": 256,
-  "prefill_tps": 1914.9527518795314,
-  "decode_tps": 161.6273857392552,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 1790.3533785652376,
+  "decode_tps": 178.17098108478154,
   "tokens": [
    318,
    17,
@@ -26,18 +28,20 @@
    681,
    198
   ],
-  "drafts_accepted": 0.9227272727272727,
-  "peak_gb": 2.022083152
+  "drafts_accepted": 0.4811320754716981,
+  "peak_gb": 2.037926528
  },
  {
   "model": "models/Qwen3.5-4B-MLX-4bit",
   "backend": "mlx",
   "mtp": false,
-  "load_s": 1.2628236659802496,
+  "load_s": 1.3309162500081584,
   "prompt_tokens": 1024,
-  "gen_tokens": 256,
-  "prefill_tps": 1770.6900222295803,
-  "decode_tps": 53.72976807266392,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 1663.9926488351734,
+  "decode_tps": 50.27982063559544,
   "tokens": [
    318,
    17,
@@ -56,17 +60,19 @@
    681,
    198
   ],
-  "peak_gb": 4.676373384
+  "peak_gb": 4.681223072
  },
  {
   "model": "models/qwen3.5-4b.rot.rlm",
   "backend": "raceline",
   "mtp": true,
-  "load_s": 0.5674681250238791,
+  "load_s": 0.5568045420222916,
   "prompt_tokens": 8192,
-  "gen_tokens": 256,
-  "prefill_tps": 1688.8209168052151,
-  "decode_tps": 111.04640031487808,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 1543.8980759616245,
+  "decode_tps": 114.03603981137115,
   "tokens": [
    198,
    262,
@@ -85,18 +91,20 @@
    271,
    262
   ],
-  "drafts_accepted": 0.7676348547717843,
-  "peak_gb": 2.02440968
+  "drafts_accepted": 0.5476190476190477,
+  "peak_gb": 2.041023056
  },
  {
   "model": "models/Qwen3.5-4B-MLX-4bit",
   "backend": "mlx",
   "mtp": false,
-  "load_s": 0.960552665987052,
+  "load_s": 0.9855227500083856,
   "prompt_tokens": 8192,
-  "gen_tokens": 256,
-  "prefill_tps": 1648.0748861849083,
-  "decode_tps": 49.227526055594396,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 1554.125375718817,
+  "decode_tps": 45.932292546889876,
   "tokens": [
    198,
    262,
@@ -115,6 +123,6 @@
    1067,
    1267
   ],
-  "peak_gb": 6.03917812
+  "peak_gb": 6.034590648
  }
 ]

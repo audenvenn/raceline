@@ -702,16 +702,37 @@ void Engine::encode_mtp_layer(int M, int pos0, bool logits) {
     }
     QTensor head = model_->q("lm_head");
     const int stride = head.n_pad;
-    head.n_pad = draft_vocab();
+    head.n_pad = draft_main();
     encode_linear(head, 1, mtp_logits_, 0, stride, false, "linear:mtp_head");
+    if (draft_tail() >= 0) {  // the appended rows: the same matrix from a later block on
+      QTensor tail = model_->q("lm_head");
+      const int r0 = draft_tail();
+      tail.w += (size_t)(r0 / 256) * (size_t)tail.k * 128;
+      tail.s += (size_t)r0 * sizeof(float);
+      tail.n_pad = stride - r0;
+      encode_linear(tail, 1, mtp_logits_, (size_t)head.n_pad * sizeof(float), stride, false, "linear:mtp_head");
+    }
   }
 }
 
 void Engine::set_draft_vocab(int rows) { draft_vocab_ = rows <= 0 ? 0 : (rows + 255) / 256 * 256; }
 
-int Engine::draft_vocab() const {
+void Engine::set_draft_tail(int first) { draft_tail_ = first < 0 ? -1 : first / 256 * 256; }
+
+int Engine::draft_main() const {
   const int all = model_->q("lm_head").n_pad;
   return draft_vocab_ > 0 ? std::min(draft_vocab_, all) : all;
+}
+
+int Engine::draft_tail() const {
+  const QTensor &head = model_->q("lm_head");
+  if (draft_tail_ < 0 || draft_tail_ <= draft_main() || draft_tail_ >= head.n_pad || !head.native) return -1;
+  return draft_tail_;
+}
+
+int Engine::draft_vocab() const {
+  const int tail = draft_tail();
+  return draft_main() + (tail < 0 ? 0 : model_->q("lm_head").n_pad - tail);
 }
 
 void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {

@@ -17,8 +17,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import time
+
+from .sysinfo import sysctl_int, sysctl_str
 
 GB = 1e9
 
@@ -50,18 +53,13 @@ def _best(fn, reps=6, warmup=2) -> float:
     return best
 
 
-def _sysctl(name: str) -> str:
-    try:
-        return subprocess.run(["sysctl", "-n", name], capture_output=True, text=True).stdout.strip()
-    except OSError:
-        return ""
 
 
 def machine() -> dict:
-    info = dict(chip=_sysctl("machdep.cpu.brand_string") or "Apple Silicon",
-                ram_gb=int(_sysctl("hw.memsize") or 0) / 2**30,
-                cores=[int(c) for c in (_sysctl(f"hw.perflevel{i}.physicalcpu") for i in range(3)) if c.isdigit()],
-                os=subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip())
+    info = dict(chip=sysctl_str("machdep.cpu.brand_string") or "Apple Silicon",
+                ram_gb=sysctl_int("hw.memsize") / 2**30,
+                cores=[c for c in (sysctl_int(f"hw.perflevel{i}.physicalcpu") for i in range(3)) if c],
+                os=platform.mac_ver()[0])
     try:
         sp = json.loads(subprocess.run(["system_profiler", "SPDisplaysDataType", "-json"], capture_output=True,
                                        text=True, timeout=20).stdout)

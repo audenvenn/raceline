@@ -38,6 +38,16 @@ def _runtime(args):
 
 
 def main(argv=None):
+    try:
+        return _main(argv)
+    except RuntimeError as e:      # a problem with the setup, not a bug: no traceback
+        if os.environ.get("RACELINE_DEBUG"):
+            raise
+        print(f"raceline: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _main(argv=None):
     ap = argparse.ArgumentParser(prog="raceline", description="A local agent runtime for Apple Silicon.")
     sub = ap.add_subparsers(dest="command", required=True)
 

@@ -1,0 +1,106 @@
+{
+ "model": "models/Qwen3.5-4B-MLX-4bit",
+ "backend": "mlx",
+ "sampling": {
+  "temperature": 0.7,
+  "top_p": 0.8,
+  "top_k": 20,
+  "min_p": 0.0,
+  "repetition_penalty": 1.0,
+  "presence_penalty": 0.0,
+  "seed": 1
+ },
+ "thinking": true,
+ "effort": "low",
+ "lookup": null,
+ "tasks": [
+  {
+   "task": "inventory",
+   "solved": true,
+   "why": "",
+   "steps": 10,
+   "seconds": 27.830790500040166,
+   "completion_tokens": 1208,
+   "decode_seconds": 25.687182086054236,
+   "prefill_seconds": 1.9970254180952907,
+   "context_tokens": 3289
+  },
+  {
+   "task": "rename",
+   "solved": true,
+   "why": "",
+   "steps": 10,
+   "seconds": 27.81595112499781,
+   "completion_tokens": 1271,
+   "decode_seconds": 26.504100540070795,
+   "prefill_seconds": 1.2215828750631772,
+   "context_tokens": 3033
+  },
+  {
+   "task": "slugify",
+   "solved": false,
+   "why": "AssertionError: (('one two three', 7), 'one', 'one-two')",
+   "steps": 16,
+   "seconds": 208.17823083302937,
+   "completion_tokens": 9363,
+   "decode_seconds": 204.5535295010195,
+   "prefill_seconds": 3.168251212046016,
+   "context_tokens": 12867
+  },
+  {
+   "task": "cli-flag",
+   "solved": true,
+   "why": "",
+   "steps": 10,
+   "seconds": 29.109274207963608,
+   "completion_tokens": 1355,
+   "decode_seconds": 27.82280925195664,
+   "prefill_seconds": 1.2174842500826344,
+   "context_tokens": 3142
+  },
+  {
+   "task": "config-defaults",
+   "solved": false,
+   "why": "KeyError: 'name'",
+   "steps": 4,
+   "seconds": 13.356696707953233,
+   "completion_tokens": 627,
+   "decode_seconds": 12.806564083963167,
+   "prefill_seconds": 0.5442992510506883,
+   "context_tokens": 2069
+  },
+  {
+   "task": "docstrings",
+   "solved": true,
+   "why": "",
+   "steps": 9,
+   "seconds": 30.816656499984674,
+   "completion_tokens": 1413,
+   "decode_seconds": 29.459014749969356,
+   "prefill_seconds": 1.3082825840101577,
+   "context_tokens": 3403
+  },
+  {
+   "task": "pathlib",
+   "solved": false,
+   "why": "AssertionError",
+   "steps": 3,
+   "seconds": 14.680067582987249,
+   "completion_tokens": 681,
+   "decode_seconds": 14.109009706939105,
+   "prefill_seconds": 0.5579359160037711,
+   "context_tokens": 2305
+  },
+  {
+   "task": "bisect",
+   "solved": false,
+   "why": "AssertionError",
+   "steps": 4,
+   "seconds": 90.71870745898923,
+   "completion_tokens": 4256,
+   "decode_seconds": 90.08062254206743,
+   "prefill_seconds": 0.6232484159991145,
+   "context_tokens": 1854
+  }
+ ]
+}

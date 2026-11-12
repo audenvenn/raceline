@@ -33,11 +33,20 @@ MODES = [
 ]
 
 
+def warn_if_busy():
+    """Speed numbers taken next to other work are worthless: say so up front."""
+    load = os.getloadavg()[0]
+    if load > 3:
+        print(f"warning: the load average is {load:.1f}; other processes are using the machine and the "
+              "numbers will be low (`ps -Ao pid,%cpu,command -r | head`)", file=sys.stderr, flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("model")
     ap.add_argument("--json", help="also write the results to this file")
     args = ap.parse_args()
+    warn_if_busy()
     backend = load_backend(args.model)
     results = []
     rt = Runtime(backend, Sampling(temperature=0.0))

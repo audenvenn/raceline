@@ -34,6 +34,8 @@ def normalize_messages(messages: list) -> list:
     out = []
     for m in messages:
         m = dict(m)
+        if m.get("role") == "developer":   # OpenAI's newer name for system instructions
+            m["role"] = "system"
         content = m.get("content")
         if isinstance(content, list):  # text parts only
             if any(p.get("type") not in ("text", None) for p in content if isinstance(p, dict)):
@@ -235,6 +237,8 @@ class Runtime:
         drafts = {k: v - counters[k] for k, v in getattr(self.backend, "counters", {}).items() if k != "passes"}
         yield ("done", dict(
             **({"drafts": drafts["drafts"], "drafts_accepted": drafts["accepted"]} if drafts.get("drafts") else {}),
+            **({"copied_drafts": drafts["lookup_drafts"], "copied_drafts_accepted": drafts["lookup_accepted"]}
+               if drafts.get("lookup_drafts") else {}),
             finish_reason=finish, prompt_tokens=usage["prompt_tokens"], cached_tokens=usage["cached_tokens"],
             completion_tokens=n_out, prefill_seconds=t_prefill, decode_seconds=t_decode,
             time_to_first_token=t_first if t_first is not None else t_prefill,

@@ -150,6 +150,89 @@ def test_sampler_matches_its_distribution_and_couples():
     apart = np.mean([_sample(z, s, [], 11, pos) == _sample(z2, s, [], 12, pos) for pos in range(4000)])
     assert same > 0.8 and same > apart + 0.3, (same, apart)
     assert _sample(z, Sampling(temperature=0.0), [], 0, 0) == int(np.argmax(z))
+    # A draft's restricted vocabulary (ids 0..99, then 1000 on) draws exactly what the
+    # whole vocabulary would where the ids left out have no mass, penalties included,
+    # also for recent tokens it does not cover.
+    full = (rng.normal(size=1256) * 2).astype(np.float32)
+    full[100:1000] = -1e30
+    part = np.concatenate([full[:100], full[1000:]])
+    for s3 in (Sampling(temperature=0.9, top_p=0.95, top_k=20, presence_penalty=1.5), Sampling(temperature=0.0)):
+        for pos in range(300):
+            recent = [7, 500, 1100, int(np.argmax(full))]
+            want = _sample(full, s3, recent, 5, pos, with_probability=True)
+            got = _sample(part, s3, recent, 5, pos, with_probability=True, tail=(100, 1000))
+            assert got[0] == want[0] and abs(got[1] - want[1]) < 1e-9, (pos, got, want)
+    assert _sample(z[:2000], Sampling(presence_penalty=1.0), [248045, 3], 0, 0) < 2000   # ids past the end: no crash
+
+
+def test_lookup_proposes_what_followed_the_last_occurrence():
+    from raceline.engine import _Lookup
+
+    #        0  1  2  3  4  5  6  7  8  9 10 11
+    ctx = [5, 1, 2, 3, 4, 9, 1, 2, 3, 7, 8, 1]
+    look = _Lookup(ctx)
+    # (1, 2) then 3 last occurred at 6..8, followed by 7, 8, 1.
+    look.push(2)
+    assert look.propose(3, 8) == [7, 8, 1, 2]
+    assert look.propose(3, 2) == [7, 8]
+    assert look.propose(6, 8) == []                  # (1, 2, 6) never occurred
+    # Tokens pushed during generation are found too, and the newest occurrence wins.
+    for t in (3, 6, 6, 1, 2):
+        look.push(t)
+    assert look.propose(3, 3) == [6, 6, 1]
+    assert _Lookup([1]).propose(2, 4) == [] and look.propose(3, 0) == []
+
+
+def test_command_timeout_kills_what_it_started():
+    """A shell command that times out must not leave its children running (a
+    test stuck in a loop kept burning a CPU core for hours before this)."""
+    import tempfile
+    import time
+
+    from raceline.agent import run_command
+
+    d = tempfile.mkdtemp()
+    pid_file = os.path.join(d, "pid")
+    child = f"import os, time; open({pid_file!r}, 'w').write(str(os.getpid())); time.sleep(600)"
+    t0 = time.time()
+    assert run_command(f"{sys.executable} -c \"{child}\"; true", d, 1.5) is None   # the shell stays the parent
+    assert time.time() - t0 < 10
+    pid = int(open(pid_file).read())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError(f"process {pid} outlived the timeout")
+    r = run_command("echo hi; exit 3", d, 10)
+    assert r.returncode == 3 and r.stdout == "hi\n"
+
+
+def test_unsupported_macs_are_told_why():
+    import platform
+
+    import raceline.engine as eng
+    import raceline.sysinfo as si
+
+    saved = (si.sysctl_str, platform.mac_ver, platform.system, platform.machine, os.environ.pop("RACELINE_ANY_GPU", None))
+    try:
+        platform.system, platform.machine = (lambda: "Darwin"), (lambda: "arm64")
+        platform.mac_ver = lambda: ("27.1", ("", "", ""), "arm64")
+        si.sysctl_str = lambda name: "Apple M3 Max"
+        assert "M5 or later" in eng.unsupported_reason() and "M3 Max" in eng.unsupported_reason()
+        si.sysctl_str = lambda name: "Apple M6 Pro"
+        assert eng.unsupported_reason() is None
+        platform.mac_ver = lambda: ("26.4", ("", "", ""), "arm64")
+        assert "macOS 27" in eng.unsupported_reason()
+        os.environ["RACELINE_ANY_GPU"] = "1"
+        assert eng.unsupported_reason() is None
+    finally:
+        si.sysctl_str, platform.mac_ver, platform.system, platform.machine = saved[:4]
+        os.environ.pop("RACELINE_ANY_GPU", None)
+        if saved[4] is not None:
+            os.environ["RACELINE_ANY_GPU"] = saved[4]
 
 
 def test_layout_replay_matches_the_writer():

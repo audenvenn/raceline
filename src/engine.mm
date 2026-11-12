@@ -13,6 +13,8 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <pthread.h>
+#include <sys/qos.h>
 #include <thread>
 
 namespace rl {
@@ -132,6 +134,8 @@ struct Engine::ExpertCache {
   }
 
   void run() {
+    // The GPU waits on this thread once per MoE layer: keep it on a performance core.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     for (;;) {
       Request r;
       {

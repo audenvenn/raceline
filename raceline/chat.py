@@ -39,12 +39,18 @@ class ContextFull(ValueError):
 
 
 def normalize_messages(messages: list) -> list:
-    """OpenAI-style messages -> what the chat template expects."""
+    """OpenAI-style messages -> what the chat template expects.
+
+    The Qwen templates take one system message, first. Several at the start
+    are joined; one that comes later in the conversation (clients insert
+    them, such as reminders) becomes a user message at that point."""
     out = []
     for m in messages:
         m = dict(m)
         if m.get("role") == "developer":   # OpenAI's newer name for system instructions
             m["role"] = "system"
+        if m.get("role") == "system" and any(x["role"] != "system" for x in out):
+            m["role"] = "user"
         content = m.get("content")
         if isinstance(content, list):  # text parts only
             if any(p.get("type") not in ("text", None) for p in content if isinstance(p, dict)):
@@ -66,6 +72,9 @@ def normalize_messages(messages: list) -> list:
             m["tool_calls"] = calls
         else:
             m.pop("tool_calls", None)
+        if m["role"] == "system" and out:    # only system messages so far: one system prompt
+            out[0]["content"] = (out[0]["content"] + "\n\n" + m["content"]).strip("\n")
+            continue
         out.append(m)
     return out
 

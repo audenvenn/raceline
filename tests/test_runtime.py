@@ -145,6 +145,13 @@ def test_tool_call_parsing_uses_the_schema_for_types():
         {"name": "f", "arguments": {"n": 7}}]
 
 
+def test_system_messages_fit_the_template():
+    msgs = normalize_messages([{"role": "system", "content": "A."}, {"role": "developer", "content": "B."},
+                               {"role": "user", "content": "hi"}, {"role": "system", "content": "Reminder."}])
+    assert [(m["role"], m["content"]) for m in msgs] == [("system", "A.\n\nB."), ("user", "hi"),
+                                                         ("user", "Reminder.")]
+
+
 def test_messages_are_normalized_for_the_template():
     msgs = normalize_messages([
         {"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]},

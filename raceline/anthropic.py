@@ -13,7 +13,8 @@ Mapping:
 - `thinking: {"type": "enabled" | "adaptive"}` turns the model's reasoning on;
   without it the model answers directly, as the API specifies.
 - tool_result blocks become tool messages; thinking blocks of earlier replies
-  become their reasoning. Images and documents are replaced by a note: the
+  become their reasoning; a system message inside the conversation becomes a
+  user message there (the Qwen templates take one system prompt, first). Images and documents are replaced by a note: the
   model runs without vision input (#28).
 - usage: `input_tokens` counts what was processed, `cache_read_input_tokens`
   what the session reused.
@@ -52,10 +53,10 @@ def to_runtime(body: dict) -> dict:
         messages.append({"role": "system", "content": _text(body["system"])})
     for m in body.get("messages") or []:
         role, content = m.get("role"), m.get("content")
-        if role not in ("user", "assistant"):
+        if role not in ("user", "assistant", "system"):
             raise ValueError(f"unknown role '{role}'")
-        if isinstance(content, str):
-            messages.append({"role": role, "content": content})
+        if isinstance(content, str) or role == "system":   # system: instructions inserted by the client
+            messages.append({"role": role, "content": _text(content)})
             continue
         if role == "user":
             text = []

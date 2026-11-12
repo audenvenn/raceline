@@ -214,6 +214,9 @@ def test_anthropic_request_becomes_runtime_messages():
     assert [t["function"]["name"] for t in args["tools"]] == ["read_file"]    # the server tool is left out
     assert args["thinking"] and args["stop"] == ["END"]
     assert to_runtime(dict(ANTHROPIC_REQUEST, thinking=None, tool_choice={"type": "none"}))["tools"] is None
+    inserted = dict(ANTHROPIC_REQUEST, messages=ANTHROPIC_REQUEST["messages"] + [
+        {"role": "system", "content": [{"type": "text", "text": "Be careful."}]}])
+    assert to_runtime(inserted)["messages"][-1] == {"role": "system", "content": "Be careful."}
 
 
 def test_anthropic_message_with_thinking_text_and_tool_use():

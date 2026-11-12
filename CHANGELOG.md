@@ -31,10 +31,6 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   `bench/expert_cache_sim.py` replays routing traces
   (`RACELINE_EXPERT_TRACE`) to compare replacement policies.
 
-- The converter quantizes each expert's down projection with GPTQ on that
-  expert's own inputs (they differ per expert, so one Hessian does not
-  apply).
-
 - Draft counts follow what a row of the verifying pass costs, measured
   (a least-squares line through rows and GPU time of recent passes): free
   on a dense model, not in a mixture of experts.

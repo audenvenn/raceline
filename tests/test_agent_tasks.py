@@ -204,6 +204,41 @@ def test_checks_fail_as_handed_out_and_pass_when_solved():
         assert solved, f"{name}: the reference solution fails its check: {why}"
 
 
+def test_write_tests_accepts_unittest_methods():
+    """Tests written as a unittest.TestCase count as test functions too (the agents mostly write them so)."""
+    unittest_style = '''import unittest
+
+from durations import parse_duration
+
+
+class TestParseDuration(unittest.TestCase):
+    def test_units(self):
+        self.assertEqual(parse_duration("2h"), 7200)
+        self.assertEqual(parse_duration("3m"), 180)
+        self.assertEqual(parse_duration("45s"), 45)
+
+    def test_combined(self):
+        self.assertEqual(parse_duration("1h30m"), 5400)
+        self.assertEqual(parse_duration("2h5s"), 7205)
+
+    def test_invalid(self):
+        for text in ("", "5x", "1m2h", "1h1h"):
+            with self.assertRaises(ValueError):
+                parse_duration(text)
+
+    def test_seconds(self):
+        self.assertEqual(parse_duration("1h1m1s"), 3661)
+
+
+if __name__ == "__main__":
+    unittest.main()
+'''
+    work = _materialize(TASKS["write-tests"], {"test_durations.py": lambda s: unittest_style})
+    solved, why = check(TASKS["write-tests"], work)
+    shutil.rmtree(work)
+    assert solved, why
+
+
 def test_changing_a_kept_file_fails_the_task():
     task = TASKS["inventory"]
     work = _materialize(task, {"test_inventory.py": lambda s: s.replace("== 3.5", "== 2.5"),

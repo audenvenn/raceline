@@ -615,7 +615,8 @@ def parse_duration(text):
     """
 import ast, subprocess, sys
 src = open("test_durations.py").read()
-tests = [n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name.startswith("test")]
+# Test functions at module level or methods of a unittest.TestCase: both are what the task asks for.
+tests = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef) and n.name.startswith("test")]
 assert len(tests) >= 4, f"{len(tests)} test functions"
 def run():
     return subprocess.run([sys.executable, "test_durations.py"], capture_output=True, text=True, timeout=60)

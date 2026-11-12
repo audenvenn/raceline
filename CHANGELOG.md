@@ -10,6 +10,11 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Fixed
 
+- `bench/agent_eval.py`: the `write-tests` task counted only test
+  functions at module level, so tests written as a `unittest.TestCase`
+  (as both 35B-A3B models wrote them) failed although they ran and caught
+  the broken versions of the code. Methods of a test class count now.
+
 - `raceline pull` without a model marks a mixture of experts whose experts
   stay partly on the SSD by the rule the engine applies (the memory the GPU
   may use, not the Mac's); Qwen3.6-35B-A3B went unmarked on a 24 GB Mac.

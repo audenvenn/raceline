@@ -8,7 +8,10 @@ to get as much out of one Mac, for one user, as the hardware allows.
 
 On an M6 Mac mini with 24 GB it runs **Qwen3.8-27B at 25 to 40 tokens/s,
 where mlx-lm manages 8 to 9** on the same machine, Qwen3.5-9B at 57 to 114
-against 27 to 29, and Qwen3.5-4B at 94 to 178 against 46 to 51. Its agent
+against 27 to 29, and Qwen3.5-4B at 94 to 178 against 46 to 51. **Qwen3.5-35B-A3B,
+a mixture of experts too large for the memory the GPU may use, runs at 56 to
+121 tokens/s with its experts read from the SSD as they are needed; mlx-lm,
+which has to hold all of it, swaps and manages 3.5.** Its agent
 finishes eight small coding tasks with the 27B in 5 minutes where the same
 agent on mlx-lm takes 39, and with the 9B, which fits a 16 GB Mac, in 2. The text it produces is
 bit-for-bit what decoding one token at a time produces, at any sampling
@@ -79,6 +82,8 @@ weights, which write other text:
 | Qwen3.8-27B | mlx-lm, MLX 4-bit weights | 7 of 8 | 19,823 | 8.8 tok/s | 2316 s |
 | | **raceline** | 7 of 8 | 9,038 | **32.1 tok/s** | **317 s** |
 | | raceline, copied drafts off | 7 of 8 | 9,038 | 31.5 tok/s | 322 s |
+| Qwen3.5-35B-A3B | mlx-lm, MLX 4-bit weights | does not fit | | | |
+| | **raceline**, experts on disk | 7 of 8 | 7,295 | **61.5 tok/s** | **147 s** |
 | Qwen3.5-9B | mlx-lm, MLX 4-bit weights | 5 of 8 | 13,318 | 27.4 tok/s | 500 s |
 | | **raceline** | 7 of 8 | 11,513 | **99.9 tok/s** | **128 s** |
 | | raceline, copied drafts off | 7 of 8 | 11,513 | 89.9 tok/s | 140 s |
@@ -94,6 +99,36 @@ The 27B's whole run is 7.3 times shorter on raceline, partly because these
 weights wrote half as many tokens as MLX's on these tasks; decoding alone is
 3.6 times faster. Copied drafts made 14 to 56% of the 4B's output and 13 to
 44% of the 27B's.
+
+**Qwen3.5-35B-A3B.** A mixture of experts: 35B parameters, of which a token
+uses 3B. raceline's file is 18.3 GB, MLX's 4-bit build 19.7 GB, and Metal
+lets the GPU of a 24 GB Mac use 19.1 GB. raceline keeps the 73% of the
+experts that fit in memory, the rest on disk, and reads what a layer needs
+when it is missing (here 3 to 8% of the routed experts; an expert, 1.6 MB,
+takes 0.4 ms). mlx-lm loads the whole model: after a 1,024-token prompt it
+decoded at 3.5 tok/s with 21.3 GB in use, swapping; the 4,096-token run was
+still going after 11 minutes when swap passed 8 GB and a watchdog stopped it,
+as it stopped mlx-lm's other runs.
+
+| Benchmark | Runtime | Prompt processing | Decoding | Memory |
+|---|---|---|---|---|
+| standard library, 1,024 tokens | mlx-lm, MLX 4-bit weights | 290 tok/s | 3.5 tok/s | 21.3 GB, swapping |
+| | **raceline** | 1079 tok/s | **121.3 tok/s** | 13.7 GB |
+| standard library, 4,096 tokens | mlx-lm | stopped (swap) | | |
+| | **raceline** | 1063 tok/s | **97.1 tok/s** | 13.7 GB |
+| chat answers, greedy | **raceline** | | **55.6 tok/s** | |
+| chat answers, temperature 0.7 / 1.0 | **raceline** | | **58.5 / 58.6 tok/s** | |
+
+Without drafts it decodes at 52.9 tok/s (`raceline-engine bench`, 1,024
+tokens of context). As a 16 GB Mac would run it, with 5.5 GB of experts in
+memory and every miss read from the SSD past the file cache
+(`RACELINE_EXPERT_CACHE=5.49 RACELINE_EXPERT_NOCACHE=1`): 15.5 tok/s, 26.7
+with drafts, prompts at about 750 tok/s. Prompts are processed 2,048 rows at
+a time for MoE models: a pass reads each missing expert once, so a 4,096-token
+prompt runs at 1273 tok/s against 792 in passes of 1,024 (the table above
+was measured with passes of 1,024). Against the float model on held-out
+text the conversion's KL divergence is 0.062 (top-1 agreement 92.4%); MLX's
+build could not be measured here.
 
 **Qwen3.8-27B.** Continuing source code after a prompt of that length,
 greedy, 128 tokens (`bench/agent_bench.py`). The Python standard library is

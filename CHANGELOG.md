@@ -19,6 +19,13 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   the dense models. `tests/check_moe.py` runs every check on a tiny random
   MoE model.
 
+- Qwen3.5-35B-A3B on a 24 GB Mac: 56 to 121 tok/s with 73% of its experts in
+  memory and the rest read from the SSD when needed; the agent solves 7 of
+  the 8 tasks in 147 s at 61.5 tok/s. mlx-lm, which has to hold all 19.7 GB
+  of MLX's build, swaps and decodes at 3.5 tok/s. As a 16 GB Mac would run
+  it (5.5 GB of experts cached, misses read from the SSD): 15.5 tok/s, 26.7
+  with drafts. KL 0.062 against the float model.
+
 - Experts on disk. When a MoE model does not fit in the memory the GPU may
   use, the engine leaves the experts in the file and keeps the ones in use
   in a cache: after each layer's routing a CPU thread reads the missing
@@ -30,6 +37,13 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   the system's file cache, to measure a smaller Mac on a larger one.
   `bench/expert_cache_sim.py` replays routing traces
   (`RACELINE_EXPERT_TRACE`) to compare replacement policies.
+
+- MoE models process prompts 2048 rows at a time (each missing expert is
+  read once per pass): 1273 tok/s for a 4096-token prompt against 792.
+
+- `raceline probe` measures SSD reads of an expert's size; `raceline chat`
+  and `serve` say when a model's experts stay on disk and how much of them
+  is kept in memory.
 
 - Draft counts follow what a row of the verifying pass costs, measured
   (a least-squares line through rows and GPU time of recent passes): free

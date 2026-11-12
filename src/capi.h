@@ -30,6 +30,11 @@ double rl_last_gpu_seconds(const rl_engine *e);
 size_t rl_state_bytes(const rl_engine *e);
 void rl_save_state(const rl_engine *e, void *dst);
 void rl_load_state(rl_engine *e, const void *src, int position);
+// Attention entries of positions [from, to) in whole blocks of 256, for setting
+// a conversation aside and continuing it later (see Engine::save_kv).
+size_t rl_kv_bytes(const rl_engine *e, int from, int to);
+void rl_save_kv(const rl_engine *e, int from, int to, void *dst);
+void rl_load_kv(rl_engine *e, int from, int to, const void *src);
 
 // Speculative decoding with the model's MTP head; see Engine in engine.h.
 // rl_forward_draft feeds tokens[0] and the drafts tokens[1..n-1]; the logits

@@ -51,7 +51,8 @@ def _runtime(args, agent: bool = False):
     sampling = agent_sampling(args.model, backend, not args.no_think) if agent else _defaults(args.model, backend)
     if args.temperature is not None:
         sampling.temperature = args.temperature
-    return Runtime(backend, sampling)
+    # The terminal agent holds one conversation; keeping others aside is for the server's clients.
+    return Runtime(backend, sampling, park_bytes=0 if agent else None)
 
 
 def main(argv=None):

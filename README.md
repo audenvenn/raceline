@@ -328,8 +328,12 @@ curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -
 ```
 
 Responses carry `usage.prompt_tokens_details.cached_tokens` and a `timings`
-object, so a client can see what a request cost. One conversation is served
-at a time; this is a single-user runtime.
+object, so a client can see what a request cost. Requests are served one at
+a time; this is a single-user runtime. A conversation the client leaves for
+another one (a second chat, or a side request such as a title) is set aside
+with its recurrent state and attention entries, and continued later without
+being processed again (within a twelfth of the Mac's memory, at most 2 GB;
+`RACELINE_PARK_GB` sets it).
 
 ## Configuration
 
@@ -349,6 +353,7 @@ Environment variables, all optional:
 | `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 | `RACELINE_EXPERT_CACHE` | Mixture-of-experts models: GB of experts kept in memory, the rest read from disk when needed (`0`: all in memory; by default the engine decides from the memory the GPU may use). |
+| `RACELINE_PARK_GB` | `raceline serve`: memory for conversations set aside while the client is in another one (default: a twelfth of the Mac's memory, at most 2; `0` keeps none). |
 | `RACELINE_ANY_GPU` | `1` lets the engine try a Mac it does not support (before Apple M5); please report the result in #2. |
 
 ## What is checked
@@ -561,8 +566,9 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 - Prompt processing is at MLX's speed or slightly below. The accelerators run 8-bit activations
   against 4-bit weights about 1.6x faster than half precision; that path is
   not built and its accuracy is not measured.
-- One conversation context. Alternating between different system prompts
-  reprocesses the prompt each time.
+- One request at a time. Conversations a client switches between are set
+  aside within a memory budget; beyond it, the least recently used one is
+  processed again when it comes back.
 - Run on a single M6 machine. Engine errors (an unsupported model geometry,
   misuse of the C API) end the process with a message.
 - Converted files are published for the models named above; anything else

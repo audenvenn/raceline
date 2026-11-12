@@ -557,6 +557,55 @@ void Engine::load_state(const void *src, int position) {
   spec_rows_ = 0;
 }
 
+// K is [KVH][blocks][head_dim][256] and V [KVH][positions][head_dim]: per head,
+// a run of whole blocks is one contiguous range of each.
+size_t Engine::kv_bytes(int from, int to) const {
+  if (from < 0 || to < from || to > max_ctx_) fatal("kv_bytes: positions %d..%d out of range", from, to);
+  const Config &c = config();
+  const size_t blocks = (size_t)((to + 255) / 256 - from / 256);
+  size_t layers = 0;
+  for (const auto &A : attn_) layers += A != nullptr;
+  return layers * 2 * c.kv_heads * blocks * 256 * c.head_dim * sizeof(_Float16);
+}
+
+void Engine::save_kv(int from, int to, void *dst) const {
+  if (spec_rows_) fatal("save_kv: drafts are open (keep_drafts first)");
+  kv_bytes(from, to);  // range check
+  const Config &c = config();
+  const int b0 = from / 256, b1 = (to + 255) / 256;
+  const size_t run = (size_t)(b1 - b0) * 256 * c.head_dim * sizeof(_Float16);
+  const size_t head = (size_t)kv_blocks_ * 256 * c.head_dim * sizeof(_Float16);
+  const size_t skip = (size_t)b0 * 256 * c.head_dim * sizeof(_Float16);
+  char *p = (char *)dst;
+  for (const auto &A : attn_) {
+    if (!A) continue;
+    for (int h = 0; h < c.kv_heads; h++) {
+      memcpy(p, (const char *)A->K.contents + h * head + skip, run);
+      memcpy(p + run, (const char *)A->V.contents + h * head + skip, run);
+      p += 2 * run;
+    }
+  }
+}
+
+void Engine::load_kv(int from, int to, const void *src) {
+  if (spec_rows_) fatal("load_kv: drafts are open (keep_drafts first)");
+  kv_bytes(from, to);
+  const Config &c = config();
+  const int b0 = from / 256, b1 = (to + 255) / 256;
+  const size_t run = (size_t)(b1 - b0) * 256 * c.head_dim * sizeof(_Float16);
+  const size_t head = (size_t)kv_blocks_ * 256 * c.head_dim * sizeof(_Float16);
+  const size_t skip = (size_t)b0 * 256 * c.head_dim * sizeof(_Float16);
+  const char *p = (const char *)src;
+  for (auto &A : attn_) {
+    if (!A) continue;
+    for (int h = 0; h < c.kv_heads; h++) {
+      memcpy((char *)A->K.contents + h * head + skip, p, run);
+      memcpy((char *)A->V.contents + h * head + skip, p + run, run);
+      p += 2 * run;
+    }
+  }
+}
+
 void Engine::keep_drafts(int accepted) {
   const Config &c = config();
   if (!spec_rows_) fatal("keep_drafts: the last call was not forward_draft");

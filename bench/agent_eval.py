@@ -97,7 +97,7 @@ def main():
             setattr(sampling, key, getattr(args, key))
     print(f"sampling: temperature {sampling.temperature}, top_p {sampling.top_p}, top_k {sampling.top_k}, "
           f"presence_penalty {sampling.presence_penalty}, seed {sampling.seed}")
-    rt = Runtime(backend, sampling)
+    rt = Runtime(backend, sampling, park_bytes=0)   # as `raceline chat`: one conversation at a time
     work = os.path.join(tempfile.gettempdir(), "raceline-agent-eval")
     for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):
         pass          # warm up: compile the kernels, page the weights in

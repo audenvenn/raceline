@@ -90,6 +90,10 @@ def _library() -> ctypes.CDLL:
         getattr(lib, fn).argtypes = [ctypes.c_void_p]
     lib.rl_save_state.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.rl_load_state.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+    lib.rl_kv_bytes.restype = ctypes.c_size_t
+    lib.rl_kv_bytes.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+    lib.rl_save_kv.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    lib.rl_load_kv.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
     lib.rl_set_mtp.argtypes = [ctypes.c_void_p, ctypes.c_int]
     lib.rl_draft_logits.restype = ctypes.POINTER(ctypes.c_float)
     lib.rl_draft_logits.argtypes = [ctypes.c_void_p, ctypes.c_int32]
@@ -415,6 +419,20 @@ class RacelineBackend(Backend):
         self._settle()
         self._lib.rl_load_state(self._e, snap.state.ctypes.data, snap.position)
         self._logits = snap.logits
+
+    kv_block = 256
+
+    def save_kv(self, start: int, end: int):
+        self._settle()
+        data = np.empty(self._lib.rl_kv_bytes(self._e, start, end), dtype=np.uint8)
+        self._lib.rl_save_kv(self._e, start, end, data.ctypes.data)
+        return data
+
+    def load_kv(self, start: int, end: int, data) -> None:
+        self._settle()
+        if data.nbytes != self._lib.rl_kv_bytes(self._e, start, end):
+            raise ValueError("load_kv: the saved entries are for another range")
+        self._lib.rl_load_kv(self._e, start, end, data.ctypes.data)
 
 
 class _PassCost:

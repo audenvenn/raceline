@@ -1,0 +1,38 @@
+[
+ {
+  "model": "models/qwen3.5-35b-a3b.rlm",
+  "backend": "raceline",
+  "mtp": true,
+  "sampling": "greedy",
+  "tokens": 763,
+  "decode_tps": 55.553670428255614,
+  "drafts_accepted": 0.7767145135566188,
+  "expert_slots": 7548,
+  "experts_from_cache": 0.9545627456781774,
+  "experts_read": 9675
+ },
+ {
+  "model": "models/qwen3.5-35b-a3b.rlm",
+  "backend": "raceline",
+  "mtp": true,
+  "sampling": "temperature 0.7, top_p 0.8, top_k 20",
+  "tokens": 751,
+  "decode_tps": 58.48242772721156,
+  "drafts_accepted": 0.6757123473541384,
+  "expert_slots": 7548,
+  "experts_from_cache": 0.9669622257407826,
+  "experts_read": 7303
+ },
+ {
+  "model": "models/qwen3.5-35b-a3b.rlm",
+  "backend": "raceline",
+  "mtp": true,
+  "sampling": "temperature 1.0, top_p 0.95, top_k 20",
+  "tokens": 759,
+  "decode_tps": 58.64661235373315,
+  "drafts_accepted": 0.7127329192546584,
+  "expert_slots": 7548,
+  "experts_from_cache": 0.968321079800666,
+  "experts_read": 7088
+ }
+]

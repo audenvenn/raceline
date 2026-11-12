@@ -36,8 +36,8 @@ sys.path.insert(1, os.path.dirname(HERE))
 import quantlib  # noqa: E402
 from convert import Writer  # noqa: E402
 from rlmfile import Native  # noqa: E402
-from quantize import (T, Source, build_layer, default_texts, input_moments, quantize_stack,  # noqa: E402
-                      rotation, rotation_signs, stacks_of, token_sequences)
+from quantize import (T, Source, build_layer, default_texts, input_moments, is_moe, quantize_stack,  # noqa: E402
+                      rotation, rotation_signs, stack_moments, stacks_of, token_sequences)
 
 NORM_E, NORM_H, NORM_OUT = "mtp.pre_fc_norm_embedding.weight", "mtp.pre_fc_norm_hidden.weight", "mtp.norm.weight"
 
@@ -48,6 +48,18 @@ def mtp_weights(src: Source):
     norms = {k: src.st.get(k).astype(np.float32) + off for k in (NORM_E, NORM_H, NORM_OUT)}
     pre = "mtp.layers.0."
     layer = {k[len(pre):]: src.get(k) for k in src.st.index if k.startswith(pre)}
+    if "mlp.experts.0.gate_proj.weight" in layer:
+        # A MoE head's experts are stored one by one: fuse them as the model's layers have them,
+        # one expert at a time (no second copy of all of them: 3 GB for Qwen3.5-35B-A3B).
+        E = 1 + max(int(k.split(".")[2]) for k in layer if k.startswith("mlp.experts."))
+        g0, d0 = layer["mlp.experts.0.gate_proj.weight"], layer["mlp.experts.0.down_proj.weight"]
+        gate_up = np.empty((E, 2 * g0.shape[0], g0.shape[1]), dtype=np.float32)
+        down = np.empty((E,) + d0.shape, dtype=np.float32)
+        for e in range(E):
+            gate_up[e, :g0.shape[0]] = layer.pop(f"mlp.experts.{e}.gate_proj.weight")
+            gate_up[e, g0.shape[0]:] = layer.pop(f"mlp.experts.{e}.up_proj.weight")
+            down[e] = layer.pop(f"mlp.experts.{e}.down_proj.weight")
+        layer["mlp.experts.gate_up_proj"], layer["mlp.experts.down_proj"] = gate_up, down
     return src.st.get("mtp.fc.weight").astype(np.float32), norms, layer
 
 
@@ -86,25 +98,25 @@ def head_output(fc_w, layer, x, batch=8):
     return mx.concatenate(outs, axis=0)
 
 
-def quantize_head(args, fc, lw, x_cal, book, gptq=True):
-    """The head's decoder layer in 4 bits -> ({file tensor name: (parts, (codes, s, c))}, the layer with
-    dequantized weights). The input projection `fc` is not quantized: it is the one matrix of the head that
-    4 bits hurt (agreement with the model drops by about eight points; the others cost a fraction of one),
-    and at [H][2H] it is small enough to keep in half precision."""
+def quantize_head(fc, layer, x_cal, book, gptq=True):
+    """The head's decoder layer (float) to 4 bits, in place -> {file tensor name: (parts, (codes, s, c))};
+    the layer is left with the dequantized weights. The input projection `fc` is not quantized: it is the
+    one matrix of the head that 4 bits hurt (agreement with the model drops by about eight points; the
+    others cost a fraction of one), and at [H][2H] it is small enough to keep in half precision."""
     out = {}
-    layer = build_layer(args, args.full_attention_interval - 1, lw)
     h = x_cal @ mx.array(fc).T
     mx.eval(h)
     moments = input_moments(layer, h)
     for name, parts in stacks_of(layer):
-        _, q = quantize_stack(parts, moments[id(parts[0][1])], book, gptq)
+        _, q = quantize_stack(parts, stack_moments(parts, moments), book, gptq)
         out["mtp." + name] = ([(pn, m.weight.shape[0]) for pn, m in parts], q)
         Wq, row = quantlib.dequant(*q, book), 0
         for _, m in parts:
             m.weight = mx.array(Wq[row:row + m.weight.shape[0]])
             row += m.weight.shape[0]
-    mx.eval(layer.parameters())
-    return out, layer
+        mx.eval(layer.parameters())
+        del Wq
+    return out
 
 
 def main():
@@ -116,6 +128,7 @@ def main():
     ap.add_argument("--no-gptq", action="store_true", help="round to nearest (the head agrees far less often)")
     ap.add_argument("--force", action="store_true", help="replace a head the file already has")
     cli = ap.parse_args()
+    mx.set_cache_limit(1 << 30)   # freed buffers kept for reuse; unbounded, the pool grows by several GB
 
     nat = Native(cli.rlm)
     if "mtp.fc" in nat.hdr["tensors"] and not cli.force:
@@ -163,17 +176,23 @@ def main():
         return mx.fast.rms_norm(u, mx.array(norms[NORM_OUT] / wf), eps) @ Qm
 
     fc = fc.astype(np.float16).astype(np.float32)          # as stored
-    tensors, layer_q = quantize_head(args, fc, lw, x[:n_cal], book, gptq)
+    # One copy of the head's decoder layer: held-out check in float, quantized in place, checked again.
+    # Of the float weights, only the small ones are still needed (for the file).
+    layer = build_layer(args, args.full_attention_interval - 1, lw)
+    lw = {k: v for k, v in lw.items() if v.size < (1 << 22)}
 
     # Held-out check: how often is the head's top choice the model's own?
     x_ev, head_ev = x[n_cal:], head_in[n_cal:]
     n_ev, skip = x_ev.shape[0], 64
     choice = nat.head_argmax(head_ev.reshape(-1, hidden)).reshape(n_ev, T)     # choice[i]: the pick for token i+1
     agree = {}
-    for label, layer in (("float", build_layer(args, args.full_attention_interval - 1, lw)), ("4-bit", layer_q)):
+    for label in ("float", "4-bit"):
+        if label == "4-bit":
+            tensors = quantize_head(fc, layer, x[:n_cal], book, gptq)
         out = to_head(head_output(fc, layer, x_ev))
         pred = nat.head_argmax(out.reshape(-1, hidden)).reshape(n_ev, T - 1)   # pred[i]: the guess for token i+2
         agree[label] = float(np.mean(pred[:, skip:T - 2] == choice[:, skip + 1:T - 1]))
+    layer_q = layer
     print(f"the head's top choice is the model's own choice: float head {100 * agree['float']:.1f}%, "
           f"{book} head {100 * agree['4-bit']:.1f}%  ({n_ev * (T - 2 - skip)} held-out positions)")
 
@@ -191,6 +210,9 @@ def main():
     out.add_dense("mtp.fc", fc_file)
     for name, (parts, (codes, s, c)) in tensors.items():
         out.add_native(name, parts, codes, s, c, book)
+    if is_moe(layer_q):   # the router and the shared expert's gate, the gate/up stack's column scales divided out
+        router = np.concatenate([lw["mlp.gate.weight"], lw["mlp.shared_expert_gate.weight"]], axis=0)
+        out.add_dense("mtp.moe.router", router / tensors["mtp.moe.gate_up"][1][2][None, :])
     out.end()
     if "tokenizer.json" not in out.files:      # older files, or dropped together with a previous head
         out.add_files(cli.src)

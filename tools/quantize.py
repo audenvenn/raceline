@@ -112,9 +112,21 @@ class Source:
                 for k in self.st.index if k.startswith(self.prefix + pre)}
 
 
+def mlx_names(weights: dict) -> dict:
+    """The checkpoint's fused expert tensors under the names MLX's MoE block uses."""
+    w = dict(weights)
+    if "mlp.experts.gate_up_proj" in w:
+        gu = w.pop("mlp.experts.gate_up_proj")
+        mid = gu.shape[1] // 2
+        w["mlp.switch_mlp.gate_proj.weight"] = gu[:, :mid]
+        w["mlp.switch_mlp.up_proj.weight"] = gu[:, mid:]
+        w["mlp.switch_mlp.down_proj.weight"] = w.pop("mlp.experts.down_proj")
+    return w
+
+
 def build_layer(args, i, weights):
     layer = qwen3_5.DecoderLayer(args, i)
-    layer.load_weights([(k, mx.array(v)) for k, v in weights.items()])
+    layer.load_weights([(k, mx.array(v)) for k, v in mlx_names(weights).items()])
     mx.eval(layer.parameters())
     return layer
 
@@ -153,6 +165,73 @@ def input_moments(layer, h, batch=8):
     return {k: np.array(v) / n for k, v in sums.items()}
 
 
+class ExpertStack:
+    """A MoE block's expert matrices of one kind as one [rows, columns] matrix,
+    expert after expert, the shared expert last: "gate_up" holds each expert's
+    gate rows then its up rows (the checkpoint's fused order, and the order the
+    engine's SwiGLU reads), "down" each expert's down rows. Reading `weight`
+    stacks them; assigning it writes a stacked matrix back into the experts.
+    The gate/up stack reads what the router reads, so it takes the router's
+    input statistics (`moment_key`); the down stack's inputs differ per expert
+    and it is rounded to nearest."""
+
+    def __init__(self, moe, kind):
+        self.moe, self.kind = moe, kind
+        self.moment_key = id(moe.gate) if kind == "gate_up" else None
+
+    def numpy(self, chunk: int = 32) -> np.ndarray:
+        """`weight` as float32 NumPy, copied a few experts at a time: no second copy
+        of the whole stack in MLX (2 GB for a layer of Qwen3.5-35B-A3B)."""
+        sw, sh = self.moe.switch_mlp, self.moe.shared_expert
+        if self.kind == "gate_up":
+            g, u = sw.gate_proj.weight, sw.up_proj.weight              # [E, I, H]
+            E, I, H = g.shape
+            out = np.empty(((E + 1) * 2 * I, H), dtype=np.float32)
+            for e0 in range(0, E, chunk):
+                e1 = min(E, e0 + chunk)
+                block = mx.concatenate([g[e0:e1], u[e0:e1]], axis=1).astype(mx.float32)
+                out[e0 * 2 * I:e1 * 2 * I] = np.array(block).reshape(-1, H)
+            out[E * 2 * I:E * 2 * I + I] = np.array(sh.gate_proj.weight.astype(mx.float32))
+            out[E * 2 * I + I:] = np.array(sh.up_proj.weight.astype(mx.float32))
+        else:
+            d = sw.down_proj.weight                                      # [E, H, I]
+            E, H, I = d.shape
+            out = np.empty(((E + 1) * H, I), dtype=np.float32)
+            for e0 in range(0, E, chunk):
+                e1 = min(E, e0 + chunk)
+                out[e0 * H:e1 * H] = np.array(d[e0:e1].astype(mx.float32)).reshape(-1, I)
+            out[E * H:] = np.array(sh.down_proj.weight.astype(mx.float32))
+        return out
+
+    @property
+    def weight(self):
+        sw, sh = self.moe.switch_mlp, self.moe.shared_expert
+        if self.kind == "gate_up":
+            g, u = sw.gate_proj.weight, sw.up_proj.weight              # [E, I, H]
+            experts = mx.concatenate([g, u], axis=1).reshape(-1, g.shape[-1])
+            shared = mx.concatenate([sh.gate_proj.weight, sh.up_proj.weight], axis=0)
+        else:
+            d = sw.down_proj.weight                                      # [E, H, I]
+            experts, shared = d.reshape(-1, d.shape[-1]), sh.down_proj.weight
+        return mx.concatenate([experts, shared], axis=0)
+
+    @weight.setter
+    def weight(self, W):
+        sw, sh = self.moe.switch_mlp, self.moe.shared_expert
+        if self.kind == "gate_up":
+            E, I, H = sw.gate_proj.weight.shape
+            ex = W[:E * 2 * I].reshape(E, 2 * I, H)
+            sw.gate_proj.weight, sw.up_proj.weight = ex[:, :I], ex[:, I:]
+            sh.gate_proj.weight, sh.up_proj.weight = W[E * 2 * I:E * 2 * I + I], W[E * 2 * I + I:]
+        else:
+            E, H, I = sw.down_proj.weight.shape
+            sw.down_proj.weight, sh.down_proj.weight = W[:E * H].reshape(E, H, I), W[E * H:]
+
+
+def is_moe(layer) -> bool:
+    return hasattr(layer.mlp, "switch_mlp")
+
+
 def stacks_of(layer):
     """(file name, [(part name, module)]) for every matrix group that shares an input."""
     if layer.is_linear:
@@ -162,8 +241,18 @@ def stacks_of(layer):
     else:
         a = layer.self_attn
         out = [("attn.qkv", [("q", a.q_proj), ("k", a.k_proj), ("v", a.v_proj)]), ("attn.o_proj", [("out", a.o_proj)])]
+    if is_moe(layer):
+        return out + [("moe.gate_up", [("experts", ExpertStack(layer.mlp, "gate_up"))]),
+                      ("moe.down", [("experts", ExpertStack(layer.mlp, "down"))])]
     return out + [("mlp.gate_up", [("gate", layer.mlp.gate_proj), ("up", layer.mlp.up_proj)]),
                   ("mlp.down", [("out", layer.mlp.down_proj)])]
+
+
+def stack_moments(parts, moments):
+    """The input second moments a stack is quantized with (None: round to nearest)."""
+    m = parts[0][1]
+    key = getattr(m, "moment_key", id(m))
+    return None if key is None else moments.get(key)
 
 
 def affine4(W, group=64):
@@ -186,7 +275,9 @@ def quantize_matrix(W, H, book, gptq):
 
 def quantize_stack(parts, H, book, gptq):
     """Quantizes the row-stacked matrices jointly: they share the input, hence c."""
-    W = np.concatenate([np.array(m.weight.astype(mx.float32)) for _, m in parts], axis=0)
+    rows = [m.numpy() if isinstance(m, ExpertStack) else np.array(m.weight.astype(mx.float32)) for _, m in parts]
+    W = rows[0] if len(rows) == 1 else np.concatenate(rows, axis=0)   # one part: no copy of a 2 GB stack
+    del rows
     return quantize_matrix(W, H, book, gptq)
 
 
@@ -208,8 +299,13 @@ READS_NORM = {"input_layernorm.weight": ("linear_attn.in_proj_qkv.weight", "line
                                          "linear_attn.in_proj_b.weight", "linear_attn.in_proj_a.weight",
                                          "self_attn.q_proj.weight", "self_attn.k_proj.weight",
                                          "self_attn.v_proj.weight"),
-              "post_attention_layernorm.weight": ("mlp.gate_proj.weight", "mlp.up_proj.weight")}
-WRITES_RESIDUAL = ("linear_attn.out_proj.weight", "self_attn.o_proj.weight", "mlp.down_proj.weight")
+              "post_attention_layernorm.weight": ("mlp.gate_proj.weight", "mlp.up_proj.weight",
+                                                  "mlp.experts.gate_up_proj", "mlp.gate.weight",
+                                                  "mlp.shared_expert.gate_proj.weight",
+                                                  "mlp.shared_expert.up_proj.weight",
+                                                  "mlp.shared_expert_gate.weight")}
+WRITES_RESIDUAL = ("linear_attn.out_proj.weight", "self_attn.o_proj.weight", "mlp.down_proj.weight",
+                   "mlp.experts.down_proj", "mlp.shared_expert.down_proj.weight")
 
 
 def hadamard_block(n: int) -> int:
@@ -289,13 +385,33 @@ def emit_layer(out, i, layer, weights, stacks, results, book):
     else:
         out.add_float(f"layers.{i}.attn.q_norm", weights["self_attn.q_norm.weight"])
         out.add_float(f"layers.{i}.attn.k_norm", weights["self_attn.k_norm.weight"])
-    for j, (name, parts) in enumerate(stacks):
+    def emit(j):
+        name, parts = stacks[j]
         named = [(pn, m.weight.shape[0]) for pn, m in parts]
         if results is None:
             out.add_native_layout(f"layers.{i}.{name}", named, parts[0][1].weight.shape[1], book)
         else:
             codes, s, c = results[j][1]
             out.add_native(f"layers.{i}.{name}", named, codes, s, c, book)
+
+    experts = [j for j, (name, _) in enumerate(stacks) if name.startswith("moe.")]
+    for j in range(len(stacks)):
+        if j not in experts:
+            emit(j)
+    if experts:
+        # The router, and the shared expert's gate as one more row, in half
+        # precision. They read the same input as the gate/up stack, which the
+        # engine has already multiplied by that stack's column scales: divided out here.
+        router = np.concatenate([weights["mlp.gate.weight"], weights["mlp.shared_expert_gate.weight"]], axis=0)
+        if results is not None:
+            router = router / results[[n for n, _ in stacks].index("moe.gate_up")][1][2][None, :]
+        out.add_dense(f"layers.{i}.moe.router", router)
+        # The experts get a section of their own: an engine that keeps only the
+        # experts in use in memory never maps it as a whole.
+        out.end()
+        out.begin(f"experts.{i}")
+        for j in experts:
+            emit(j)
     out.end()
 
 
@@ -303,6 +419,19 @@ def emit_layer(out, i, layer, weights, stacks, results, book):
 
 def log_softmax(z):
     return z - mx.logsumexp(z, axis=-1, keepdims=True)
+
+
+def tensor_end(t: dict) -> int:
+    """Where a tensor of the layout ends in the file: after its last part (column
+    scales of a 4-bit matrix, the half-precision blocks of a dense one, the floats
+    of a vector)."""
+    if t["kind"] in ("q4n", "q4n_rows"):
+        return t["c"] + 4 * t["k"]
+    if t["kind"] == "f16b":
+        return t["w"] + 2 * t["n_pad"] * t["k"]
+    if t["kind"] == "f32":
+        return t["offset"] + 4 * int(np.prod(t["shape"]))
+    raise ValueError(f"no end for a tensor of kind {t['kind']}")
 
 
 def drift(hq, hr) -> float:
@@ -331,19 +460,25 @@ def main():
 
     # Freed buffers are kept for reuse up to this much; without a bound the pool
     # grows to several GB over a layer and pushes a 24 GB machine into swap.
-    mx.set_cache_limit(2 << 30)
+    mx.set_cache_limit(1 << 30)
 
     cfg_all = json.load(open(os.path.join(cli.src, "config.json")))
     tc = cfg_all.get("text_config", cfg_all)
-    if tc.get("num_experts", 0):
-        raise SystemExit("MoE variants are not supported yet")
+    moe = bool(tc.get("num_experts", 0))
+    if moe and tc.get("shared_expert_intermediate_size", tc["moe_intermediate_size"]) != tc["moe_intermediate_size"]:
+        raise SystemExit("MoE: a shared expert of another width than the routed ones is not supported yet")
     args = qwen3_5.TextModelArgs.from_dict(tc)
     tied = bool(tc.get("tie_word_embeddings", cfg_all.get("tie_word_embeddings", False)))
     rope = tc.get("rope_parameters") or {}
     cfg = {k: tc[k] for k in (
-        "hidden_size", "num_hidden_layers", "intermediate_size", "num_attention_heads", "num_key_value_heads",
+        "hidden_size", "num_hidden_layers", "num_attention_heads", "num_key_value_heads",
         "head_dim", "linear_num_value_heads", "linear_num_key_heads", "linear_key_head_dim",
         "linear_value_head_dim", "linear_conv_kernel_dim", "vocab_size", "rms_norm_eps", "full_attention_interval")}
+    cfg["intermediate_size"] = tc["moe_intermediate_size"] if moe else tc["intermediate_size"]
+    if moe:
+        cfg.update(num_experts=tc["num_experts"], num_experts_per_tok=tc["num_experts_per_tok"],
+                   moe_intermediate_size=tc["moe_intermediate_size"],
+                   norm_topk_prob=bool(tc.get("norm_topk_prob", True)))
     cfg["rope_theta"] = float(rope.get("rope_theta", tc.get("rope_theta", 1e7)))
     cfg["partial_rotary_factor"] = float(rope.get("partial_rotary_factor", tc.get("partial_rotary_factor", 0.25)))
     cfg["eos_token_id"] = tc.get("eos_token_id")
@@ -456,6 +591,11 @@ def main():
         if Q is not None:
             weights = rotate_layer(weights, Q)
         layer = build_layer(args, i, weights)
+        # The matrices live in `layer` now; what emit_layer still reads from `weights`
+        # is small (norms, convolution, gates). Keeping the float copies of a MoE
+        # layer's experts besides would add 3.3 GB to a peak that has to fit in 24 GB
+        # next to everything else on the machine.
+        weights = {k: v for k, v in weights.items() if v.size < (1 << 22)}
         hr = run_layer(layer, hr)
         stacks = stacks_of(layer)
 
@@ -463,8 +603,8 @@ def main():
             # Is this layer in the file? Lay it out and see whether its data ends within it.
             mark = (plan.pos, dict(plan.tensors), list(plan.sections))
             emit_layer(plan, i, layer, weights, stacks, None, book)
-            last = plan.tensors[f"layers.{i}.{stacks[-1][0]}"]
-            if last["c"] + 4 * last["k"] <= have:
+            ends = [tensor_end(t) for name, t in plan.tensors.items() if name.startswith(f"layers.{i}.")]
+            if max(ends) <= have:
                 worst = 0.0
                 for name, parts in stacks:
                     Wq, row = partial.matrix(f"layers.{i}.{name}"), 0
@@ -489,7 +629,7 @@ def main():
             print(f"  continuing the conversion at layer {i + 1}", flush=True)
 
         moments = input_moments(layer, hc)
-        results = [quantize_stack(parts, moments[id(parts[0][1])], book, gptq) for _, parts in stacks]
+        results = [quantize_stack(parts, stack_moments(parts, moments), book, gptq) for _, parts in stacks]
         if write:
             emit_layer(out, i, layer, weights, stacks, results, book)
             out.f.flush()

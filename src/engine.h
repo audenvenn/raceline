@@ -17,6 +17,7 @@ class Engine {
   // max_ctx bounds the attention KV cache; max_chunk is the most tokens one
   // forward() call may carry (longer prompts are fed in several calls).
   Engine(const std::string &model_path, int max_ctx = 8192, int max_chunk = 1024);
+  ~Engine();
 
   const Config &config() const { return model_->config(); }
   int position() const { return pos_; }
@@ -34,6 +35,16 @@ class Engine {
 
   // GPU seconds spent in the last forward().
   double last_gpu_seconds() const { return gpu_seconds_; }
+
+  // Mixture of experts on disk (RACELINE_EXPERT_CACHE): slots in the cache, and
+  // since the engine opened how many routed experts a layer found loaded and how
+  // many it had to read. slots == 0: the experts are all in memory.
+  struct ExpertStats {
+    int slots, experts;          // slots in the cache; experts in the model (with the shared ones)
+    size_t slot_bytes;
+    uint64_t hits, loads;
+  };
+  ExpertStats expert_stats() const;
 
   // The recurrent layers' state (conv window and DeltaNet matrices), which is
   // all that is needed to return to an earlier position: attention entries
@@ -129,6 +140,13 @@ class Engine {
                   int rows, size_t out_offset);
   void bind_column_scale(const QTensor &consumer, int index);
   void encode_mlp(int layer, int T);
+  // A mixture-of-experts MLP over rows 0..T-1 of h_ (kernels/moe.metal).
+  void encode_moe(int layer, int T);
+  // The experts' weights, kind 0 (gate/up) or 1 (down), for the grouped matmul:
+  // the stacked tensor of the file, or the expert cache, with its slot table.
+  void bind_experts(int layer, int kind, const QTensor &stack);
+  // The name of a layer's first MLP matrix: "mlp.gate_up", or "moe.gate_up" for a MoE layer.
+  std::string mlp_in(int layer) const;
   void encode_linear_attn(int layer, int T, bool spec);
   void encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope);
   void encode_copy_rows(id<MTLBuffer> dst, int dst_row, int src_row, int rows);  // rows of h_
@@ -144,6 +162,8 @@ class Engine {
   void flush(bool reopen);      // commits, waits, accumulates GPU time
   void run_threads(int w, int h);
   void run_groups(int w, int h, int threads_per_group = 32, int depth = 1);
+  // Threadgroups as a GPU-written MTLDispatchThreadgroupsIndirectArguments says.
+  void run_indirect(id<MTLBuffer> args, size_t offset, int threads_per_group);
   void redo();                  // issues the last dispatch again
   void mark(const char *what);  // names the dispatch just issued (for set_repeat)
   bool repeating(const char *what) const { return repeat_times_ > 0 && repeat_ == what; }
@@ -159,6 +179,8 @@ class Engine {
   struct Dispatch {
     bool threads;
     MTLSize grid, per_group;
+    id<MTLBuffer> indirect = nil;     // set: the grid comes from this buffer
+    size_t indirect_offset = 0;
   } last_{};
   id<MTLBuffer> scratch_state_ = nil, scratch_yo_ = nil;
   id<MTLCommandBuffer> cb_ = nil;
@@ -167,6 +189,16 @@ class Engine {
   // Scratch activations, all [rows_cap_][stride].
   int x_stride_, proj_stride_;
   id<MTLBuffer> tok_, h_, xn_, gsum_, proj_, y_, qk_, bg_, yo_, rope_, logits_;
+  // Mixture of experts: router logits [rows][router rows], routing results
+  // [rows * slots], the work list and its dispatch sizes, and the sorted rows'
+  // inputs and outputs [rows * slots][width].
+  id<MTLBuffer> moe_logits_ = nil, moe_tok_ = nil, moe_inv_ = nil, moe_w_ = nil, moe_sel_ = nil, moe_items_ = nil,
+                moe_args_ = nil, moe_x_ = nil, moe_gu_ = nil, moe_act_ = nil, moe_y_ = nil;
+  id<MTLBuffer> moe_identity_ = nil;               // slot = expert: experts read straight from the file
+  // RACELINE_EXPERT_CACHE=<GB>: experts live in the file and the ones in use
+  // in a cache of that size (see ExpertCache in engine.mm).
+  struct ExpertCache;
+  std::unique_ptr<ExpertCache> cache_;
   // Attention: queries [KVH][q_rows_][head_dim] half, and for one group of rows
   // the scores (float), unnormalized probabilities (half) and their row sums.
   id<MTLBuffer> aq_, as_, ap_, al_;

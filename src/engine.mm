@@ -5,9 +5,20 @@
 #import <Accelerate/Accelerate.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <dispatch/dispatch.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <mutex>
+#include <pthread.h>
+#include <sys/qos.h>
+#include <thread>
 
 namespace rl {
 
@@ -43,9 +54,247 @@ void set_params(id<MTLComputeCommandEncoder> enc, const P &p, int index) {
 
 }  // namespace
 
+// ---- Experts kept on disk, the ones in use in memory (RACELINE_EXPERT_CACHE).
+//
+// A MoE model's experts are most of its weights, and a token uses a few of
+// them per layer. With the cache on, the expert sections of the file are not
+// handed to Metal (which would have to keep them all resident): the engine
+// copies the experts a pass needs into a fixed set of slots and the grouped
+// matmuls read them through a per-layer slot table. Which experts a layer
+// needs is known only once its router has run on the GPU, so the command
+// buffer is split there: the GPU signals a shared event after the routing
+// kernel and waits on the next value before the expert matmuls; a CPU thread
+// that watches the event loads what is missing (least recently used slots
+// first; each layer's shared expert has a slot of its own), updates the table
+// and signals. What is computed does not change, only where the weights are read.
+//
+// A prompt chunk needs nearly every expert of every layer: a cyclic scan, in
+// which least-recently-used replacement evicts exactly the experts the next
+// layers are about to need, so every chunk would read every expert. Passes of
+// more than kMaxDrafts + 1 rows therefore do not count as uses: their hits stay
+// where they are in the recency order and what they load goes in at the cold
+// end, first to be replaced (LRU insertion policy). A chunk then reads about
+// the experts the cache does not hold, cycling them through the coldest slots,
+// and the cache keeps what decoding uses. (Replayed on synthetic agent
+// sessions with 73% of the experts cached, bench/expert_cache_sim.py: 58% fewer
+// reads for prompts than plain LRU, and 6% fewer while decoding.)
+// -1: decide from the memory the GPU may use (Engine::Engine).
+static double expert_cache_setting() {
+  const char *v = getenv("RACELINE_EXPERT_CACHE");
+  return v && *v ? atof(v) : -1.0;
+}
+
+struct Engine::ExpertCache {
+  struct Request {
+    int layer, T;
+    uint64_t ready, go;
+  };
+  int layers = 0, E = 0, S = 0, slots = 0;
+  int big_rows = 16;                       // passes with more rows do not count as uses
+  int topk = 8;                            // experts routed per token
+  bool prefetch_on = true;                 // RACELINE_EXPERT_PREFETCH=0: off
+  int busy_layer = -1;                     // the layer the GPU computes now, and what it needs
+  std::vector<char> busy_need;
+  FILE *trace = nullptr;                   // RACELINE_EXPERT_TRACE: what every layer needed
+  size_t w_bytes[2] = {0, 0};
+  int s_floats[2] = {0, 0};
+  std::vector<size_t> src_w[2], src_s[2];   // file offsets of each layer's stacks: codes, row scales
+  int fd = -1;
+  id<MTLBuffer> w[2], s[2], table, sel;   // sel: the routing kernel's expert per assignment
+  id<MTLBuffer> cols;                      // [layer][I] the down stacks' column scales (for SwiGLU)
+  std::vector<std::pair<int, int>> owner;  // slot -> (layer, expert)
+  // The cached slots in order of use, hottest first: a doubly linked list
+  // through prev/next with a sentinel at index `slots` (pinned slots are not in it).
+  std::vector<int> prev, next;
+  int next_free = 0;
+  std::atomic<uint64_t> loads{0}, hits{0};   // read by expert_stats() on another thread
+  id<MTLSharedEvent> ev;
+  uint64_t value = 0;
+  std::thread worker;
+  std::mutex mu;
+  std::condition_variable cv;
+  std::deque<Request> queue;
+  bool stop = false;
+
+  int32_t *tab(int layer) const { return (int32_t *)table.contents + (size_t)layer * (E + 1); }
+
+  // One expert into one slot. pread() reads each part in one request (a copy
+  // out of the mapping would fault it in 16 KB at a time).
+  void load(int layer, int e, int slot) {
+    for (int k = 0; k < 2; k++) {
+      read_all((char *)w[k].contents + slot * w_bytes[k], w_bytes[k], src_w[k][layer] + e * w_bytes[k]);
+      read_all((float *)s[k].contents + (size_t)slot * s_floats[k], s_floats[k] * sizeof(float),
+               src_s[k][layer] + (size_t)e * s_floats[k] * sizeof(float));
+    }
+  }
+
+  void read_all(void *dst, size_t n, size_t off) {
+    for (size_t got = 0; got < n;) {
+      const ssize_t r = pread(fd, (char *)dst + got, n - got, (off_t)(off + got));
+      if (r <= 0) fatal("reading experts from the model file failed");
+      got += (size_t)r;
+    }
+  }
+
+  void unlink(int i) {
+    next[prev[i]] = next[i];
+    prev[next[i]] = prev[i];
+  }
+  void insert(int i, bool hot) {             // at the hot or the cold end
+    const int a = hot ? slots : prev[slots], b = next[a];
+    prev[i] = a, next[i] = b, next[a] = i, prev[b] = i;
+  }
+
+  // A free slot, or the coldest one that holds nothing this request needs
+  // (nor what the GPU computes with right now, while prefetching); -1 if none.
+  int take_slot(int layer, const std::vector<char> &need) {
+    if (next_free < slots) return next_free++;
+    for (int i = prev[slots]; i != slots; i = prev[i]) {
+      const auto [l, e] = owner[i];
+      if ((l == layer && need[e]) || (l == busy_layer && busy_need[e])) continue;
+      unlink(i);
+      tab(l)[e] = -1;
+      return i;
+    }
+    return -1;
+  }
+
+  // Reads the missing experts of `need` into slots (in parallel: the SSD serves
+  // concurrent requests far faster than one after another). A request always
+  // finds slots (the cache holds a layer's worth besides the pinned ones); a
+  // prefetch takes what is free while the GPU works and stops there.
+  void fill(int layer, const std::vector<char> &need, bool hot, bool prefetching = false) {
+    int32_t *t = tab(layer);
+    std::vector<std::pair<int, int>> todo;   // (expert, slot)
+    for (int e = 0; e < E; e++) {
+      if (!need[e] || t[e] >= 0) continue;
+      const int slot = take_slot(layer, need);
+      if (slot < 0) {
+        if (prefetching) break;
+        fatal("expert cache: no slot to reuse");
+      }
+      owner[slot] = {layer, e};
+      insert(slot, hot);
+      todo.push_back({e, slot});
+    }
+    if (todo.empty()) return;
+    dispatch_apply(todo.size(), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+                   ^(size_t j) { load(layer, todo[j].first, todo[j].second); });
+    for (auto [e, slot] : todo) t[e] = slot;
+    loads += todo.size();
+  }
+
+  void handle(const Request &r) {
+    const int32_t *pick = (const int32_t *)sel.contents;
+    int32_t *t = tab(r.layer);
+    std::vector<char> need(E, 0);
+    for (int a = 0; a < r.T * S; a++)
+      if (pick[a] < E) need[pick[a]] = 1;
+    if (trace) {
+      std::vector<uint8_t> bits((E + 7) / 8, 0);
+      for (int e = 0; e < E; e++) bits[e / 8] |= need[e] << (e % 8);
+      const int32_t head[2] = {r.layer, r.T};
+      fwrite(head, sizeof head, 1, trace);
+      fwrite(bits.data(), 1, bits.size(), trace);
+    }
+    const bool big = r.T > big_rows;
+    for (int e = 0; e < E; e++)
+      if (need[e] && t[e] >= 0) {
+        hits++;
+        if (!big) unlink(t[e]), insert(t[e], true);
+      }
+    busy_layer = -1;
+    fill(r.layer, need, !big);
+    busy_layer = r.layer;                    // from the signal on, the GPU computes with these
+    busy_need.swap(need);
+  }
+
+  // While the GPU computes a prompt chunk's layer, the next layer's experts
+  // that are not cached: a chunk of 4 * E / topk rows or more needs about 98%
+  // of them, and reading them now overlaps the reads with the GPU's work.
+  void prefetch(const Request &r) {
+    if (!prefetch_on || (int64_t)r.T * topk < 4LL * E) return;
+    fill(r.layer, std::vector<char>(E, 1), false, true);
+  }
+
+  void run() {
+    // The GPU waits on this thread once per MoE layer: keep it on a performance core.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    for (;;) {
+      Request r;
+      {
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait(lock, [&] { return stop || !queue.empty(); });
+        if (stop) return;
+        r = queue.front();
+        queue.pop_front();
+      }
+      while (ev.signaledValue < r.ready) {   // the GPU gets there within the pass: spin
+        if (stop) return;
+      }
+      handle(r);
+      ev.signaledValue = r.go;
+      Request nxt{-1, 0, 0, 0};
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        if (!queue.empty()) nxt = queue.front();
+      }
+      if (nxt.layer == r.layer + 1 && nxt.T == r.T) prefetch(nxt);
+    }
+  }
+
+  void submit(const Request &r) {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      queue.push_back(r);
+    }
+    cv.notify_one();
+  }
+
+  ~ExpertCache() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      stop = true;
+    }
+    cv.notify_one();
+    if (worker.joinable()) worker.join();   // before the file it reads from is closed
+    if (fd >= 0) close(fd);
+    if (trace) fclose(trace);
+  }
+};
+
+Engine::~Engine() = default;
+
+Engine::ExpertStats Engine::expert_stats() const {
+  if (!cache_) return {0, 0, 0, 0, 0};
+  const ExpertCache &x = *cache_;
+  const size_t slot_bytes = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);
+  return {x.slots, x.layers * (x.E + 1), slot_bytes, x.hits, x.loads};
+}
+
 Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
-    : model_(new ModelFile(mt_, model_path)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
+    : model_(new ModelFile(mt_, model_path, false)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
   const Config &c = config();
+  // Experts in memory, or on disk with a cache: the cache when the whole model,
+  // its attention cache and scratch would not fit in 85% of what Metal
+  // recommends the GPU use, or when RACELINE_EXPERT_CACHE says so (0: never).
+  double cache_gb = 0;
+  if (c.is_moe()) {
+    const double setting = expert_cache_setting();
+    const double budget = 0.85 * (double)mt_.device().recommendedMaxWorkingSetSize;
+    const double experts = (double)model_->expert_bytes(), rest = (double)model_->file_bytes() - experts;
+    int attn_layers = 1;  // the draft head's
+    for (int i = 0; i < c.layers; i++) attn_layers += !c.is_linear_layer(i);
+    const double kv = 2.0 * attn_layers * c.kv_heads * c.head_dim * ((max_ctx + 255) / 256 * 256) * sizeof(_Float16);
+    const double scratch = 1.5e9;
+    if (setting > 0) cache_gb = setting;
+    else if (setting < 0 && rest + experts + kv + scratch > budget) {
+      cache_gb = (budget - rest - kv - scratch) / 1e9;
+      if (cache_gb < 1) fatal("this model needs about %.1f GB of GPU memory outside its experts; this Mac allows %.1f",
+                              (rest + kv + scratch) / 1e9, budget / 1e9);
+    }
+  }
+  if (cache_gb <= 0) model_->map_expert_sections(mt_);
   if (c.lin_k_dim != 128 || c.head_dim != 256 || c.rope_dims() != 64 || c.conv_taps != 4 || c.group != 64 ||
       c.block != 256 || c.lin_v_dim % 8 != 0 || c.heads % c.kv_heads != 0)
     fatal("unsupported model geometry (kernels assume Dk=128, head_dim=256, 64 rotary dims, 4 conv taps)");
@@ -58,7 +307,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   x_stride_ = std::max({c.hidden, c.intermediate, c.lin_value_dim(), c.attn_dim(), has_mtp_ ? 2 * c.hidden : 0});
   proj_stride_ = 0;
   for (int i = 0; i < n_layers; i++) {
-    proj_stride_ = std::max(proj_stride_, model_->q(lname(i, "mlp.gate_up")).n_pad);
+    if (!c.is_moe()) proj_stride_ = std::max(proj_stride_, model_->q(lname(i, "mlp.gate_up")).n_pad);
     proj_stride_ = std::max(proj_stride_, model_->q(lname(i, is_linear(i) ? "lin.in_proj" : "attn.qkv")).n_pad);
   }
 
@@ -84,6 +333,77 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   ap_ = mt_.alloc(score_cap_ * sizeof(_Float16));
   rope_ = mt_.alloc(R * 64 * sizeof(float));
   logits_ = mt_.alloc((size_t)16 * model_->q("lm_head").n_pad * sizeof(float));
+  if (c.is_moe()) {
+    const size_t S = c.experts_per_tok + 1, A = R * S, tm = 16;
+    const int router = model_->q(lname(0, "moe.router")).n_pad;
+    moe_logits_ = mt_.alloc(R * router * sizeof(float));
+    moe_tok_ = mt_.alloc(A * sizeof(int32_t));
+    moe_inv_ = mt_.alloc(A * sizeof(int32_t));
+    moe_w_ = mt_.alloc(A * sizeof(float));
+    moe_sel_ = mt_.alloc(A * sizeof(int32_t));
+    moe_items_ = mt_.alloc((A / tm + c.experts + 2) * 4 * sizeof(int32_t));
+    moe_args_ = mt_.alloc(6 * sizeof(uint32_t));
+    // The grouped matmuls read whole tiles of TM rows: room for one past the last row.
+    moe_x_ = mt_.alloc((A + tm) * c.hidden * sizeof(_Float16));
+    moe_gu_ = mt_.alloc(A * 2 * c.moe_inter * sizeof(float));
+    moe_act_ = mt_.alloc((A + tm) * c.moe_inter * sizeof(_Float16));
+    moe_y_ = mt_.alloc(A * c.hidden * sizeof(float));
+    moe_identity_ = mt_.alloc((c.experts + 1) * sizeof(int32_t));
+    for (int e = 0; e <= c.experts; e++) ((int32_t *)moe_identity_.contents)[e] = e;
+
+    if (cache_gb > 0) {
+      cache_ = std::make_unique<ExpertCache>();
+      ExpertCache &x = *cache_;
+      x.layers = c.layers;
+      x.E = c.experts;
+      x.S = (int)S;
+      x.fd = open(model_->path().c_str(), O_RDONLY);
+      if (x.fd < 0) fatal("cannot open %s", model_->path().c_str());
+      // For measuring a Mac with less memory on one with more: read experts from
+      // the SSD every time, past the system's file cache.
+      if (getenv("RACELINE_EXPERT_NOCACHE") && atoi(getenv("RACELINE_EXPERT_NOCACHE"))) fcntl(x.fd, F_NOCACHE, 1);
+      for (int kind = 0; kind < 2; kind++) {
+        for (int i = 0; i < c.layers; i++) {
+          const QTensor &t = model_->q(lname(i, kind ? "moe.down" : "moe.gate_up"));
+          const int ne = kind ? c.hidden : 2 * c.moe_inter;
+          x.w_bytes[kind] = (size_t)ne * t.k / 2;
+          x.s_floats[kind] = ne;
+          x.src_w[kind].push_back(model_->file_offset(t.host + t.w));
+          x.src_s[kind].push_back(model_->file_offset(t.host + t.s));
+        }
+      }
+      const size_t per_slot = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);
+      // At least the shared experts and one layer's worth; at most every expert.
+      x.slots = std::min(std::max((int)(cache_gb * 1e9 / per_slot), c.layers + c.experts), c.layers * (c.experts + 1));
+      x.big_rows = kMaxDrafts + 1;
+      x.topk = c.experts_per_tok;
+      if (const char *v = getenv("RACELINE_EXPERT_PREFETCH"); v && *v && !atoi(v)) x.prefetch_on = false;
+      if (const char *path = getenv("RACELINE_EXPERT_TRACE"); path && *path) x.trace = fopen(path, "wb");
+      for (int kind = 0; kind < 2; kind++) {
+        x.w[kind] = mt_.alloc((size_t)x.slots * x.w_bytes[kind]);
+        x.s[kind] = mt_.alloc((size_t)x.slots * x.s_floats[kind] * sizeof(float));
+      }
+      x.cols = mt_.alloc((size_t)c.layers * c.moe_inter * sizeof(float));
+      for (int i = 0; i < c.layers; i++) {
+        const QTensor &dn = model_->q(lname(i, "moe.down"));
+        memcpy((float *)x.cols.contents + (size_t)i * c.moe_inter, dn.host + dn.c, c.moe_inter * sizeof(float));
+      }
+      x.table = mt_.alloc((size_t)c.layers * (c.experts + 1) * sizeof(int32_t));
+      memset(x.table.contents, 0xff, x.table.length);   // -1: not loaded
+      x.owner.assign(x.slots, {-1, -1});
+      x.prev.assign(x.slots + 1, x.slots);
+      x.next.assign(x.slots + 1, x.slots);
+      for (int i = 0; i < c.layers; i++) {             // each layer's shared expert: a pinned slot
+        x.load(i, c.experts, i);
+        x.tab(i)[c.experts] = i;
+        x.owner[i] = {i, c.experts};
+      }
+      x.next_free = c.layers;
+      x.sel = moe_sel_;
+      x.ev = [mt_.device() newSharedEvent];
+      x.worker = std::thread([&x] { x.run(); });
+    }
+  }
 
   ones_ = mt_.alloc((size_t)x_stride_ * sizeof(float));
   std::fill_n((float *)ones_.contents, x_stride_, 1.0f);
@@ -92,7 +412,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     // Norm weights times the column scales (from column col0 on) of the matrix they feed.
     auto fold = [&](const FTensor &norm, const QTensor &consumer, int col0 = 0) {
       id<MTLBuffer> b = mt_.alloc((size_t)c.hidden * sizeof(float));
-      const float *cs = consumer.native ? (const float *)((const char *)consumer.buf.contents + consumer.c) + col0 : nullptr;
+      const float *cs = consumer.native ? (const float *)(consumer.host + consumer.c) + col0 : nullptr;
       float *o = (float *)b.contents;
       for (int k = 0; k < c.hidden; k++) o[k] = norm.data[k] * (cs ? cs[k] : 1.0f);
       return b;
@@ -100,7 +420,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     for (int i = 0; i < n_layers; i++) {
       norm_in_.push_back(fold(model_->f(lname(i, "in_norm")),
                               model_->q(lname(i, is_linear(i) ? "lin.in_proj" : "attn.qkv"))));
-      norm_post_.push_back(fold(model_->f(lname(i, "post_norm")), model_->q(lname(i, "mlp.gate_up"))));
+      norm_post_.push_back(fold(model_->f(lname(i, "post_norm")), model_->q(mlp_in(i))));
     }
     norm_final_ = fold(model_->f("final_norm"), model_->q("lm_head"));
     if (has_mtp_) {
@@ -401,8 +721,11 @@ void Engine::bind_column_scale(const QTensor &consumer, int index) {
   else [enc_ setBuffer:ones_ offset:0 atIndex:index];
 }
 
+std::string Engine::mlp_in(int layer) const { return lname(layer, config().is_moe() ? "moe.gate_up" : "mlp.gate_up"); }
+
 void Engine::encode_mlp(int layer, int T) {
   const Config &c = config();
+  if (c.is_moe()) return encode_moe(layer, T);
   encode_norm(1, layer, T, 0);
   encode_linear(model_->q(lname(layer, "mlp.gate_up")), T, proj_, 0, proj_stride_, false, "linear:gate_up");
 
@@ -415,6 +738,119 @@ void Engine::encode_mlp(int layer, int T) {
   mark("swiglu");
 
   encode_linear(model_->q(lname(layer, "mlp.down")), T, h_, 0, c.hidden, true, "linear:down");
+}
+
+// A mixture-of-experts MLP: router -> routing (top k, counting sort by expert,
+// work list) -> gather the routed rows -> every expert's gate/up over its rows
+// in one indirect dispatch -> SwiGLU -> the same for down -> each token's
+// weighted sum added to the residual stream. The shared expert is expert
+// number E with its own gate, so it runs through the same kernels.
+void Engine::encode_moe(int layer, int T) {
+  const Config &c = config();
+  // Rows per tile of the grouped matmuls: an expert's weights are read once
+  // per tile, and a long prompt sends an expert dozens of rows. A row's result
+  // does not depend on the tile it is computed in.
+  const int S = c.experts_per_tok + 1, A = T * S, TM = A / c.experts >= 24 ? 32 : 16, TN = 64, NSG = 2;
+  const QTensor &router = model_->q(lname(layer, "moe.router"));
+  const QTensor &gu = model_->q(lname(layer, "moe.gate_up"));
+  const QTensor &dn = model_->q(lname(layer, "moe.down"));
+
+  encode_norm(1, layer, T, 0);  // xn_: the normed rows times the gate/up stack's column scales
+  encode_linear(router, T, moe_logits_, 0, router.n_pad, false, "moe:router");
+
+  const Macros route = {{"TOPK", std::to_string(c.experts_per_tok)},
+                        {"E_MAX", std::to_string((c.experts + 31) / 32 * 32)}, {"TM", std::to_string(TM)}};
+  [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_route", route)];
+  [enc_ setBuffer:moe_logits_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_tok_ offset:0 atIndex:1];
+  [enc_ setBuffer:moe_inv_ offset:0 atIndex:2];
+  [enc_ setBuffer:moe_w_ offset:0 atIndex:3];
+  [enc_ setBuffer:moe_items_ offset:0 atIndex:4];
+  [enc_ setBuffer:moe_args_ offset:0 atIndex:5];
+  set_params(enc_, MoeRouteParams{T, c.experts, router.n_pad, 2 * c.moe_inter / TN, c.hidden / TN, c.norm_topk ? 1 : 0},
+             6);
+  [enc_ setBuffer:moe_sel_ offset:0 atIndex:7];
+  run_groups(1, 1, 1024);
+  mark("moe_route");
+
+  const bool offload = cache_ && layer < c.layers;
+  if (offload) {  // the CPU loads the experts this layer needs before the GPU goes on (ExpertCache)
+    // The wait must stay the very next command after the signal, so that the
+    // GPU is always waiting before the CPU answers. Running the shared expert
+    // in between (to hide the ~40 us the GPU takes to wake up from a wait)
+    // gave wrong results whenever the CPU answered first and had refilled a
+    // slot the GPU had read earlier in the same command buffer: a wait that is
+    // already satisfied when reached did not make those writes visible to the
+    // expert matmuls (tests/check_moe.py, chunks of 1 with the smallest cache).
+    ExpertCache &x = *cache_;
+    [enc_ endEncoding];
+    const uint64_t ready = ++x.value, go = ++x.value;
+    [cb_ encodeSignalEvent:x.ev value:ready];
+    [cb_ encodeWaitForEvent:x.ev value:go];
+    enc_ = [cb_ computeCommandEncoder];
+    x.submit({layer, T, ready, go});
+  }
+
+  [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_gather", route)];
+  [enc_ setBuffer:xn_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_tok_ offset:0 atIndex:1];
+  [enc_ setBuffer:moe_x_ offset:0 atIndex:2];
+  set_params(enc_, MoeGatherParams{A, c.hidden, x_stride_}, 3);
+  run_threads(c.hidden / 8, A);
+  mark("moe_gather");
+
+  const Macros mm = {{"TM", std::to_string(TM)}, {"TN", std::to_string(TN)}, {"NSG", std::to_string(NSG)},
+                     {"GROUP", "64"}, {"BLOCK", "256"}, {"OUT_T", "float"}, {"ACCUM", "0"},
+                     {"W_T", c.book == "fp4" ? "metal_fp4_e2m1_format" : "int4b_format"}};
+  [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_q4n_moe", mm)];
+  [enc_ setBuffer:moe_x_ offset:0 atIndex:0];
+  bind_experts(layer, 0, gu);
+  [enc_ setBuffer:moe_items_ offset:0 atIndex:3];
+  [enc_ setBuffer:moe_gu_ offset:0 atIndex:4];
+  set_params(enc_, MoeLinearParams{c.hidden, 2 * c.moe_inter, c.hidden, 2 * c.moe_inter,
+                                   (long)c.moe_inter * c.hidden, 2 * c.moe_inter}, 5);
+  run_indirect(moe_args_, 0, 32 * NSG);
+  mark("moe:gate_up");
+
+  [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "swiglu")];
+  [enc_ setBuffer:moe_gu_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_act_ offset:0 atIndex:1];
+  set_params(enc_, SwigluParams{A, c.moe_inter, 2 * c.moe_inter, c.moe_inter}, 2);
+  if (offload) [enc_ setBuffer:cache_->cols offset:(size_t)layer * c.moe_inter * sizeof(float) atIndex:3];
+  else bind_column_scale(dn, 3);
+  run_threads(c.moe_inter, A);
+  mark("moe_swiglu");
+
+  [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_q4n_moe", mm)];
+  [enc_ setBuffer:moe_act_ offset:0 atIndex:0];
+  bind_experts(layer, 1, dn);
+  [enc_ setBuffer:moe_items_ offset:0 atIndex:3];
+  [enc_ setBuffer:moe_y_ offset:0 atIndex:4];
+  set_params(enc_, MoeLinearParams{c.moe_inter, c.hidden, c.moe_inter, c.hidden,
+                                   (long)c.hidden * c.moe_inter / 2, c.hidden}, 5);
+  run_indirect(moe_args_, 3 * sizeof(uint32_t), 32 * NSG);
+  mark("moe:down");
+
+  [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_combine", route)];
+  [enc_ setBuffer:moe_y_ offset:0 atIndex:0];
+  [enc_ setBuffer:moe_inv_ offset:0 atIndex:1];
+  [enc_ setBuffer:moe_w_ offset:0 atIndex:2];
+  [enc_ setBuffer:h_ offset:0 atIndex:3];
+  set_params(enc_, MoeCombineParams{T, c.hidden, c.hidden}, 4);
+  run_threads(c.hidden, T);
+  mark("moe_combine");
+}
+
+void Engine::bind_experts(int layer, int kind, const QTensor &stack) {
+  if (cache_ && layer < config().layers) {
+    [enc_ setBuffer:cache_->w[kind] offset:0 atIndex:1];
+    [enc_ setBuffer:cache_->s[kind] offset:0 atIndex:2];
+    [enc_ setBuffer:cache_->table offset:(size_t)layer * (config().experts + 1) * sizeof(int32_t) atIndex:6];
+  } else {
+    [enc_ setBuffer:stack.buf offset:stack.w atIndex:1];
+    [enc_ setBuffer:stack.buf offset:stack.s atIndex:2];
+    [enc_ setBuffer:moe_identity_ offset:0 atIndex:6];
+  }
 }
 
 void Engine::encode_linear_attn(int layer, int T, bool spec) {
@@ -580,6 +1016,11 @@ void Engine::run_threads(int w, int h) {
   redo();
 }
 
+void Engine::run_indirect(id<MTLBuffer> args, size_t offset, int threads_per_group) {
+  last_ = {false, MTLSizeMake(0, 0, 0), MTLSizeMake(threads_per_group, 1, 1), args, offset};
+  redo();
+}
+
 // `threads_per_group` threads (a whole number of 32-thread SIMD-groups) per grid cell.
 void Engine::run_groups(int w, int h, int threads_per_group, int depth) {
   last_ = {false, MTLSizeMake(w, h, depth), MTLSizeMake(threads_per_group, 1, 1)};
@@ -587,7 +1028,11 @@ void Engine::run_groups(int w, int h, int threads_per_group, int depth) {
 }
 
 void Engine::redo() {
-  if (last_.threads) [enc_ dispatchThreads:last_.grid threadsPerThreadgroup:last_.per_group];
+  if (last_.indirect)
+    [enc_ dispatchThreadgroupsWithIndirectBuffer:last_.indirect
+                            indirectBufferOffset:last_.indirect_offset
+                           threadsPerThreadgroup:last_.per_group];
+  else if (last_.threads) [enc_ dispatchThreads:last_.grid threadsPerThreadgroup:last_.per_group];
   else [enc_ dispatchThreadgroups:last_.grid threadsPerThreadgroup:last_.per_group];
 }
 

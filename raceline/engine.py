@@ -106,7 +106,17 @@ def _library() -> ctypes.CDLL:
                "rl_hidden", "rl_hidden_size"):
         getattr(lib, fn).argtypes = [ctypes.c_void_p]
     lib.rl_top_k.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
+    u64 = ctypes.POINTER(ctypes.c_ulonglong)
+    lib.rl_expert_cache.argtypes = [ctypes.c_void_p, u64, u64]
+    lib.rl_expert_cache_size.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), u64]
     return lib
+
+
+def _model_config(model_path: str) -> dict:
+    """The configuration in a .rlm file's header."""
+    with open(model_path, "rb") as f:
+        f.seek(8)
+        return json.loads(f.read(int.from_bytes(f.read(8), "little"))).get("config", {})
 
 
 def _tokenizer_dir(model_path: str) -> str:
@@ -152,7 +162,7 @@ def _tokenizer_dir(model_path: str) -> str:
 class RacelineBackend(Backend):
     name = "raceline"
 
-    def __init__(self, model_path: str, max_ctx: int = 32768, chunk: int = 1024, mtp: Optional[bool] = None):
+    def __init__(self, model_path: str, max_ctx: int = 32768, chunk: Optional[int] = None, mtp: Optional[bool] = None):
         from transformers import AutoTokenizer
 
         why = unsupported_reason()
@@ -166,6 +176,12 @@ class RacelineBackend(Backend):
                         if i is not None and i >= 0}
         self.model_id = os.path.basename(model_path)
         self._lib = _library()
+        if chunk is None:
+            # Rows per prompt pass. A mixture of experts reads every expert once per
+            # pass, from the SSD when they are not all in memory: longer passes read
+            # fewer per token (Qwen3.5-35B-A3B on a 24 GB Mac, a 4096-token prompt:
+            # 1273 tok/s in passes of 2048 rows, 792 in passes of 1024).
+            chunk = 2048 if _model_config(model_path).get("num_experts") else 1024
         self._e = self._lib.rl_open(os.path.abspath(model_path).encode(), max_ctx, chunk)
         self._vocab = self._lib.rl_vocab(self._e)
         self._chunk, self._max_ctx = chunk, max_ctx
@@ -197,15 +213,20 @@ class RacelineBackend(Backend):
         # (the product of their probabilities under the head) falls below a
         # threshold. Another draft pays off when that chance exceeds what the
         # draft costs relative to a token, so the threshold follows the measured
-        # times: three times (time per draft / time per token), which allows
-        # for the head being overconfident. RACELINE_MIN_CONFIDENCE fixes it.
+        # times: three times (time per draft + its row in the model's pass) /
+        # time per token, which allows for the head being overconfident.
+        # RACELINE_MIN_CONFIDENCE fixes it.
         self.max_drafts = min(int(os.environ.get("RACELINE_DRAFTS", "6")), self._lib.rl_max_drafts(self._e))
         fixed = os.environ.get("RACELINE_MIN_CONFIDENCE")
         self.min_confidence = float(fixed) if fixed else None
         self._t_draft = self._t_token = None      # running averages, seconds
-        # Drafts copied from the context (see _Lookup): a pass of 16 rows costs
-        # a few percent more than a pass of one, so a long copy is drafted whole.
+        self._cost = _PassCost()
+        # Drafts copied from the context (see _Lookup). On a dense model a pass
+        # of 16 rows costs a few percent more than a pass of one, so a long copy
+        # is drafted whole; where rows cost more (a mixture of experts) the copy
+        # is cut where its tokens stop paying for their rows (_copy_length).
         self.lookup_drafts = min(int(os.environ.get("RACELINE_LOOKUP", "15")), self._lib.rl_max_drafts(self._e))
+        self._copy_held = self._copy_broke = 0.0  # copied drafts confirmed; copies the model broke off
         self._stride = self._lib.rl_logits_stride(self._e)
         self.gpu_seconds = 0.0
         self.counters = dict(passes=0, drafts=0, accepted=0, lookup_passes=0, lookup_drafts=0, lookup_accepted=0)
@@ -214,6 +235,23 @@ class RacelineBackend(Backend):
         if getattr(self, "_e", None):
             self._lib.rl_close(self._e)
             self._e = None
+
+    def expert_cache(self):
+        """A mixture of experts with its experts on disk: (slots in the cache, routed experts
+        found loaded, experts read) since the engine opened. None when all are in memory."""
+        hits, reads = ctypes.c_ulonglong(), ctypes.c_ulonglong()
+        slots = self._lib.rl_expert_cache(self._e, ctypes.byref(hits), ctypes.byref(reads))
+        return (slots, hits.value, reads.value) if slots else None
+
+    def expert_cache_size(self):
+        """A mixture of experts with its experts on disk: (GB the cache holds, share of the
+        experts that fit in it). None when all are in memory."""
+        slots = self._lib.rl_expert_cache(self._e, None, None)
+        if not slots:
+            return None
+        n, size = ctypes.c_int(), ctypes.c_ulonglong()
+        self._lib.rl_expert_cache_size(self._e, ctypes.byref(n), ctypes.byref(size))
+        return slots * size.value / 1e9, slots / max(1, n.value)
 
     @property
     def position(self) -> int:
@@ -274,6 +312,7 @@ class RacelineBackend(Backend):
                 k = min(self.max_drafts, room) if self.mtp else 0
                 if k < 1 or token in self.eos_ids:
                     self._forward([token])
+                    self._cost.add(1, lib.rl_last_gpu_seconds(e))
                     recent.append(token)
                     if look:
                         look.push(token)
@@ -287,7 +326,8 @@ class RacelineBackend(Backend):
                 t_cycle = time.perf_counter()
                 threshold = self.min_confidence
                 if threshold is None:
-                    threshold = 0.3 if self._t_token is None else min(0.8, max(0.1, 3.0 * self._t_draft / self._t_token))
+                    threshold = 0.3 if self._t_token is None else min(
+                        0.8, max(0.1, 3.0 * (self._t_draft + self._cost.per_row()) / self._t_token))
                 row, seen, confidence = [token], recent + [token], 1.0
                 guess = np.ctypeslib.as_array(lib.rl_draft_logits(e, token), shape=(D,))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
@@ -296,6 +336,9 @@ class RacelineBackend(Backend):
                 if len(copied) > 1 and copied[0] == draft:
                     # The context and the head agree on the next token: draft what followed there.
                     end = next((j + 1 for j, t in enumerate(copied) if t in self.eos_ids), len(copied))
+                    if self._t_token is not None:
+                        held = (self._copy_held + 4) / (self._copy_held + self._copy_broke + 5)   # prior: 4 in 5
+                        end = min(end, _copy_length(held, self._cost.per_row() / self._t_token, end))
                     row += copied[:end]
                 else:
                     copied = None
@@ -315,6 +358,7 @@ class RacelineBackend(Backend):
                 rows = np.ctypeslib.as_array(lib.rl_forward_draft(e, (ctypes.c_int32 * n)(*row), n),
                                              shape=(n, self._stride))
                 self.gpu_seconds += lib.rl_last_gpu_seconds(e)
+                self._cost.add(n, lib.rl_last_gpu_seconds(e))
                 self._open = [n, 1]
                 self._logits = rows[0, :V]
                 self.counters["passes"] += 1
@@ -346,6 +390,9 @@ class RacelineBackend(Backend):
                     nxt = _sample(rows[accepted, :V], sampling, recent, seed, pos)
                 self._settle()
                 token = nxt
+                if copied:
+                    self._copy_held = 0.95 * self._copy_held + accepted
+                    self._copy_broke = 0.95 * self._copy_broke + (accepted < n - 1)
                 # What a draft from the head and a token cost here, for the next
                 # cycles' threshold (time the consumer spends between yields is
                 # counted too; it is small). Copied drafts cost nothing to make.
@@ -367,6 +414,45 @@ class RacelineBackend(Backend):
         self._settle()
         self._lib.rl_load_state(self._e, snap.state.ctypes.data, snap.position)
         self._logits = snap.logits
+
+
+class _PassCost:
+    """What one more row of a speculative pass costs, measured.
+
+    A least-squares line through (rows, GPU seconds) of recent passes, older
+    ones weighing less. On a dense model the weights are read once however
+    many rows a pass has, and a row costs next to nothing; in a mixture of
+    experts each row can bring in experts that no other row needed.
+    """
+
+    def __init__(self, decay: float = 0.98):
+        self.decay = decay
+        self.w = self.n = self.nn = self.t = self.nt = 0.0
+
+    def add(self, rows: int, seconds: float) -> None:
+        d = self.decay
+        self.w = d * self.w + 1
+        self.n = d * self.n + rows
+        self.nn = d * self.nn + rows * rows
+        self.t = d * self.t + seconds
+        self.nt = d * self.nt + rows * seconds
+
+    def per_row(self) -> float:
+        """Seconds per row beyond the first; 0 until the passes seen differ enough in length."""
+        spread = self.w * self.nn - self.n * self.n        # w^2 * variance of the row counts
+        if self.w < 8 or spread < 0.5 * self.w * self.w:
+            return 0.0
+        return max(0.0, (self.w * self.nt - self.n * self.t) / spread)
+
+
+def _copy_length(held: float, row_cost: float, longest: int) -> int:
+    """How many tokens of a copy to draft: the i-th is worth its row while the
+    chance that it and the ones before it all hold (held ** i) exceeds what a
+    row costs relative to a token. At least the first, which the head agreed with."""
+    n = 1
+    while n < longest and held ** (n + 1) > row_cost:
+        n += 1
+    return n
 
 
 class _Lookup:

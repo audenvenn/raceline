@@ -183,6 +183,28 @@ def test_lookup_proposes_what_followed_the_last_occurrence():
     assert _Lookup([1]).propose(2, 4) == [] and look.propose(3, 0) == []
 
 
+def test_pass_cost_measures_what_a_row_adds():
+    from raceline.engine import _PassCost, _copy_length
+
+    rng = np.random.default_rng(0)
+    moe, dense = _PassCost(), _PassCost()
+    for i in range(200):
+        rows = 1 + i % 8
+        moe.add(rows, 0.020 + 0.004 * (rows - 1) + rng.normal(0, 2e-4))
+        dense.add(rows, 0.020 + rng.normal(0, 2e-4))
+    assert abs(moe.per_row() - 0.004) < 3e-4, moe.per_row()
+    assert dense.per_row() < 2e-4, dense.per_row()
+    same = _PassCost()                     # every pass the same length: no slope to measure
+    for _ in range(50):
+        same.add(4, 0.03)
+    assert same.per_row() == 0.0 and _PassCost().per_row() == 0.0
+    # A copy is cut where its rows stop paying: held ** n against the cost of a row.
+    assert _copy_length(0.9, 0.0, 15) == 15            # free rows: the whole copy
+    assert _copy_length(0.7, 0.2, 15) == 4             # 0.7 ** 4 = 0.24 > 0.2 > 0.7 ** 5
+    assert _copy_length(0.5, 0.9, 15) == 1             # the first, which the head agreed with
+    assert _copy_length(0.99, 0.01, 6) == 6
+
+
 def test_command_timeout_kills_what_it_started():
     """A shell command that times out must not leave its children running (a
     test stuck in a loop kept burning a CPU core for hours before this)."""

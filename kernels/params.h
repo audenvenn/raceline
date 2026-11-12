@@ -20,6 +20,14 @@ struct DeltaParams { int T, Hk, Dk, Hv, Dv, qk_stride, y_stride, v_off, bg_strid
 struct OutNormParams { int T, Hv, Dv, yo_stride, proj_stride, off_z, out_stride; float eps; };
 struct SwigluParams { int T, I, in_stride, out_stride; };
 struct CopyParams { int T, D; };
+// Mixture of experts (kernels/moe.metal, linear.metal: linear_q4n_moe).
+struct MoeRouteParams { int T, E, stride, tiles_gu, tiles_down, norm_topk; };
+struct MoeGatherParams { int R, K, x_stride; };
+// An expert's weights start w_stride bytes and its row scales s_stride floats
+// after the previous slot's: in the stacked tensor (slot = expert), or in the
+// expert cache (slot = where the expert was loaded).
+struct MoeLinearParams { int K, Ne, a_stride, c_stride; long w_stride; int s_stride; };
+struct MoeCombineParams { int T, H, y_stride; };
 // Rows of a rotated residual stream (see kernels/ops.metal, "rotation").
 struct RotNormParams { int T, D, in_stride, out_stride; float eps; };
 struct AttnParams {

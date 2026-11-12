@@ -41,7 +41,13 @@ def _runtime(args, agent: bool = False):
     from .pull import resolve
 
     args.model = resolve(args.model)
+    if getattr(args, "expert_cache", None) is not None:
+        os.environ["RACELINE_EXPERT_CACHE"] = str(args.expert_cache)
     backend = load_backend(args.model, args.backend)
+    cache = getattr(backend, "expert_cache_size", lambda: None)()
+    if cache:
+        print(f"raceline: {100 * cache[1]:.0f}% of the model's experts are kept in memory ({cache[0]:.1f} GB); the others "
+              "are read from the SSD when a layer needs them (--expert-cache GB changes that)", file=sys.stderr)
     sampling = agent_sampling(args.model, backend, not args.no_think) if agent else _defaults(args.model, backend)
     if args.temperature is not None:
         sampling.temperature = args.temperature
@@ -68,6 +74,10 @@ def _main(argv=None):
                             "(default: $RACELINE_MODEL, or the pulled model if there is only one)")
         p.add_argument("--backend", choices=["mlx", "raceline"], help="default: by model type")
         p.add_argument("--temperature", type=float)
+        p.add_argument("--expert-cache", type=float, metavar="GB",
+                       help="mixture-of-experts models: keep the experts on disk and the ones in use in a cache "
+                            "of this size (0: all in memory; default: decided from this Mac's memory; "
+                            "RACELINE_EXPERT_CACHE)")
 
     p = sub.add_parser("serve", help="OpenAI-compatible API on localhost")
     common(p)

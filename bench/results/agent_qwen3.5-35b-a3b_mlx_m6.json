@@ -1,0 +1,23 @@
+[
+ {
+  "model": "models/Qwen3.5-35B-A3B-MLX-4bit",
+  "backend": "mlx",
+  "mtp": false,
+  "load_s": 5.3,
+  "prompt_tokens": 1024,
+  "gen_tokens": 128,
+  "corpus": "stdlib",
+  "samples": 1,
+  "prefill_tps": 290.0,
+  "decode_tps": 3.5,
+  "peak_gb": 21.3,
+  "note": "copied from the run's printed line (bench/agent_bench.py was stopped before writing its JSON); the model swapped: 21.3 GB in use on a 24 GB Mac"
+ },
+ {
+  "model": "models/Qwen3.5-35B-A3B-MLX-4bit",
+  "backend": "mlx",
+  "prompt_tokens": 4096,
+  "corpus": "stdlib",
+  "stopped": "after 11 minutes, when swap use passed 8 GB (watchdog)"
+ }
+]

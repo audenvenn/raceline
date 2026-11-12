@@ -120,6 +120,8 @@ def main():
         agent = Agent(rt, work, auto_approve=True, thinking=not args.no_think, max_tokens=4096,
                       max_steps=args.max_steps, interactive=False, color=False, effort=args.effort)
         before = dict(getattr(backend, "counters", {}))
+        experts = getattr(backend, "expert_cache", lambda: None)   # a MoE model with its experts on disk
+        e0 = experts()
         log = io.StringIO()
         t0 = time.perf_counter()
         with contextlib.redirect_stdout(log):
@@ -131,6 +133,10 @@ def main():
                    completion_tokens=totals["completion_tokens"], decode_seconds=totals.get("decode_seconds", 0.0),
                    prefill_seconds=totals.get("prefill_seconds", 0.0), context_tokens=totals["last"]["prompt_tokens"]
                    if totals.get("last") else 0, **c)
+        e1 = experts()
+        if e0 and e1:
+            hits, reads = e1[1] - e0[1], e1[2] - e0[2]
+            res.update(experts_from_cache=hits / max(1, hits + reads), experts_read=reads)
         results.append(res)
         if args.transcripts:
             with open(os.path.join(args.transcripts, f"{name}.txt"), "w", encoding="utf-8") as f:
@@ -138,8 +144,9 @@ def main():
         tps = res["completion_tokens"] / res["decode_seconds"] if res["decode_seconds"] else 0.0
         ok = f"{100 * c['accepted'] / c['drafts']:.0f}%" if c.get("drafts") else "-"
         copied = f"{100 * c['lookup_accepted'] / res['completion_tokens']:.0f}%" if c.get("lookup_drafts") else "-"
+        cached = f"  {100 * res['experts_from_cache']:.0f}% experts cached" if "experts_from_cache" in res else ""
         print(f"{name:16s} {'solved' if solved else 'FAILED':8s} {res['steps']:5d} {seconds:6.1f}s "
-              f"{res['completion_tokens']:7d} {tps:6.1f} tok/s {ok:>9s} {copied:>7s}  {why}", flush=True)
+              f"{res['completion_tokens']:7d} {tps:6.1f} tok/s {ok:>9s} {copied:>7s}{cached}  {why}", flush=True)
 
     n_ok = sum(r["solved"] for r in results)
     out = sum(r["completion_tokens"] for r in results)

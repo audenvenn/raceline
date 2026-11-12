@@ -20,7 +20,13 @@ static int geti(NSDictionary *d, NSString *key) {
   return [v intValue];
 }
 
-ModelFile::ModelFile(Metal &mt, const std::string &path) {
+static int geti_or(NSDictionary *d, NSString *key, int fallback) {
+  id v = d[key];
+  return [v isKindOfClass:[NSNumber class]] ? [v intValue] : fallback;
+}
+
+ModelFile::ModelFile(Metal &mt, const std::string &path, bool map_experts) {
+  path_ = path;
   int fd = open(path.c_str(), O_RDONLY);
   if (fd < 0) fatal("cannot open %s", path.c_str());
   struct stat st;
@@ -57,6 +63,14 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   cfg_.rope_theta = [c[@"rope_theta"] doubleValue];
   cfg_.partial_rotary = [c[@"partial_rotary_factor"] floatValue];
   if ([c[@"eos_token_id"] isKindOfClass:[NSNumber class]]) cfg_.eos = [c[@"eos_token_id"] intValue];
+  cfg_.experts = geti_or(c, @"num_experts", 0);
+  if (cfg_.experts) {
+    cfg_.experts_per_tok = geti(c, @"num_experts_per_tok");
+    cfg_.moe_inter = geti(c, @"moe_intermediate_size");
+    cfg_.norm_topk = geti_or(c, @"norm_topk_prob", 1) != 0;
+    if (cfg_.experts % 32 || cfg_.experts > 1024 || cfg_.experts_per_tok < 1 || cfg_.experts_per_tok > 16)
+      fatal("unsupported mixture of experts: %d experts, %d per token", cfg_.experts, cfg_.experts_per_tok);
+  }
   NSDictionary *qc = h[@"quant"];
   cfg_.block = geti(qc, @"block");
   cfg_.native = [qc[@"mode"] isEqual:@"native"];
@@ -75,8 +89,9 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   for (NSDictionary *s in sections) {
     size_t off = [s[@"offset"] unsignedLongLongValue], n = [s[@"nbytes"] unsignedLongLongValue];
     if (off + n > Metal::round_up(size_, Metal::page_size())) fatal("section '%s' runs past the end of the file", [s[@"name"] UTF8String]);
-    bufs.push_back(mt.wrap((void *)(base + off), n));
+    bufs.push_back(!map_experts && [s[@"name"] hasPrefix:@"experts."] ? nil : mt.wrap((void *)(base + off), n));
     sec_off.push_back(off);
+    sections_.push_back({[s[@"name"] UTF8String], off, n, bufs.back()});
   }
 
   NSDictionary *tensors = h[@"tensors"];
@@ -95,6 +110,7 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
     } else {
       QTensor qt;
       qt.buf = bufs[sec];
+      qt.host = base + sec_off[sec];
       qt.native = [kind hasPrefix:@"q4n"];
       qt.dense = [kind isEqualToString:@"f16b"];
       qt.blocked = qt.dense || [kind isEqualToString:@"q4a"] || [kind isEqualToString:@"q4n"];
@@ -111,8 +127,23 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
       for (NSString *pn in parts)
         qt.parts[pn.UTF8String] = {geti(parts[pn], @"offset"), geti(parts[pn], @"n")};
       q_[name.UTF8String] = qt;
+      q_section_[name.UTF8String] = sec;
     }
   }
+}
+
+void ModelFile::map_expert_sections(Metal &mt) {
+  for (auto &s : sections_)
+    if (!s.buf && s.name.rfind("experts.", 0) == 0) s.buf = mt.wrap((uint8_t *)map_ + s.offset, s.nbytes);
+  for (auto &[name, sec] : q_section_)
+    if (!q_[name].buf) q_[name].buf = sections_[sec].buf;
+}
+
+size_t ModelFile::expert_bytes() const {
+  size_t n = 0;
+  for (const auto &s : sections_)
+    if (s.name.rfind("experts.", 0) == 0) n += s.nbytes;
+  return n;
 }
 
 ModelFile::~ModelFile() {

@@ -134,6 +134,9 @@ def report(out):
 
 
 def main():
+    import mlx.core as mx
+
+    mx.set_cache_limit(1 << 30)   # freed buffers kept for reuse; unbounded, the pool grows by several GB
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("what", choices=["float", "engine", "mlx", "report"])
     ap.add_argument("model", nargs="?")

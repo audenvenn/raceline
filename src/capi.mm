@@ -39,6 +39,17 @@ int rl_max_drafts(const rl_engine *) { return rl::Engine::kMaxDrafts; }
 void rl_set_draft_vocab(rl_engine *e, int rows) { e->engine.set_draft_vocab(rows); }
 int rl_draft_vocab(const rl_engine *e) { return e->engine.draft_vocab(); }
 void rl_set_draft_tail(rl_engine *e, int first) { e->engine.set_draft_tail(first); }
+void rl_expert_cache_size(const rl_engine *e, int *experts, unsigned long long *slot_bytes) {
+  const rl::Engine::ExpertStats s = e->engine.expert_stats();
+  if (experts) *experts = s.experts;
+  if (slot_bytes) *slot_bytes = s.slot_bytes;
+}
+int rl_expert_cache(const rl_engine *e, unsigned long long *hits, unsigned long long *loads) {
+  const rl::Engine::ExpertStats s = e->engine.expert_stats();
+  if (hits) *hits = s.hits;
+  if (loads) *loads = s.loads;
+  return s.slots;
+}
 int rl_draft_main(const rl_engine *e) { return e->engine.draft_main(); }
 int rl_draft_tail(const rl_engine *e) { return e->engine.draft_tail(); }
 size_t rl_logits_stride(const rl_engine *e) { return (size_t)(e->engine.logits(1) - e->engine.logits(0)); }

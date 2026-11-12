@@ -52,8 +52,10 @@ def main():
     rt = Runtime(backend, Sampling(temperature=0.0))
     for _ in rt.chat([{"role": "user", "content": "Hi"}], thinking=False, max_tokens=8):   # warm up
         pass
+    experts = getattr(backend, "expert_cache", lambda: None)   # a MoE model with its experts on disk
     for label, sampling in MODES:
         tokens = seconds = drafts = accepted = 0
+        e0 = experts()
         for prompt in PROMPTS:
             for kind, value in rt.chat([{"role": "user", "content": prompt}], sampling=sampling, max_tokens=300,
                                        thinking=False):
@@ -63,10 +65,15 @@ def main():
                     drafts += value.get("drafts", 0)
                     accepted += value.get("drafts_accepted", 0)
         note = f"   {100 * accepted / drafts:.0f}% of drafts accepted" if drafts else ""
+        e1, cache = experts(), {}
+        if e0 and e1:
+            hits, reads = e1[1] - e0[1], e1[2] - e0[2]
+            cache = dict(expert_slots=e1[0], experts_from_cache=hits / max(1, hits + reads), experts_read=reads)
+            note += f"   {100 * cache['experts_from_cache']:.1f}% of experts from the cache"
         print(f"{backend.name:8s} {label:40s} {tokens:4d} tokens  {tokens / seconds:6.1f} tok/s{note}", flush=True)
         results.append(dict(model=args.model, backend=backend.name, mtp=bool(getattr(backend, "mtp", False)),
                             sampling=label, tokens=tokens, decode_tps=tokens / seconds,
-                            drafts_accepted=accepted / drafts if drafts else None))
+                            drafts_accepted=accepted / drafts if drafts else None, **cache))
     if args.json:
         with open(args.json, "w") as f:
             json.dump(results, f, indent=1)

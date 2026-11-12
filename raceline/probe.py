@@ -9,8 +9,10 @@ Two numbers bound single-user inference on Apple Silicon:
                      tokens/s <= FLOPS / (2 * parameters).
 
 The probe measures both on the GPU and prints the resulting ceilings for a
-few model sizes. Given a model, it also measures what a backend actually
-reaches, as a fraction of those ceilings.
+few model sizes. A mixture-of-experts model larger than the GPU's memory
+keeps its experts on disk and reads the ones a layer needs, so the probe also
+measures random reads of one expert's size from the SSD. Given a model, it
+measures what a backend actually reaches, as a fraction of those ceilings.
 """
 
 from __future__ import annotations
@@ -88,6 +90,14 @@ def gpu_bandwidth(gib: float = 1.0) -> float:
     return best
 
 
+def gpu_budget() -> float:
+    """GB the engine lets a model use on the GPU: 85% of the working set Metal recommends."""
+    import mlx.core as mx
+
+    info = mx.device_info() if hasattr(mx, "device_info") else mx.metal.device_info()
+    return 0.85 * info.get("max_recommended_working_set_size", 0) / GB
+
+
 def gpu_matmul() -> float:
     """Peak TFLOPS of a dense half-precision matrix product."""
     import mlx.core as mx
@@ -101,8 +111,42 @@ def gpu_matmul() -> float:
     return peak
 
 
-# (label, parameters in billions, weight bytes at 4 bits per weight plus token table and head)
-SIZES = (("4B", 4.2, 2.3 * GB), ("9B", 9.0, 5.0 * GB), ("27B", 27.0, 13.6 * GB), ("70B", 70.0, 35.5 * GB))
+def ssd_reads(size: int = 1_581_056, n: int = 48) -> tuple:
+    """GB/s of random reads of `size` bytes (one expert of Qwen3.5-35B-A3B at 4 bits)
+    past the file cache, one at a time and eight at a time, from a scratch file."""
+    import fcntl
+    import random
+    import tempfile
+    from concurrent.futures import ThreadPoolExecutor
+
+    F_NOCACHE = 48
+    span = 1 << 30
+    fd, path = tempfile.mkstemp(prefix="raceline-probe-")
+    try:
+        fcntl.fcntl(fd, F_NOCACHE, 1)
+        block = os.urandom(1 << 20)
+        for _ in range(span >> 20):
+            os.write(fd, block)
+        os.fsync(fd)
+        rng = random.Random(0)
+        out = []
+        for depth in (1, 8):
+            offsets = [rng.randrange(0, span - size) & ~4095 for _ in range(n)]
+            t0 = time.perf_counter()
+            with ThreadPoolExecutor(depth) as ex:
+                got = sum(ex.map(lambda off: len(os.pread(fd, size, off)), offsets))
+            out.append(got / (time.perf_counter() - t0) / GB)
+        return tuple(out)
+    finally:
+        os.close(fd)
+        os.unlink(path)
+
+
+# (label, parameters in billions: all and used per token, weight bytes at 4 bits per weight plus token
+# table and head, bytes a token reads, bytes of experts that can stay on disk)
+SIZES = (("4B", 4.2, 4.2, 2.3 * GB, 2.3 * GB, 0), ("9B", 9.0, 9.0, 5.0 * GB, 5.0 * GB, 0),
+         ("27B", 27.0, 27.0, 13.6 * GB, 13.6 * GB, 0), ("35B-A3B", 35.0, 3.0, 18.6 * GB, 1.5 * GB, 16.3 * GB),
+         ("70B", 70.0, 70.0, 35.5 * GB, 35.5 * GB, 0))
 
 
 def measure_model(model: str, backend_name=None, prompt_tokens: int = 1024, gen_tokens: int = 96) -> dict:
@@ -143,14 +187,25 @@ def run(model=None, backend=None) -> None:
     bw = gpu_bandwidth(min(1.0, m["ram_gb"] / 16))
     print(f"  GPU memory bandwidth       {bw:6.1f} GB/s")
     tf = gpu_matmul()
-    print(f"  matrix multiply (half)     {tf:6.1f} TFLOPS\n")
+    print(f"  matrix multiply (half)     {tf:6.1f} TFLOPS")
+    one, eight = ssd_reads()
+    print(f"  SSD, 1.6 MB random reads   {one:6.1f} GB/s one at a time, {eight:.1f} GB/s eight at a time\n")
     print("  What that allows, per model size at 4 bits per weight:\n")
     print(f"  {'model':8s} {'weights':>9s} {'fits':>6s} {'decode ceiling':>16s} {'prefill ceiling':>17s}")
-    for label, params, nbytes in SIZES:
-        fits = "yes" if nbytes / 2**30 + 3 < m["ram_gb"] else "no"
-        print(f"  {label:8s} {nbytes / GB:7.1f} GB {fits:>6s} {bw * GB / nbytes:10.1f} tok/s {tf * 1e12 / (2 * params * 1e9):11.0f} tok/s")
-    print("\n  The decode ceiling is for one token per pass over the weights. A draft that is")
-    print("  verified in the same pass (raceline uses the model's own MTP head) goes above it.")
+    budget = gpu_budget()
+    for label, params, active, nbytes, per_token, experts in SIZES:
+        if not experts:
+            fits = "yes" if nbytes / 2**30 + 3 < m["ram_gb"] else "no"
+        else:   # the engine's rule: model, attention cache and scratch (about 2.2 GB) within the budget
+            fits = ("yes" if nbytes / GB + 2.2 <= budget else
+                    "SSD" if (nbytes - experts) / GB + 2.2 + 1 <= budget else "no")
+        print(f"  {label:8s} {nbytes / GB:7.1f} GB {fits:>6s} {bw * GB / per_token:10.1f} tok/s "
+              f"{tf * 1e12 / (2 * active * 1e9):11.0f} tok/s")
+    print("\n  The decode ceiling is for one token per pass over the weights a token uses. A draft")
+    print("  that is verified in the same pass (raceline uses the model's own MTP head) goes above it.")
+    print("  35B-A3B is a mixture of experts: a token uses 3B of its 35B parameters. \"SSD\": the")
+    print("  experts that do not fit stay on disk and a layer reads the ones it needs when they are")
+    print(f"  not in memory, an expert in {1.581 / one:.1f} ms here.")
     if not model:
         return
     print(f"\n  Measuring {model} ...")

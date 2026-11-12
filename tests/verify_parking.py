@@ -52,7 +52,9 @@ def main():
 
     def fresh(prompt):
         """What the engine writes after reading `prompt` from scratch."""
-        _, out, logits = run(Session(backend), prompt)    # a new session resets the engine
+        session = Session(backend)
+        session.reset()             # the engine starts empty, as a new one would
+        _, out, logits = run(session, prompt)
         return out, logits
 
     _, out_a, _ = run(s, a)

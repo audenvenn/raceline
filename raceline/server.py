@@ -113,11 +113,19 @@ def make_handler(runtime: Runtime, model_id: str):
                                   effort=_effort(body))
             try:
                 if body.get("stream"):
-                    self._stream(events, body)
+                    # The first event comes once the prompt has been read: a prompt that does not fit fails
+                    # here, before anything is sent, and gets the error clients look for to shorten it.
+                    first = next(events, None)
+                    self._stream(itertools.chain([first] if first else [], events), body)
                 else:
                     self._complete(events)
             except (BrokenPipeError, ConnectionResetError):
                 pass  # the client went away; the session keeps whatever was generated
+            except ContextFull as e:
+                self._json(400, {"error": {
+                    "message": f"This model's maximum context length is {e.limit} tokens. However, your messages "
+                               f"resulted in {e.tokens} tokens. Please reduce the length of the messages.",
+                    "type": "invalid_request_error", "param": "messages", "code": "context_length_exceeded"}})
             except Exception as e:  # report instead of dropping the connection
                 self._fail(400 if isinstance(e, ValueError) else 500,
                            str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}")

@@ -41,6 +41,11 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Fixed
 
+- A conversation that does not fit the context window gets, from the OpenAI
+  API, an HTTP 400 with OpenAI's `context_length_exceeded` code before any
+  stream starts, which clients use to shorten the conversation; it was an
+  error event inside the stream.
+
 - On a new install, `raceline chat` and `serve` started with transformers'
   notice that PyTorch was not found and models would not be available.
   raceline uses transformers only for tokenizers, which need no PyTorch; the

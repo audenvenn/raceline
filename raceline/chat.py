@@ -16,6 +16,7 @@ model then emits is parsed back into three channels: reasoning (between
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -117,7 +118,8 @@ class Runtime:
 
     def __init__(self, backend: Backend, defaults: Optional[Sampling] = None):
         self.backend = backend
-        self.session = Session(backend)
+        park = float(os.environ.get("RACELINE_PARK_GB", "2"))     # conversations set aside (Session)
+        self.session = Session(backend, max_parked_bytes=int(park * 2**30))
         self.defaults = defaults or Sampling()
         self.lock = threading.Lock()   # one generation at a time: this is a single-user runtime
         tok = backend.tokenizer

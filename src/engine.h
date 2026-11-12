@@ -54,6 +54,16 @@ class Engine {
   void save_state(void *dst) const;
   void load_state(const void *src, int position);
 
+  // Attention entries of positions [from, to) in every attention layer, the
+  // draft head's included, in whole blocks of 256 positions (from rounded
+  // down, to up). With a saved state they set a conversation aside: after
+  // another one has used the context, load_kv puts its entries back and
+  // load_state continues it, provided the positions before the first block
+  // still hold the same tokens.
+  size_t kv_bytes(int from, int to) const;
+  void save_kv(int from, int to, void *dst) const;
+  void load_kv(int from, int to, const void *src);
+
   // ---- Speculative decoding with the model's own multi-token-prediction head
   // (present in files extended by tools/add_mtp.py). The head guesses the
   // tokens that follow the next one; feeding the guesses along with the next

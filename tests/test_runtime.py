@@ -54,6 +54,35 @@ class FakeBackend(Backend):
         self.state = snap.state
 
 
+class KVFakeBackend(FakeBackend):
+    """FakeBackend whose context doubles as its attention entries: they can be
+    copied out and back in blocks, and every token it writes depends on them as
+    well as on the recurrent state, so a conversation brought back wrongly
+    writes other tokens than one recomputed from scratch."""
+
+    kv_block = 4
+
+    def generate(self, sampling, max_tokens, history):
+        for _ in range(max_tokens):
+            t = (self.state + sum((i + 1) * c for i, c in enumerate(self.ctx))) % 97
+            self._feed(t)
+            yield t
+
+    def save_kv(self, start, end):
+        lo = start // self.kv_block * self.kv_block
+        return np.array(self.ctx[lo:end], dtype=np.int16)
+
+    def load_kv(self, start, end, data):
+        lo = start // self.kv_block * self.kv_block
+        assert len(data) == end - lo and len(self.ctx) >= lo
+        self.ctx[lo:] = [int(x) for x in data]
+
+    def restore(self, snap):
+        assert snap.position <= len(self.ctx)    # its entries must be in place
+        del self.ctx[snap.position:]
+        self.state = snap.state
+
+
 def reference_state(tokens):
     b = FakeBackend()
     b.prefill(tokens)
@@ -339,6 +368,61 @@ def test_pull_assembles_parts_and_resumes():
         assert not os.path.exists(dest + ".partial") and not os.path.exists(dest + ".partial.json")
     finally:
         pull.RELEASES = saved
+
+
+def _run(session, prompt, n=5, pin=None):
+    usage = session.sync(prompt, () if pin is None else (pin,), pin)   # as Runtime.render marks the system prompt
+    return usage, list(session.generate(Sampling(), n))
+
+
+def _fresh(prompt, n=5):
+    return _run(Session(KVFakeBackend()), prompt, n)[1]
+
+
+def test_a_conversation_set_aside_comes_back_without_recomputing():
+    system = list(range(1, 11))                       # shared by both conversations; pinned
+    a = system + [50 + i % 7 for i in range(30)]       # a long conversation
+    b = system + [20, 21, 22]                          # a side request
+    s = Session(KVFakeBackend(), min_park_tokens=12)   # the side request, 8 tokens past the system prompt, is not kept
+    _, out_a = _run(s, a, pin=len(system))
+    usage, out_b = _run(s, b, pin=len(system))
+    assert s.parked == 1 and usage["cached_tokens"] == len(system)
+    assert out_b == _fresh(b)
+    a2 = a + out_a + [60, 61, 62]                      # the long conversation continues
+    fed = s.backend.fed
+    usage, out_a2 = _run(s, a2, pin=len(system))
+    assert usage["cached_tokens"] == len(a) + len(out_a)   # nothing of it recomputed
+    assert s.backend.fed - fed == 3 + len(out_a2)          # only the new tokens, and what it wrote
+    assert out_a2 == _fresh(a2)                             # and it writes what a fresh run writes
+    usage, out_b2 = _run(s, b + out_b + [23], pin=len(system))   # the short one was not worth keeping
+    assert usage["cached_tokens"] == len(system) and out_b2 == _fresh(b + out_b + [23])
+
+
+def test_a_parked_conversation_needs_its_shared_start_in_the_context():
+    a = list(range(1, 41))
+    s = Session(KVFakeBackend(), min_park_tokens=8)
+    _run(s, a)
+    _run(s, [99] * 30)                                  # parts from `a` at position 0: `a` is parked from 0
+    _run(s, [98] * 30)                                  # `[99]*30` parked too; `a` still needs nothing shared
+    usage, out = _run(s, a + [7])
+    assert usage["cached_tokens"] == len(a) + 0 and out == _fresh(a + [7])
+    s2 = Session(KVFakeBackend(), min_park_tokens=8)
+    _run(s2, a)
+    _run(s2, a[:20] + [99] * 20)                        # `a` parked from block 20
+    _run(s2, [98] * 40)                                 # the context no longer holds a[:20]
+    fed = s2.backend.fed
+    usage, out = _run(s2, a + [7])                      # a[:20] is computed again, the rest comes back
+    assert usage["cached_tokens"] == len(a) - 20 and out == _fresh(a + [7])
+    assert s2.backend.fed - fed == 20 + 1 + len(out)
+
+
+def test_parked_conversations_stay_within_their_budget():
+    s = Session(KVFakeBackend(), min_park_tokens=8, max_parked_bytes=200)
+    for k in range(6):
+        _run(s, [k + 1] * 40)
+    assert 1 <= s.parked and sum(p.nbytes for p in s._parked) <= 200
+    usage, out = _run(s, [6] * 40 + [5])                # the latest is current, so it simply extends
+    assert usage["cached_tokens"] == 40 and out == _fresh([6] * 40 + [5])
 
 
 def test_transformers_notice_is_silenced_for_the_import_only():

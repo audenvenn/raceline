@@ -85,8 +85,21 @@ class Backend:
         raise NotImplementedError
 
     def restore(self, snap: Snapshot) -> None:
-        """Returns to an earlier position. Only snapshots taken on the current
-        timeline at or before the current position are valid."""
+        """Returns to the snapshot's position: one taken on the current timeline
+        at or before the current position, or, once load_kv has put back the
+        attention entries up to it, one of a conversation set aside."""
+        raise NotImplementedError
+
+    # Optional: setting a conversation aside. A backend that can copy out the
+    # attention entries of a range of positions sets kv_block to the number of
+    # positions it copies at a time (ranges are widened to whole blocks); the
+    # session then keeps conversations it would otherwise lose (Session.max_parked_bytes).
+    kv_block = 0
+
+    def save_kv(self, start: int, end: int) -> Any:
+        raise NotImplementedError
+
+    def load_kv(self, start: int, end: int, data: Any) -> None:
         raise NotImplementedError
 
 

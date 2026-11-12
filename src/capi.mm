@@ -28,6 +28,9 @@ double rl_last_gpu_seconds(const rl_engine *e) { return e->engine.last_gpu_secon
 size_t rl_state_bytes(const rl_engine *e) { return e->engine.state_bytes(); }
 void rl_save_state(const rl_engine *e, void *dst) { e->engine.save_state(dst); }
 void rl_load_state(rl_engine *e, const void *src, int position) { e->engine.load_state(src, position); }
+size_t rl_kv_bytes(const rl_engine *e, int from, int to) { return e->engine.kv_bytes(from, to); }
+void rl_save_kv(const rl_engine *e, int from, int to, void *dst) { e->engine.save_kv(from, to, dst); }
+void rl_load_kv(rl_engine *e, int from, int to, const void *src) { e->engine.load_kv(from, to, src); }
 
 int rl_has_mtp(const rl_engine *e) { return e->engine.has_mtp(); }
 void rl_set_mtp(rl_engine *e, int on) { e->engine.set_mtp(on != 0); }

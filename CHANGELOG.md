@@ -22,6 +22,12 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   conversation and keeps none. Engine: `rl_save_kv` / `rl_load_kv` copy the
   attention entries of a range of positions in blocks of 256.
 
+- `raceline serve` speaks Anthropic's Messages API as well:
+  `POST /v1/messages` (streaming or not, tools, thinking) and
+  `/v1/messages/count_tokens`, so clients written for it can use the local
+  model (checked with the anthropic SDK, whose parser reads every event).
+  Images are left out with a note, as the model runs without vision input.
+
 - `raceline pull` without a model lists the models it can fetch, their
   sizes, and how each fits this Mac's memory.
 

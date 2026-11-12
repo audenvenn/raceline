@@ -178,6 +178,7 @@ class Runtime:
         experts0 = experts()
         t0 = time.perf_counter()
         usage = self.session.sync(prompt, points, pin, progress)
+        self.prompt_usage = usage     # for a reply that reports it before the first token (Anthropic's stream)
         t_prefill = time.perf_counter() - t0
 
         channel = "reasoning" if thinking else "content"
@@ -185,7 +186,7 @@ class Runtime:
         call_ids: list = []
         answer = ""
         fresh = True            # at the start of a channel: drop leading newlines
-        n_out, t_first, finish = 0, None, "length"
+        n_out, t_first, finish, stop_sequence = 0, None, "length", None
         t1 = time.perf_counter()
 
         def emit(kind, text):
@@ -227,12 +228,12 @@ class Runtime:
                 continue
             if channel == "content" and stop:
                 answer += text
-                cut = min((answer.find(s) for s in stop if s in answer), default=-1)
+                cut, matched = min(((answer.find(s), s) for s in stop if s in answer), default=(-1, None))
                 if cut >= 0:        # a stop string completed: emit only what precedes it
                     keep = len(text) - (len(answer) - cut)
                     if keep > 0:
                         yield ("content", text[:keep])
-                    finish = "stop"
+                    finish, stop_sequence = "stop", matched
                     break
             ev = emit(channel, text)
             if ev:
@@ -259,7 +260,8 @@ class Runtime:
             **({"drafts": drafts["drafts"], "drafts_accepted": drafts["accepted"]} if drafts.get("drafts") else {}),
             **({"copied_drafts": drafts["lookup_drafts"], "copied_drafts_accepted": drafts["lookup_accepted"]}
                if drafts.get("lookup_drafts") else {}),
-            finish_reason=finish, prompt_tokens=usage["prompt_tokens"], cached_tokens=usage["cached_tokens"],
+            finish_reason=finish, stop_sequence=stop_sequence,
+            prompt_tokens=usage["prompt_tokens"], cached_tokens=usage["cached_tokens"],
             completion_tokens=n_out, prefill_seconds=t_prefill, decode_seconds=t_decode,
             time_to_first_token=t_first if t_first is not None else t_prefill,
             prefill_tokens_per_second=fed / t_prefill if fed and t_prefill > 0 else 0.0,

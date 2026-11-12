@@ -31,6 +31,10 @@ class ScriptedRuntime:
     def __init__(self):
         self.defaults = Sampling()
         self.script, self.calls, self.ended = [], [], []
+        self.prompt_usage = {"prompt_tokens": STATS["prompt_tokens"], "cached_tokens": STATS["cached_tokens"]}
+
+    def render(self, messages, tools, thinking, effort=None, keep_reasoning=None):
+        return [0] * (7 * len(messages)), [], None
 
     def chat(self, messages, tools=None, sampling=None, max_tokens=2048, thinking=True, stop=None, progress=None,
              effort=None):
@@ -55,11 +59,21 @@ def start(rt):
     return server, server.server_address[1]
 
 
-def post(port, body):
+def post(port, body, path="/v1/chat/completions"):
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    conn.request("POST", "/v1/chat/completions", json.dumps(body), {"Content-Type": "application/json"})
+    conn.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
     r = conn.getresponse()
     return r.status, r.read().decode()
+
+
+def sse_of(text):
+    """Anthropic's stream -> [(event, data)]."""
+    out = []
+    for chunk in text.split("\n\n"):
+        lines = dict(line.split(": ", 1) for line in chunk.strip().splitlines() if ": " in line)
+        if "event" in lines:
+            out.append((lines["event"], json.loads(lines["data"])))
+    return out
 
 
 def events_of(text):
@@ -166,6 +180,100 @@ def test_client_that_disconnects_ends_the_generation_at_once():
     finally:
         server.shutdown()
     assert rt.ended == ["closed"], rt.ended
+
+
+ANTHROPIC_REQUEST = {
+    "model": "local", "max_tokens": 300, "system": [{"type": "text", "text": "Be brief."}],
+    "thinking": {"type": "enabled", "budget_tokens": 1000}, "stop_sequences": ["END"],
+    "tools": [{"name": "read_file", "description": "Read a file.",
+               "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}},
+              {"type": "web_search_20250305", "name": "web_search"}],
+    "messages": [
+        {"role": "user", "content": [{"type": "text", "text": "Fix a.py."},
+                                     {"type": "image", "source": {"type": "base64", "data": "AAAA"}}]},
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "Read it first.", "signature": "s"},
+                                          {"type": "text", "text": "Reading."},
+                                          {"type": "tool_use", "id": "toolu_1", "name": "read_file",
+                                           "input": {"path": "a.py"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "x = 1",
+                                      "is_error": False},
+                                     {"type": "text", "text": "Go on."}]}]}
+
+
+def test_anthropic_request_becomes_runtime_messages():
+    from raceline.anthropic import to_runtime
+
+    args = to_runtime(ANTHROPIC_REQUEST)
+    roles = [m["role"] for m in args["messages"]]
+    assert roles == ["system", "user", "assistant", "tool", "user"], roles
+    assert "image left out" in args["messages"][1]["content"]
+    a = args["messages"][2]
+    assert a["reasoning_content"] == "Read it first." and a["content"] == "Reading."
+    assert json.loads(a["tool_calls"][0]["function"]["arguments"]) == {"path": "a.py"}
+    assert args["messages"][3] == {"role": "tool", "tool_call_id": "toolu_1", "content": "x = 1"}
+    assert [t["function"]["name"] for t in args["tools"]] == ["read_file"]    # the server tool is left out
+    assert args["thinking"] and args["stop"] == ["END"]
+    assert to_runtime(dict(ANTHROPIC_REQUEST, thinking=None, tool_choice={"type": "none"}))["tools"] is None
+
+
+def test_anthropic_message_with_thinking_text_and_tool_use():
+    rt = ScriptedRuntime()
+    rt.script = [("reasoning", "Let me look."), ("content", "Sure"),
+                 ("tool_call", {"id": "call_1", "name": "read_file", "arguments": {"path": "a.py"}}),
+                 ("done", dict(STATS, finish_reason="tool_calls"))]
+    server, port = start(rt)
+    try:
+        code, text = post(port, ANTHROPIC_REQUEST, "/v1/messages?beta=true")
+    finally:
+        server.shutdown()
+    assert code == 200, text
+    body = json.loads(text)
+    assert [b["type"] for b in body["content"]] == ["thinking", "text", "tool_use"]
+    assert body["content"][2]["input"] == {"path": "a.py"} and body["stop_reason"] == "tool_use"
+    assert body["usage"] == {"input_tokens": 8, "cache_read_input_tokens": 4, "cache_creation_input_tokens": 0,
+                             "output_tokens": 3}
+    assert rt.calls[0]["thinking"] is True
+
+
+def test_anthropic_stream_is_well_formed():
+    rt = ScriptedRuntime()
+    rt.script = [("reasoning", "Hm"), ("content", "Hel"), ("content", "lo"),
+                 ("tool_call", {"id": "call_1", "name": "read_file", "arguments": {"path": "a.py"}}),
+                 ("done", dict(STATS, finish_reason="tool_calls"))]
+    server, port = start(rt)
+    try:
+        code, text = post(port, dict(ANTHROPIC_REQUEST, stream=True), "/v1/messages")
+    finally:
+        server.shutdown()
+    assert code == 200, text
+    events = sse_of(text)
+    names = [e for e, _ in events]
+    assert names == ["message_start",
+                     "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
+                     "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
+                     "content_block_start", "content_block_delta", "content_block_stop",
+                     "message_delta", "message_stop"], names
+    assert events[0][1]["message"]["usage"]["input_tokens"] == 8
+    starts = [d for e, d in events if e == "content_block_start"]
+    assert [(d["index"], d["content_block"]["type"]) for d in starts] == [(0, "thinking"), (1, "text"), (2, "tool_use")]
+    text_deltas = [d["delta"]["text"] for e, d in events if e == "content_block_delta" and d["delta"]["type"] == "text_delta"]
+    assert "".join(text_deltas) == "Hello"
+    json_delta = next(d["delta"]["partial_json"] for e, d in events
+                      if e == "content_block_delta" and d["delta"]["type"] == "input_json_delta")
+    assert json.loads(json_delta) == {"path": "a.py"}
+    assert events[-2][1]["delta"]["stop_reason"] == "tool_use" and events[-2][1]["usage"]["output_tokens"] == 3
+
+
+def test_anthropic_count_tokens_and_errors():
+    rt = ScriptedRuntime()
+    server, port = start(rt)
+    try:
+        code, text = post(port, ANTHROPIC_REQUEST, "/v1/messages/count_tokens")
+        assert code == 200 and json.loads(text) == {"input_tokens": 7 * 5}, text
+        code, text = post(port, {"messages": []}, "/v1/messages")       # no max_tokens
+        assert code == 400 and json.loads(text)["type"] == "error", text
+    finally:
+        server.shutdown()
 
 
 if __name__ == "__main__":

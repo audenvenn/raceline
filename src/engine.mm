@@ -91,6 +91,10 @@ struct Engine::ExpertCache {
   };
   int layers = 0, E = 0, S = 0, slots = 0;
   int big_rows = 16;                       // passes with more rows do not count as uses
+  int topk = 8;                            // experts routed per token
+  bool prefetch_on = true;                 // RACELINE_EXPERT_PREFETCH=0: off
+  int busy_layer = -1;                     // the layer the GPU computes now, and what it needs
+  std::vector<char> busy_need;
   FILE *trace = nullptr;                   // RACELINE_EXPERT_TRACE: what every layer needed
   size_t w_bytes[2] = {0, 0};
   int s_floats[2] = {0, 0};
@@ -141,17 +145,43 @@ struct Engine::ExpertCache {
     prev[i] = a, next[i] = b, next[a] = i, prev[b] = i;
   }
 
-  // A free slot, or the coldest one that holds nothing this request needs.
+  // A free slot, or the coldest one that holds nothing this request needs
+  // (nor what the GPU computes with right now, while prefetching); -1 if none.
   int take_slot(int layer, const std::vector<char> &need) {
     if (next_free < slots) return next_free++;
     for (int i = prev[slots]; i != slots; i = prev[i]) {
       const auto [l, e] = owner[i];
-      if (l == layer && need[e]) continue;
+      if ((l == layer && need[e]) || (l == busy_layer && busy_need[e])) continue;
       unlink(i);
       tab(l)[e] = -1;
       return i;
     }
-    fatal("expert cache: no slot to reuse");
+    return -1;
+  }
+
+  // Reads the missing experts of `need` into slots (in parallel: the SSD serves
+  // concurrent requests far faster than one after another). A request always
+  // finds slots (the cache holds a layer's worth besides the pinned ones); a
+  // prefetch takes what is free while the GPU works and stops there.
+  void fill(int layer, const std::vector<char> &need, bool hot, bool prefetching = false) {
+    int32_t *t = tab(layer);
+    std::vector<std::pair<int, int>> todo;   // (expert, slot)
+    for (int e = 0; e < E; e++) {
+      if (!need[e] || t[e] >= 0) continue;
+      const int slot = take_slot(layer, need);
+      if (slot < 0) {
+        if (prefetching) break;
+        fatal("expert cache: no slot to reuse");
+      }
+      owner[slot] = {layer, e};
+      insert(slot, hot);
+      todo.push_back({e, slot});
+    }
+    if (todo.empty()) return;
+    dispatch_apply(todo.size(), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+                   ^(size_t j) { load(layer, todo[j].first, todo[j].second); });
+    for (auto [e, slot] : todo) t[e] = slot;
+    loads += todo.size();
   }
 
   void handle(const Request &r) {
@@ -173,22 +203,18 @@ struct Engine::ExpertCache {
         hits++;
         if (!big) unlink(t[e]), insert(t[e], true);
       }
-    // Slots for the missing experts first, then all of them read at once: the
-    // SSD serves parallel requests far faster than one after another.
-    std::vector<std::pair<int, int>> todo;   // (expert, slot)
-    for (int e = 0; e < E; e++) {
-      if (!need[e] || t[e] >= 0) continue;
-      const int slot = take_slot(r.layer, need);
-      owner[slot] = {r.layer, e};
-      insert(slot, !big);
-      todo.push_back({e, slot});
-    }
-    if (!todo.empty()) {
-      dispatch_apply(todo.size(), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
-                     ^(size_t j) { load(r.layer, todo[j].first, todo[j].second); });
-      for (auto [e, slot] : todo) t[e] = slot;
-      loads += todo.size();
-    }
+    busy_layer = -1;
+    fill(r.layer, need, !big);
+    busy_layer = r.layer;                    // from the signal on, the GPU computes with these
+    busy_need.swap(need);
+  }
+
+  // While the GPU computes a prompt chunk's layer, the next layer's experts
+  // that are not cached: a chunk of 4 * E / topk rows or more needs about 98%
+  // of them, and reading them now overlaps the reads with the GPU's work.
+  void prefetch(const Request &r) {
+    if (!prefetch_on || (int64_t)r.T * topk < 4LL * E) return;
+    fill(r.layer, std::vector<char>(E, 1), false, true);
   }
 
   void run() {
@@ -208,6 +234,12 @@ struct Engine::ExpertCache {
       }
       handle(r);
       ev.signaledValue = r.go;
+      Request nxt{-1, 0, 0, 0};
+      {
+        std::lock_guard<std::mutex> lock(mu);
+        if (!queue.empty()) nxt = queue.front();
+      }
+      if (nxt.layer == r.layer + 1 && nxt.T == r.T) prefetch(nxt);
     }
   }
 
@@ -342,6 +374,8 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       // At least the shared experts and one layer's worth; at most every expert.
       x.slots = std::min(std::max((int)(cache_gb * 1e9 / per_slot), c.layers + c.experts), c.layers * (c.experts + 1));
       x.big_rows = kMaxDrafts + 1;
+      x.topk = c.experts_per_tok;
+      if (const char *v = getenv("RACELINE_EXPERT_PREFETCH"); v && *v && !atoi(v)) x.prefetch_on = false;
       if (const char *path = getenv("RACELINE_EXPERT_TRACE"); path && *path) x.trace = fopen(path, "wb");
       for (int kind = 0; kind < 2; kind++) {
         x.w[kind] = mt_.alloc((size_t)x.slots * x.w_bytes[kind]);

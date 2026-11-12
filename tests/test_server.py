@@ -264,6 +264,21 @@ def test_anthropic_stream_is_well_formed():
     assert events[-2][1]["delta"]["stop_reason"] == "tool_use" and events[-2][1]["usage"]["output_tokens"] == 3
 
 
+def test_anthropic_prompt_too_long_is_an_error_before_the_stream():
+    from raceline.chat import ContextFull
+
+    rt = ScriptedRuntime()
+    server, port = start(rt)
+    try:
+        for stream in (False, True):
+            rt.script = [ContextFull(40000, 32768)]
+            code, text = post(port, dict(ANTHROPIC_REQUEST, stream=stream), "/v1/messages")
+            assert code == 400, text
+            assert json.loads(text)["error"]["message"] == "prompt is too long: 40000 tokens > 32768 maximum"
+    finally:
+        server.shutdown()
+
+
 def test_anthropic_count_tokens_and_errors():
     rt = ScriptedRuntime()
     server, port = start(rt)

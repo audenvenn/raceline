@@ -19,6 +19,7 @@ where its chat template has one (Qwen3.8); none / minimal turns thinking off.
 
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 import time
@@ -26,7 +27,7 @@ import uuid
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .chat import Runtime
+from .chat import ContextFull, Runtime
 
 
 def _sampling(runtime: Runtime, body: dict):
@@ -233,13 +234,19 @@ def make_handler(runtime: Runtime, model_id: str):
                                   args["thinking"], args["stop"])
             try:
                 if body.get("stream"):
-                    self._anthropic_stream(events, anthropic.Streamer(model_id))
+                    # The first event comes once the prompt has been read: a prompt that does not fit fails
+                    # here, before anything is sent, and gets an error the client can act on.
+                    first = next(events, None)
+                    self._anthropic_stream(itertools.chain([first] if first else [], events),
+                                           anthropic.Streamer(model_id))
                 else:
                     message, stats = anthropic.complete(events, model_id)
                     self._log(stats)
                     self._json(200, message)
             except (BrokenPipeError, ConnectionResetError):
                 pass
+            except ContextFull as e:       # in Anthropic's words, which clients look for to compact
+                self._anthropic_error(400, f"prompt is too long: {e.tokens} tokens > {e.limit} maximum")
             except Exception as e:
                 message = str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}"
                 try:

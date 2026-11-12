@@ -30,6 +30,14 @@ _FUNCTION = re.compile(r"<function=([^>\n]+)>(.*?)(?:</function>|\Z)", re.S)
 _PARAMETER = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
 
 
+class ContextFull(ValueError):
+    """The conversation does not fit the context window."""
+
+    def __init__(self, tokens: int, limit: int):
+        super().__init__(f"the conversation is {tokens} tokens; the context window holds {limit}")
+        self.tokens, self.limit = tokens, limit
+
+
 def normalize_messages(messages: list) -> list:
     """OpenAI-style messages -> what the chat template expects."""
     out = []
@@ -171,7 +179,7 @@ class Runtime:
         limit = self.backend.max_context
         if limit is not None:
             if len(prompt) + 8 > limit:
-                raise ValueError(f"the conversation is {len(prompt)} tokens; the context window holds {limit}")
+                raise ContextFull(len(prompt), limit)
             max_tokens = min(max_tokens, limit - len(prompt) - 2)
         counters = dict(getattr(self.backend, "counters", {}))
         experts = getattr(self.backend, "expert_cache", lambda: None)

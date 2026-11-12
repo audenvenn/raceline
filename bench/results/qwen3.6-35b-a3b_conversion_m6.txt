@@ -1,0 +1,128 @@
+# Qwen3.6-35B-A3B conversion on an M6 Mac mini 24 GB, 2026-11-13: tools/quantize.py (stopped by a swap watchdog after layer 24, resumed), tools/add_mtp.py, and the converter's measurement of MLX's 4-bit format on the same data (--book mlx-affine4 --no-rotate). Output as printed.
+
+## quantize, first run
+== quantize 04:27 
+models/Qwen3.6-35B-A3B: 40 layers, codebook fp4, GPTQ; 32 calibration and 12 evaluation sequences of 512 tokens
+  layer 1/40 (linear) 57s  drift 0.0775
+  layer 2/40 (linear) 64s  drift 0.0799
+  layer 3/40 (linear) 66s  drift 0.0791
+  layer 4/40 (attn) 56s  drift 0.0940
+  layer 5/40 (linear) 63s  drift 0.0980
+  layer 6/40 (linear) 61s  drift 0.1017
+  layer 7/40 (linear) 62s  drift 0.0978
+  layer 8/40 (attn) 55s  drift 0.1196
+  layer 9/40 (linear) 63s  drift 0.1258
+  layer 10/40 (linear) 63s  drift 0.1247
+  layer 11/40 (linear) 64s  drift 0.1006
+  layer 12/40 (attn) 56s  drift 0.1128
+  layer 13/40 (linear) 63s  drift 0.1184
+  layer 14/40 (linear) 63s  drift 0.1268
+  layer 15/40 (linear) 64s  drift 0.1255
+  layer 16/40 (attn) 54s  drift 0.1473
+  layer 17/40 (linear) 63s  drift 0.1519
+  layer 18/40 (linear) 63s  drift 0.1593
+  layer 19/40 (linear) 62s  drift 0.1664
+  layer 20/40 (attn) 55s  drift 0.1841
+  layer 21/40 (linear) 61s  drift 0.1870
+  layer 22/40 (linear) 63s  drift 0.1901
+  layer 23/40 (linear) 62s  drift 0.2098
+  layer 24/40 (attn) 51s  drift 0.2255
+guard: swap use reached 8 GB, stopping process group 83500 at 04:52:19
+
+## quantize --resume, then the MTP head
+== quantize 04:53 --resume
+models/Qwen3.6-35B-A3B: 40 layers, codebook fp4, GPTQ; 32 calibration and 12 evaluation sequences of 512 tokens
+  resuming: token table read back from models/qwen3.6-35b-a3b.rlm
+  layer 1/40 read back from the file (largest deviation from float 0.23) 20s  drift 0.0775
+  layer 2/40 read back from the file (largest deviation from float 0.16) 27s  drift 0.0799
+  layer 3/40 read back from the file (largest deviation from float 0.16) 25s  drift 0.0791
+  layer 4/40 read back from the file (largest deviation from float 0.17) 12s  drift 0.0940
+  layer 5/40 read back from the file (largest deviation from float 0.16) 27s  drift 0.0980
+  layer 6/40 read back from the file (largest deviation from float 0.15) 23s  drift 0.1017
+  layer 7/40 read back from the file (largest deviation from float 0.17) 24s  drift 0.0978
+  layer 8/40 read back from the file (largest deviation from float 0.16) 12s  drift 0.1196
+  layer 9/40 read back from the file (largest deviation from float 0.15) 21s  drift 0.1258
+  layer 10/40 read back from the file (largest deviation from float 0.15) 26s  drift 0.1247
+  layer 11/40 read back from the file (largest deviation from float 0.18) 32s  drift 0.1006
+  layer 12/40 read back from the file (largest deviation from float 0.16) 12s  drift 0.1128
+  layer 13/40 read back from the file (largest deviation from float 0.15) 27s  drift 0.1184
+  layer 14/40 read back from the file (largest deviation from float 0.15) 23s  drift 0.1268
+  layer 15/40 read back from the file (largest deviation from float 0.15) 25s  drift 0.1255
+  layer 16/40 read back from the file (largest deviation from float 0.15) 17s  drift 0.1473
+  layer 17/40 read back from the file (largest deviation from float 0.15) 33s  drift 0.1519
+  layer 18/40 read back from the file (largest deviation from float 0.16) 23s  drift 0.1593
+  layer 19/40 read back from the file (largest deviation from float 0.15) 25s  drift 0.1664
+  layer 20/40 read back from the file (largest deviation from float 0.16) 12s  drift 0.1841
+  layer 21/40 read back from the file (largest deviation from float 0.15) 22s  drift 0.1870
+  layer 22/40 read back from the file (largest deviation from float 0.15) 26s  drift 0.1901
+  layer 23/40 read back from the file (largest deviation from float 0.15) 27s  drift 0.2098
+  layer 24/40 read back from the file (largest deviation from float 0.16) 12s  drift 0.2255
+  continuing the conversion at layer 25
+  layer 25/40 (linear) 66s  drift 0.2327
+  layer 26/40 (linear) 63s  drift 0.2375
+  layer 27/40 (linear) 65s  drift 0.2285
+  layer 28/40 (attn) 53s  drift 0.2453
+  layer 29/40 (linear) 64s  drift 0.2377
+  layer 30/40 (linear) 63s  drift 0.2431
+  layer 31/40 (linear) 68s  drift 0.2493
+  layer 32/40 (attn) 54s  drift 0.2815
+  layer 33/40 (linear) 64s  drift 0.2859
+  layer 34/40 (linear) 62s  drift 0.2725
+  layer 35/40 (linear) 63s  drift 0.2911
+  layer 36/40 (attn) 49s  drift 0.2948
+  layer 37/40 (linear) 62s  drift 0.3023
+  layer 38/40 (linear) 62s  drift 0.2927
+  layer 39/40 (linear) 62s  drift 0.2818
+  layer 40/40 (attn) 58s  drift 0.2954
+held-out quality vs the float model: KL 0.11356 nats, perplexity 2.113, top-1 agreement 90.80%
+wrote models/qwen3.6-35b-a3b.rlm: 17.56 GB in 1551s
+     1552.86 real       480.46 user       425.01 sys
+         20642807808  maximum resident set size
+         26165885160  peak memory footprint
+== MTP head 05:19
+the head's top choice is the model's own choice: float head 81.6%, fp4 head 81.0%  (3568 held-out positions)
+added the MTP head to models/qwen3.6-35b-a3b.rlm (440 MB) in 133s
+      135.10 real        21.69 user        61.72 sys
+         11621007360  maximum resident set size
+         21190410632  peak memory footprint
+== done 05:21
+
+## MLX affine 4-bit, groups of 64, measured by the converter
+== MLX affine 4-bit on Qwen3.6-35B-A3B 05:34
+models/Qwen3.6-35B-A3B: 40 layers, codebook mlx-affine4, GPTQ; 32 calibration and 12 evaluation sequences of 512 tokens
+  layer 1/40 (linear) 18s  drift 0.1682
+  layer 10/40 (linear) 24s  drift 0.1608
+  layer 20/40 (attn) 21s  drift 0.2199
+  layer 30/40 (linear) 19s  drift 0.2774
+  layer 39/40 (linear) 22s  drift 0.3202
+  layer 40/40 (attn) 13s  drift 0.3308
+held-out quality vs the float model: KL 0.12149 nats, perplexity 2.109, top-1 agreement 91.06%
+      788.92 real       102.55 user       279.27 sys
+         24875334832  peak memory footprint
+== done 05:47
+
+## Speed runs right after the conversion (q36_speed.sh): engine bench and the 16 GB simulation
+ 5:21  up 5 days, 15:06, 5 users, load averages: 1.62 1.74 1.77
+file 18000429056 bytes; a 16 GB Mac would cache 5.79 GB of experts
+== engine bench, experts offloaded as the engine decides here (24 GB) 05:21
+cold prefill: 1024 tokens in 3.337s = 306.9 tok/s (GPU time 3.184s = 321.6 tok/s)
+cold decode:  256 tokens in 10.469s = 24.5 tok/s (GPU time 10.333s = 24.8 tok/s; 256 passes)
+warm prefill: 1024 tokens in 0.949s = 1079.4 tok/s (GPU time 0.948s = 1080.1 tok/s)
+warm decode:  256 tokens in 8.203s = 31.2 tok/s (GPU time 8.081s = 31.7 tok/s; 256 passes)
+expert cache: 7738 slots, 92.2% of routed experts found loaded (15168 read from disk)
+cold prefill: 1024 tokens in 3.286s = 311.7 tok/s (GPU time 3.215s = 318.5 tok/s)
+cold decode:  256 tokens in 3.620s = 70.7 tok/s (GPU time 3.525s = 72.6 tok/s; 57 passes)
+warm prefill: 1024 tokens in 0.928s = 1103.3 tok/s (GPU time 0.923s = 1109.5 tok/s)
+warm decode:  256 tokens in 2.288s = 111.9 tok/s (GPU time 2.210s = 115.8 tok/s; 57 passes)
+expert cache: 7738 slots, 90.0% of routed experts found loaded (15363 read from disk)
+== a 16 GB Mac: 5.79 GB of experts cached, misses read past the file cache
+cold prefill: 1024 tokens in 2.346s = 436.4 tok/s (GPU time 2.257s = 453.6 tok/s)
+cold decode:  256 tokens in 15.778s = 16.2 tok/s (GPU time 15.642s = 16.4 tok/s; 256 passes)
+warm prefill: 1024 tokens in 1.234s = 830.1 tok/s (GPU time 1.233s = 830.5 tok/s)
+warm decode:  256 tokens in 16.362s = 15.6 tok/s (GPU time 16.226s = 15.8 tok/s; 256 passes)
+expert cache: 3652 slots, 76.5% of routed experts found loaded (46672 read from disk)
+cold prefill: 1024 tokens in 2.213s = 462.8 tok/s (GPU time 2.190s = 467.6 tok/s)
+cold decode:  256 tokens in 9.090s = 28.2 tok/s (GPU time 8.973s = 28.5 tok/s; 57 passes)
+warm prefill: 1024 tokens in 1.244s = 822.9 tok/s (GPU time 1.243s = 823.7 tok/s)
+warm decode:  256 tokens in 9.101s = 28.1 tok/s (GPU time 8.987s = 28.5 tok/s; 57 passes)
+expert cache: 3652 slots, 68.8% of routed experts found loaded (49073 read from disk)

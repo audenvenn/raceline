@@ -638,7 +638,10 @@ void Engine::encode_mlp(int layer, int T) {
 // number E with its own gate, so it runs through the same kernels.
 void Engine::encode_moe(int layer, int T) {
   const Config &c = config();
-  const int S = c.experts_per_tok + 1, A = T * S, TM = 16, TN = 64, NSG = 2;
+  // Rows per tile of the grouped matmuls: an expert's weights are read once
+  // per tile, and a long prompt sends an expert dozens of rows. A row's result
+  // does not depend on the tile it is computed in.
+  const int S = c.experts_per_tok + 1, A = T * S, TM = A / c.experts >= 24 ? 32 : 16, TN = 64, NSG = 2;
   const QTensor &router = model_->q(lname(layer, "moe.router"));
   const QTensor &gu = model_->q(lname(layer, "moe.gate_up"));
   const QTensor &dn = model_->q(lname(layer, "moe.down"));

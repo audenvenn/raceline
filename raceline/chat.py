@@ -117,10 +117,19 @@ class Runtime:
     """A loaded model plus one reusable session. Shared by the server and the terminal agent."""
 
     def __init__(self, backend: Backend, defaults: Optional[Sampling] = None, park_bytes: Optional[int] = None):
-        """`park_bytes`: memory for conversations set aside (Session; default RACELINE_PARK_GB, 2 GB)."""
+        """`park_bytes`: memory for conversations set aside (Session; default RACELINE_PARK_GB, else a
+        twelfth of this Mac's memory up to 2 GB: 1.3 GB on a 16 GB Mac, which the model needs more)."""
         self.backend = backend
         if park_bytes is None:
-            park_bytes = int(float(os.environ.get("RACELINE_PARK_GB", "2")) * 2**30)
+            gb = os.environ.get("RACELINE_PARK_GB")
+            if gb is not None:
+                park_bytes = int(float(gb) * 2**30)
+            else:
+                try:
+                    ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                except (OSError, ValueError, AttributeError):
+                    ram = 24 << 30
+                park_bytes = min(2 << 30, ram // 12)
         self.session = Session(backend, max_parked_bytes=park_bytes)
         self.defaults = defaults or Sampling()
         self.lock = threading.Lock()   # one generation at a time: this is a single-user runtime

@@ -332,7 +332,8 @@ object, so a client can see what a request cost. Requests are served one at
 a time; this is a single-user runtime. A conversation the client leaves for
 another one (a second chat, or a side request such as a title) is set aside
 with its recurrent state and attention entries, and continued later without
-being processed again (up to 2 GB of them, `RACELINE_PARK_GB`).
+being processed again (within a twelfth of the Mac's memory, at most 2 GB;
+`RACELINE_PARK_GB` sets it).
 
 ## Configuration
 
@@ -352,7 +353,7 @@ Environment variables, all optional:
 | `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 | `RACELINE_EXPERT_CACHE` | Mixture-of-experts models: GB of experts kept in memory, the rest read from disk when needed (`0`: all in memory; by default the engine decides from the memory the GPU may use). |
-| `RACELINE_PARK_GB` | `raceline serve`: memory for conversations set aside while the client is in another one (default 2; `0` keeps none). |
+| `RACELINE_PARK_GB` | `raceline serve`: memory for conversations set aside while the client is in another one (default: a twelfth of the Mac's memory, at most 2; `0` keeps none). |
 | `RACELINE_ANY_GPU` | `1` lets the engine try a Mac it does not support (before Apple M5); please report the result in #2. |
 
 ## What is checked

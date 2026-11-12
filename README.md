@@ -467,17 +467,25 @@ fewer experts for prompts than plain LRU and 6% fewer while decoding.
 ```
 Apple M6 · 2+4+6 CPU cores · 12-core GPU · 24 GB · macOS 27.2
 
-  GPU memory bandwidth        150.1 GB/s
-  matrix multiply (half)       18.4 TFLOPS
+  GPU memory bandwidth        149.8 GB/s
+  matrix multiply (half)       19.4 TFLOPS
+  SSD, 1.6 MB random reads      4.2 GB/s one at a time, 7.4 GB/s eight at a time
 
   What that allows, per model size at 4 bits per weight:
 
   model      weights   fits   decode ceiling   prefill ceiling
-  4B           2.3 GB    yes       65.3 tok/s        2189 tok/s
-  9B           5.0 GB    yes       30.0 tok/s        1021 tok/s
-  27B         13.6 GB    yes       11.0 tok/s         340 tok/s
-  70B         35.5 GB     no        4.2 tok/s         131 tok/s
+  4B           2.3 GB    yes       65.1 tok/s        2304 tok/s
+  9B           5.0 GB    yes       30.0 tok/s        1075 tok/s
+  27B         13.6 GB    yes       11.0 tok/s         358 tok/s
+  35B-A3B     18.6 GB    SSD       99.9 tok/s        3225 tok/s
+  70B         35.5 GB     no        4.2 tok/s         138 tok/s
 ```
+
+A mixture of experts reads only the experts its tokens are routed to, so its
+decode ceiling counts the 1.5 GB a token of Qwen3.5-35B-A3B reads, not the
+whole model. "SSD": the model does not fit in the memory the GPU may use, and
+the experts that are not in memory are read from the SSD when a layer needs
+them, one expert (1.6 MB) in 0.4 ms on this Mac.
 
 ## Repository
 

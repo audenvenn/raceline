@@ -266,8 +266,10 @@ struct Engine::ExpertCache {
 Engine::~Engine() = default;
 
 Engine::ExpertStats Engine::expert_stats() const {
-  if (!cache_) return {0, 0, 0};
-  return {cache_->slots, cache_->hits, cache_->loads};
+  if (!cache_) return {0, 0, 0, 0, 0};
+  const ExpertCache &x = *cache_;
+  const size_t slot_bytes = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);
+  return {x.slots, x.layers * (x.E + 1), slot_bytes, x.hits, x.loads};
 }
 
 Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)

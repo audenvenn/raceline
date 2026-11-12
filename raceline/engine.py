@@ -108,6 +108,7 @@ def _library() -> ctypes.CDLL:
     lib.rl_top_k.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
     u64 = ctypes.POINTER(ctypes.c_ulonglong)
     lib.rl_expert_cache.argtypes = [ctypes.c_void_p, u64, u64]
+    lib.rl_expert_cache_size.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), u64]
     return lib
 
 
@@ -228,6 +229,16 @@ class RacelineBackend(Backend):
         hits, reads = ctypes.c_ulonglong(), ctypes.c_ulonglong()
         slots = self._lib.rl_expert_cache(self._e, ctypes.byref(hits), ctypes.byref(reads))
         return (slots, hits.value, reads.value) if slots else None
+
+    def expert_cache_size(self):
+        """A mixture of experts with its experts on disk: (GB the cache holds, share of the
+        experts that fit in it). None when all are in memory."""
+        slots = self._lib.rl_expert_cache(self._e, None, None)
+        if not slots:
+            return None
+        n, size = ctypes.c_int(), ctypes.c_ulonglong()
+        self._lib.rl_expert_cache_size(self._e, ctypes.byref(n), ctypes.byref(size))
+        return slots * size.value / 1e9, slots / max(1, n.value)
 
     @property
     def position(self) -> int:

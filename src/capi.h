@@ -53,6 +53,8 @@ void rl_set_draft_tail(rl_engine *e, int first);
 // Mixture of experts on disk: slots in the expert cache (0: all experts in
 // memory) and, since the engine opened, routed experts found loaded / read.
 int rl_expert_cache(const rl_engine *e, unsigned long long *hits, unsigned long long *loads);
+// The same cache's size: experts in the model (the shared ones included) and bytes per slot.
+void rl_expert_cache_size(const rl_engine *e, int *experts, unsigned long long *slot_bytes);
 int rl_draft_main(const rl_engine *e);
 int rl_draft_tail(const rl_engine *e);
 int rl_draft_vocab(const rl_engine *e);

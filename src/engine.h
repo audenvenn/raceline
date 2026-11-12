@@ -40,7 +40,8 @@ class Engine {
   // since the engine opened how many routed experts a layer found loaded and how
   // many it had to read. slots == 0: the experts are all in memory.
   struct ExpertStats {
-    int slots;
+    int slots, experts;          // slots in the cache; experts in the model (with the shared ones)
+    size_t slot_bytes;
     uint64_t hits, loads;
   };
   ExpertStats expert_stats() const;

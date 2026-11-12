@@ -38,6 +38,15 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Changed
 
+- `raceline chat` samples as Qwen recommends for coding: temperature 0.6,
+  top-p 0.95, top-k 20 with thinking on (0.7, 0.8, 20 with `--no-think`),
+  instead of the model's general-purpose setting (temperature 1.0 for the
+  27B, 0.7 with top-p 0.8 for the 4B, which ships none). On the agent tasks
+  it solves as many (the 27B 7 of 8 in each of two runs, the 4B 5 of 8 on
+  average over three) and the 4B writes 19% fewer tokens, with fewer
+  reasoning loops.
+  `bench/agent_eval.py` uses the same setting. `raceline serve` keeps the
+  model's own defaults; clients send their own.
 - The draft vocabulary is chosen from the context's text tokens only, and
   64k ids are used while at most 3% of them lie beyond (before: 1% of all
   tokens, special ones included). Agent conversations mostly got the whole

@@ -65,8 +65,10 @@ coding tasks (a bug that failing tests point at, a rename across files, a
 function to implement from its docstring, a new command-line option, defaults
 for a config loader, docstrings without code changes, a rewrite from
 `os.path` to `pathlib`, a binary-search bug), approves every tool call, and
-lets a hidden check decide each task. Thinking on (effort low), each model's
-default sampling, seed 1. The time is the whole run: prompt processing,
+lets a hidden check decide each task. Thinking on (effort low), seed 1, each
+model's general-purpose sampling (temperature 1.0, top-p 0.95 for the 27B;
+0.7, 0.8 for the 4B; `raceline chat` now uses Qwen's coding setting, which
+solves as many). The time is the whole run: prompt processing,
 writing and the tools. Drafting never changes what is written, so the two
 raceline rows of a model wrote the same tokens; mlx-lm runs other 4-bit
 weights, which write other text:
@@ -240,7 +242,9 @@ ask first (`--yes` approves everything, answering `a` approves the rest of
 the session). The line after each turn shows the size of the context, how
 much of it was reused, and the decoding speed. `--no-think` skips the model's
 reasoning phase; `--effort` sets the reasoning effort for models whose chat
-template has one (Qwen3.8).
+template has one (Qwen3.8). It samples as Qwen recommends for coding
+(temperature 0.6, top-p 0.95, top-k 20 with thinking; `--temperature`
+overrides).
 
 `raceline serve` speaks the OpenAI chat-completions protocol, streaming or not,
 with tool calls and the model's reasoning as `reasoning_content`:

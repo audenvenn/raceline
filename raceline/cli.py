@@ -24,14 +24,25 @@ def _defaults(model: str, backend) -> Sampling:
     return s
 
 
-def _runtime(args):
+def agent_sampling(model: str, backend, thinking: bool) -> Sampling:
+    """Sampling for the agent: what Qwen recommends for coding, in thinking mode
+    temperature 0.6, top-p 0.95, top-k 20 (a model's generation_config.json
+    holds its general-purpose setting instead), without thinking 0.7, 0.8, 20.
+    On the tasks of bench/agent_eval.py this solves as many and writes fewer
+    tokens: fewer reasoning loops."""
+    s = _defaults(model, backend)
+    s.temperature, s.top_p, s.top_k = (0.6, 0.95, 20) if thinking else (0.7, 0.8, 20)
+    return s
+
+
+def _runtime(args, agent: bool = False):
     from .chat import Runtime
 
     from .pull import resolve
 
     args.model = resolve(args.model)
     backend = load_backend(args.model, args.backend)
-    sampling = _defaults(args.model, backend)
+    sampling = agent_sampling(args.model, backend, not args.no_think) if agent else _defaults(args.model, backend)
     if args.temperature is not None:
         sampling.temperature = args.temperature
     return Runtime(backend, sampling)
@@ -97,7 +108,7 @@ def _main(argv=None):
         args.model = default_model()
     if not args.model:
         ap.error("no model given: name one, set RACELINE_MODEL, or fetch one with `raceline pull qwen3.5-4b`")
-    rt = _runtime(args)
+    rt = _runtime(args, agent=args.command == "chat")
 
     if args.command == "serve":
         from .server import serve

@@ -8,6 +8,13 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Fixed
+
+- On a new install, `raceline chat` and `serve` started with transformers'
+  notice that PyTorch was not found and models would not be available.
+  raceline uses transformers only for tokenizers, which need no PyTorch; the
+  notice is silenced for that import.
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

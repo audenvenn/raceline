@@ -13,9 +13,32 @@ the only way back to an earlier position without recomputing the prompt.
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional
+
+
+@contextlib.contextmanager
+def without_torch_notice() -> Iterator[None]:
+    """Import transformers without its notice that PyTorch is missing.
+
+    raceline uses transformers only for tokenizers and chat templates, which
+    need no PyTorch, but its first import says "PyTorch was not found. Models
+    won't be available ..." on stderr, the first line a new user would see.
+    The variable that silences such advice is set for the import only, so the
+    commands the agent runs do not inherit it.
+    """
+    key = "TRANSFORMERS_NO_ADVISORY_WARNINGS"
+    saved = os.environ.get(key)
+    os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
 
 
 @dataclass
@@ -75,8 +98,10 @@ class MLXBackend(Backend):
 
     def __init__(self, model_dir: str):
         import mlx.core as mx
-        from mlx_lm import load
-        from mlx_lm.models.cache import make_prompt_cache
+
+        with without_torch_notice():
+            from mlx_lm import load
+            from mlx_lm.models.cache import make_prompt_cache
 
         self._mx = mx
         self._make_cache = make_prompt_cache

@@ -322,6 +322,27 @@ def test_pull_assembles_parts_and_resumes():
         pull.RELEASES = saved
 
 
+def test_transformers_notice_is_silenced_for_the_import_only():
+    from raceline.backends import without_torch_notice
+
+    key = "TRANSFORMERS_NO_ADVISORY_WARNINGS"
+    saved = os.environ.get(key)
+    try:
+        for before in (None, "0"):
+            if before is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = before
+            with without_torch_notice():
+                assert os.environ[key] == "1"
+            assert os.environ.get(key) == before  # the agent's commands must not inherit it
+    finally:
+        if saved is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = saved
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_")]
     for name, fn in tests:

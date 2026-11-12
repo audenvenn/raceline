@@ -5,9 +5,15 @@
 #import <Accelerate/Accelerate.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 namespace rl {
 
@@ -43,8 +49,128 @@ void set_params(id<MTLComputeCommandEncoder> enc, const P &p, int index) {
 
 }  // namespace
 
+// ---- Experts kept on disk, the ones in use in memory (RACELINE_EXPERT_CACHE).
+//
+// A MoE model's experts are most of its weights, and a token uses a few of
+// them per layer. With the cache on, the expert sections of the file are not
+// handed to Metal (which would have to keep them all resident): the engine
+// copies the experts a pass needs into a fixed set of slots and the grouped
+// matmuls read them through a per-layer slot table. Which experts a layer
+// needs is known only once its router has run on the GPU, so the command
+// buffer is split there: the GPU signals a shared event after the routing
+// kernel and waits on the next value before the expert matmuls; a CPU thread
+// that watches the event loads what is missing (least recently used slots
+// first; each layer's shared expert has a slot of its own), updates the table
+// and signals. What is computed does not change, only where the weights are read.
+static double expert_cache_gb() {
+  const char *v = getenv("RACELINE_EXPERT_CACHE");
+  return v ? atof(v) : 0.0;
+}
+
+struct Engine::ExpertCache {
+  struct Request {
+    int layer, T;
+    uint64_t ready, go;
+  };
+  int layers = 0, E = 0, S = 0, slots = 0;
+  size_t w_bytes[2] = {0, 0};
+  int s_floats[2] = {0, 0};
+  std::vector<const uint8_t *> src_w[2];
+  std::vector<const float *> src_s[2];
+  id<MTLBuffer> w[2], s[2], table, sel;   // sel: the routing kernel's expert per assignment
+  id<MTLBuffer> cols;                      // [layer][I] the down stacks' column scales (for SwiGLU)
+  std::vector<std::pair<int, int>> owner;  // slot -> (layer, expert)
+  std::vector<uint64_t> used;              // slot -> time of last use
+  uint64_t clock = 0;
+  int next_free = 0;
+  uint64_t loads = 0, hits = 0;
+  id<MTLSharedEvent> ev;
+  uint64_t value = 0;
+  std::thread worker;
+  std::mutex mu;
+  std::condition_variable cv;
+  std::deque<Request> queue;
+  bool stop = false;
+
+  int32_t *tab(int layer) const { return (int32_t *)table.contents + (size_t)layer * (E + 1); }
+
+  void load(int layer, int e, int slot) {
+    for (int k = 0; k < 2; k++) {
+      memcpy((char *)w[k].contents + slot * w_bytes[k], src_w[k][layer] + e * w_bytes[k], w_bytes[k]);
+      memcpy((float *)s[k].contents + (size_t)slot * s_floats[k], src_s[k][layer] + (size_t)e * s_floats[k],
+             s_floats[k] * sizeof(float));
+    }
+  }
+
+  int take_slot() {
+    if (next_free < slots) return next_free++;
+    int best = -1;                          // the least recently used slot that is not pinned
+    for (int i = layers; i < slots; i++)
+      if (best < 0 || used[i] < used[best]) best = i;
+    tab(owner[best].first)[owner[best].second] = -1;
+    return best;
+  }
+
+  void handle(const Request &r) {
+    const int32_t *pick = (const int32_t *)sel.contents;
+    int32_t *t = tab(r.layer);
+    std::vector<char> need(E, 0);
+    for (int a = 0; a < r.T * S; a++)
+      if (pick[a] < E) need[pick[a]] = 1;
+    const uint64_t now = ++clock;
+    for (int e = 0; e < E; e++)              // stamp first, so nothing needed now is evicted
+      if (need[e] && t[e] >= 0) used[t[e]] = now, hits++;
+    for (int e = 0; e < E; e++) {
+      if (!need[e] || t[e] >= 0) continue;
+      const int slot = take_slot();
+      load(r.layer, e, slot);
+      owner[slot] = {r.layer, e};
+      used[slot] = now;
+      t[e] = slot;
+      loads++;
+    }
+  }
+
+  void run() {
+    for (;;) {
+      Request r;
+      {
+        std::unique_lock<std::mutex> lock(mu);
+        cv.wait(lock, [&] { return stop || !queue.empty(); });
+        if (stop) return;
+        r = queue.front();
+        queue.pop_front();
+      }
+      while (ev.signaledValue < r.ready) {   // the GPU gets there within the pass: spin
+        if (stop) return;
+      }
+      handle(r);
+      ev.signaledValue = r.go;
+    }
+  }
+
+  void submit(const Request &r) {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      queue.push_back(r);
+    }
+    cv.notify_one();
+  }
+
+  ~ExpertCache() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      stop = true;
+    }
+    cv.notify_one();
+    if (worker.joinable()) worker.join();
+  }
+};
+
+Engine::~Engine() = default;
+
 Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
-    : model_(new ModelFile(mt_, model_path)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
+    : model_(new ModelFile(mt_, model_path, expert_cache_gb() <= 0)), max_ctx_(max_ctx), max_chunk_(max_chunk) {
   const Config &c = config();
   if (c.lin_k_dim != 128 || c.head_dim != 256 || c.rope_dims() != 64 || c.conv_taps != 4 || c.group != 64 ||
       c.block != 256 || c.lin_v_dim % 8 != 0 || c.heads % c.kv_heads != 0)
@@ -99,6 +225,50 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     moe_gu_ = mt_.alloc(A * 2 * c.moe_inter * sizeof(float));
     moe_act_ = mt_.alloc((A + tm) * c.moe_inter * sizeof(_Float16));
     moe_y_ = mt_.alloc(A * c.hidden * sizeof(float));
+    moe_identity_ = mt_.alloc((c.experts + 1) * sizeof(int32_t));
+    for (int e = 0; e <= c.experts; e++) ((int32_t *)moe_identity_.contents)[e] = e;
+
+    if (expert_cache_gb() > 0) {
+      cache_ = std::make_unique<ExpertCache>();
+      ExpertCache &x = *cache_;
+      x.layers = c.layers;
+      x.E = c.experts;
+      x.S = (int)S;
+      for (int kind = 0; kind < 2; kind++) {
+        for (int i = 0; i < c.layers; i++) {
+          const QTensor &t = model_->q(lname(i, kind ? "moe.down" : "moe.gate_up"));
+          const int ne = kind ? c.hidden : 2 * c.moe_inter;
+          x.w_bytes[kind] = (size_t)ne * t.k / 2;
+          x.s_floats[kind] = ne;
+          x.src_w[kind].push_back(t.host + t.w);
+          x.src_s[kind].push_back((const float *)(t.host + t.s));
+        }
+      }
+      const size_t per_slot = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);
+      x.slots = std::max((int)(expert_cache_gb() * 1e9 / per_slot), c.layers + c.experts);
+      for (int kind = 0; kind < 2; kind++) {
+        x.w[kind] = mt_.alloc((size_t)x.slots * x.w_bytes[kind]);
+        x.s[kind] = mt_.alloc((size_t)x.slots * x.s_floats[kind] * sizeof(float));
+      }
+      x.cols = mt_.alloc((size_t)c.layers * c.moe_inter * sizeof(float));
+      for (int i = 0; i < c.layers; i++) {
+        const QTensor &dn = model_->q(lname(i, "moe.down"));
+        memcpy((float *)x.cols.contents + (size_t)i * c.moe_inter, dn.host + dn.c, c.moe_inter * sizeof(float));
+      }
+      x.table = mt_.alloc((size_t)c.layers * (c.experts + 1) * sizeof(int32_t));
+      memset(x.table.contents, 0xff, x.table.length);   // -1: not loaded
+      x.owner.assign(x.slots, {-1, -1});
+      x.used.assign(x.slots, 0);
+      for (int i = 0; i < c.layers; i++) {             // each layer's shared expert: a pinned slot
+        x.load(i, c.experts, i);
+        x.tab(i)[c.experts] = i;
+        x.owner[i] = {i, c.experts};
+      }
+      x.next_free = c.layers;
+      x.sel = moe_sel_;
+      x.ev = [mt_.device() newSharedEvent];
+      x.worker = std::thread([&x] { x.run(); });
+    }
   }
 
   ones_ = mt_.alloc((size_t)x_stride_ * sizeof(float));
@@ -108,7 +278,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
     // Norm weights times the column scales (from column col0 on) of the matrix they feed.
     auto fold = [&](const FTensor &norm, const QTensor &consumer, int col0 = 0) {
       id<MTLBuffer> b = mt_.alloc((size_t)c.hidden * sizeof(float));
-      const float *cs = consumer.native ? (const float *)((const char *)consumer.buf.contents + consumer.c) + col0 : nullptr;
+      const float *cs = consumer.native ? (const float *)(consumer.host + consumer.c) + col0 : nullptr;
       float *o = (float *)b.contents;
       for (int k = 0; k < c.hidden; k++) o[k] = norm.data[k] * (cs ? cs[k] : 1.0f);
       return b;
@@ -466,6 +636,17 @@ void Engine::encode_moe(int layer, int T) {
   run_groups(1, 1, 1024);
   mark("moe_route");
 
+  const bool offload = cache_ && layer < c.layers;
+  if (offload) {  // the CPU loads the experts this layer needs before the GPU goes on (ExpertCache)
+    ExpertCache &x = *cache_;
+    [enc_ endEncoding];
+    const uint64_t ready = ++x.value, go = ++x.value;
+    [cb_ encodeSignalEvent:x.ev value:ready];
+    [cb_ encodeWaitForEvent:x.ev value:go];
+    enc_ = [cb_ computeCommandEncoder];
+    x.submit({layer, T, ready, go});
+  }
+
   [enc_ setComputePipelineState:mt_.pipeline("moe.metal", "moe_gather", route)];
   [enc_ setBuffer:xn_ offset:0 atIndex:0];
   [enc_ setBuffer:moe_tok_ offset:0 atIndex:1];
@@ -479,11 +660,11 @@ void Engine::encode_moe(int layer, int T) {
                      {"W_T", c.book == "fp4" ? "metal_fp4_e2m1_format" : "int4b_format"}};
   [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_q4n_moe", mm)];
   [enc_ setBuffer:moe_x_ offset:0 atIndex:0];
-  [enc_ setBuffer:gu.buf offset:gu.w atIndex:1];
-  [enc_ setBuffer:gu.buf offset:gu.s atIndex:2];
+  bind_experts(layer, 0, gu);
   [enc_ setBuffer:moe_items_ offset:0 atIndex:3];
   [enc_ setBuffer:moe_gu_ offset:0 atIndex:4];
-  set_params(enc_, MoeLinearParams{c.hidden, 2 * c.moe_inter, c.hidden, 2 * c.moe_inter}, 5);
+  set_params(enc_, MoeLinearParams{c.hidden, 2 * c.moe_inter, c.hidden, 2 * c.moe_inter,
+                                   (long)c.moe_inter * c.hidden, 2 * c.moe_inter}, 5);
   run_indirect(moe_args_, 0, 32 * NSG);
   mark("moe:gate_up");
 
@@ -491,17 +672,18 @@ void Engine::encode_moe(int layer, int T) {
   [enc_ setBuffer:moe_gu_ offset:0 atIndex:0];
   [enc_ setBuffer:moe_act_ offset:0 atIndex:1];
   set_params(enc_, SwigluParams{A, c.moe_inter, 2 * c.moe_inter, c.moe_inter}, 2);
-  bind_column_scale(dn, 3);
+  if (offload) [enc_ setBuffer:cache_->cols offset:(size_t)layer * c.moe_inter * sizeof(float) atIndex:3];
+  else bind_column_scale(dn, 3);
   run_threads(c.moe_inter, A);
   mark("moe_swiglu");
 
   [enc_ setComputePipelineState:mt_.pipeline("linear.metal", "linear_q4n_moe", mm)];
   [enc_ setBuffer:moe_act_ offset:0 atIndex:0];
-  [enc_ setBuffer:dn.buf offset:dn.w atIndex:1];
-  [enc_ setBuffer:dn.buf offset:dn.s atIndex:2];
+  bind_experts(layer, 1, dn);
   [enc_ setBuffer:moe_items_ offset:0 atIndex:3];
   [enc_ setBuffer:moe_y_ offset:0 atIndex:4];
-  set_params(enc_, MoeLinearParams{c.moe_inter, c.hidden, c.moe_inter, c.hidden}, 5);
+  set_params(enc_, MoeLinearParams{c.moe_inter, c.hidden, c.moe_inter, c.hidden,
+                                   (long)c.hidden * c.moe_inter / 2, c.hidden}, 5);
   run_indirect(moe_args_, 3 * sizeof(uint32_t), 32 * NSG);
   mark("moe:down");
 
@@ -513,6 +695,18 @@ void Engine::encode_moe(int layer, int T) {
   set_params(enc_, MoeCombineParams{T, c.hidden, c.hidden}, 4);
   run_threads(c.hidden, T);
   mark("moe_combine");
+}
+
+void Engine::bind_experts(int layer, int kind, const QTensor &stack) {
+  if (cache_ && layer < config().layers) {
+    [enc_ setBuffer:cache_->w[kind] offset:0 atIndex:1];
+    [enc_ setBuffer:cache_->s[kind] offset:0 atIndex:2];
+    [enc_ setBuffer:cache_->table offset:(size_t)layer * (config().experts + 1) * sizeof(int32_t) atIndex:6];
+  } else {
+    [enc_ setBuffer:stack.buf offset:stack.w atIndex:1];
+    [enc_ setBuffer:stack.buf offset:stack.s atIndex:2];
+    [enc_ setBuffer:moe_identity_ offset:0 atIndex:6];
+  }
 }
 
 void Engine::encode_linear_attn(int layer, int T, bool spec) {

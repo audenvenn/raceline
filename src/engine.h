@@ -17,6 +17,7 @@ class Engine {
   // max_ctx bounds the attention KV cache; max_chunk is the most tokens one
   // forward() call may carry (longer prompts are fed in several calls).
   Engine(const std::string &model_path, int max_ctx = 8192, int max_chunk = 1024);
+  ~Engine();
 
   const Config &config() const { return model_->config(); }
   int position() const { return pos_; }
@@ -131,6 +132,9 @@ class Engine {
   void encode_mlp(int layer, int T);
   // A mixture-of-experts MLP over rows 0..T-1 of h_ (kernels/moe.metal).
   void encode_moe(int layer, int T);
+  // The experts' weights, kind 0 (gate/up) or 1 (down), for the grouped matmul:
+  // the stacked tensor of the file, or the expert cache, with its slot table.
+  void bind_experts(int layer, int kind, const QTensor &stack);
   // The name of a layer's first MLP matrix: "mlp.gate_up", or "moe.gate_up" for a MoE layer.
   std::string mlp_in(int layer) const;
   void encode_linear_attn(int layer, int T, bool spec);
@@ -180,6 +184,11 @@ class Engine {
   // inputs and outputs [rows * slots][width].
   id<MTLBuffer> moe_logits_ = nil, moe_tok_ = nil, moe_inv_ = nil, moe_w_ = nil, moe_sel_ = nil, moe_items_ = nil,
                 moe_args_ = nil, moe_x_ = nil, moe_gu_ = nil, moe_act_ = nil, moe_y_ = nil;
+  id<MTLBuffer> moe_identity_ = nil;               // slot = expert: experts read straight from the file
+  // RACELINE_EXPERT_CACHE=<GB>: experts live in the file and the ones in use
+  // in a cache of that size (see ExpertCache in engine.mm).
+  struct ExpertCache;
+  std::unique_ptr<ExpertCache> cache_;
   // Attention: queries [KVH][q_rows_][head_dim] half, and for one group of rows
   // the scores (float), unnormalized probabilities (half) and their row sums.
   id<MTLBuffer> aq_, as_, ap_, al_;

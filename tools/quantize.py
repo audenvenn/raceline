@@ -359,22 +359,33 @@ def emit_layer(out, i, layer, weights, stacks, results, book):
     else:
         out.add_float(f"layers.{i}.attn.q_norm", weights["self_attn.q_norm.weight"])
         out.add_float(f"layers.{i}.attn.k_norm", weights["self_attn.k_norm.weight"])
-    for j, (name, parts) in enumerate(stacks):
+    def emit(j):
+        name, parts = stacks[j]
         named = [(pn, m.weight.shape[0]) for pn, m in parts]
         if results is None:
             out.add_native_layout(f"layers.{i}.{name}", named, parts[0][1].weight.shape[1], book)
         else:
             codes, s, c = results[j][1]
             out.add_native(f"layers.{i}.{name}", named, codes, s, c, book)
-    if is_moe(layer):
+
+    experts = [j for j, (name, _) in enumerate(stacks) if name.startswith("moe.")]
+    for j in range(len(stacks)):
+        if j not in experts:
+            emit(j)
+    if experts:
         # The router, and the shared expert's gate as one more row, in half
         # precision. They read the same input as the gate/up stack, which the
         # engine has already multiplied by that stack's column scales: divided out here.
         router = np.concatenate([weights["mlp.gate.weight"], weights["mlp.shared_expert_gate.weight"]], axis=0)
         if results is not None:
-            c = results[[n for n, _ in stacks].index("moe.gate_up")][1][2]
-            router = router / c[None, :]
+            router = router / results[[n for n, _ in stacks].index("moe.gate_up")][1][2][None, :]
         out.add_dense(f"layers.{i}.moe.router", router)
+        # The experts get a section of their own: an engine that keeps only the
+        # experts in use in memory never maps it as a whole.
+        out.end()
+        out.begin(f"experts.{i}")
+        for j in experts:
+            emit(j)
     out.end()
 
 

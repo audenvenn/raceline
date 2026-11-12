@@ -25,7 +25,7 @@ static int geti_or(NSDictionary *d, NSString *key, int fallback) {
   return [v isKindOfClass:[NSNumber class]] ? [v intValue] : fallback;
 }
 
-ModelFile::ModelFile(Metal &mt, const std::string &path) {
+ModelFile::ModelFile(Metal &mt, const std::string &path, bool map_experts) {
   int fd = open(path.c_str(), O_RDONLY);
   if (fd < 0) fatal("cannot open %s", path.c_str());
   struct stat st;
@@ -88,7 +88,7 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
   for (NSDictionary *s in sections) {
     size_t off = [s[@"offset"] unsignedLongLongValue], n = [s[@"nbytes"] unsignedLongLongValue];
     if (off + n > Metal::round_up(size_, Metal::page_size())) fatal("section '%s' runs past the end of the file", [s[@"name"] UTF8String]);
-    bufs.push_back(mt.wrap((void *)(base + off), n));
+    bufs.push_back(!map_experts && [s[@"name"] hasPrefix:@"experts."] ? nil : mt.wrap((void *)(base + off), n));
     sec_off.push_back(off);
   }
 
@@ -108,6 +108,7 @@ ModelFile::ModelFile(Metal &mt, const std::string &path) {
     } else {
       QTensor qt;
       qt.buf = bufs[sec];
+      qt.host = base + sec_off[sec];
       qt.native = [kind hasPrefix:@"q4n"];
       qt.dense = [kind isEqualToString:@"f16b"];
       qt.blocked = qt.dense || [kind isEqualToString:@"q4a"] || [kind isEqualToString:@"q4n"];

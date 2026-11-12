@@ -254,9 +254,10 @@ kernel void linear_q4n_raw(device half *a [[buffer(0)]],
 // ---------------------------------------------------------------------------
 // The experts of a mixture of experts, all in one dispatch (see moe.metal).
 //
-// W stacks the experts' matrices of one kind, expert after expert, in the
-// native blocked layout: expert e owns rows e * Ne .. (e + 1) * Ne - 1, a whole
-// number of blocks. A holds the token rows sorted by expert. Each threadgroup
+// W holds the experts' matrices of one kind, one per slot, each in the native
+// blocked layout (Ne rows, a whole number of blocks); slots[e] says which slot
+// expert e is in: the stacked tensor of the file (slot = expert) or the
+// engine's expert cache. A holds the token rows sorted by expert. Each threadgroup
 // takes one work item (expert, first row, rows: at most TM rows, all routed to
 // that expert) and one tile of TN output columns of that expert:
 //   C[r][n] = s[e * Ne + n] * (A[r] * L(q[e * Ne + n])^T)     for r in the item's rows
@@ -269,14 +270,17 @@ kernel void linear_q4n_moe(device half *a [[buffer(0)]],
                            device const int4 *items [[buffer(3)]],
                            device OUT_T *c [[buffer(4)]],
                            constant MoeLinearParams &p [[buffer(5)]],
+                           device const int *slots [[buffer(6)]],
                            uint3 tgid [[threadgroup_position_in_grid]])
 {
   const int4 item = items[tgid.y];
-  const int e = item.x, r0 = item.y, rows = item.z;
-  const int n0 = int(tgid.x) * TN;
-  const int gn = e * p.Ne + n0;      // row of the stacked matrix
-  const int blk = gn / BLOCK;
-  const int col = gn % BLOCK;
+  const int r0 = item.y, rows = item.z;
+  const int slot = slots[item.x];
+  const int n0 = int(tgid.x) * TN;   // output column within the expert
+  const int blk = n0 / BLOCK;
+  const int col = n0 % BLOCK;
+  w += size_t(slot) * size_t(p.w_stride);
+  s += size_t(slot) * size_t(p.s_stride);
 
   constexpr auto desc = matmul2d_descriptor(TM, TN, static_cast<int>(dynamic_extent), false, false, true,
                                             matmul2d_descriptor::mode::multiply);
@@ -293,7 +297,7 @@ kernel void linear_q4n_moe(device half *a [[buffer(0)]],
   auto acc = op.get_destination_cooperative_tensor<decltype(tA), decltype(tW), float>();
   op.run(tA, tW, acc);
 
-  const device float *sn = s + gn;
+  const device float *sn = s + n0;
 #pragma clang loop unroll(full)
   for (ushort i = 0; i < acc.get_capacity(); ++i) {
     if (acc.is_valid_element(i)) {

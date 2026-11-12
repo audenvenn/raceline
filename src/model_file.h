@@ -48,6 +48,7 @@ struct QTensor {
   bool blocked = true;
   bool native = false;
   bool dense = false;  // half-precision values instead of 4-bit codes (kind "f16b"): no scales
+  const uint8_t *host = nullptr;  // the section in the mapped file (w, s, c are offsets into it)
   std::map<std::string, std::pair<int, int>> parts;  // name -> (first row, rows)
 
   int part_offset(const std::string &name) const;
@@ -62,7 +63,10 @@ struct FTensor {
 
 class ModelFile {
  public:
-  ModelFile(Metal &mt, const std::string &path);
+  // map_experts = false: sections named "experts.*" get no Metal buffer (their
+  // tensors have buf == nil and are read through `host`): the engine copies the
+  // experts it needs into its own cache instead, and Metal never holds them all.
+  ModelFile(Metal &mt, const std::string &path, bool map_experts = true);
   ~ModelFile();
   ModelFile(const ModelFile &) = delete;
 

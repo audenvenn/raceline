@@ -112,6 +112,13 @@ def _library() -> ctypes.CDLL:
     return lib
 
 
+def _model_config(model_path: str) -> dict:
+    """The configuration in a .rlm file's header."""
+    with open(model_path, "rb") as f:
+        f.seek(8)
+        return json.loads(f.read(int.from_bytes(f.read(8), "little"))).get("config", {})
+
+
 def _tokenizer_dir(model_path: str) -> str:
     """Directory with the tokenizer and chat template for a .rlm file. Files
     embedded in the model are unpacked once into the cache; older files fall
@@ -155,7 +162,7 @@ def _tokenizer_dir(model_path: str) -> str:
 class RacelineBackend(Backend):
     name = "raceline"
 
-    def __init__(self, model_path: str, max_ctx: int = 32768, chunk: int = 1024, mtp: Optional[bool] = None):
+    def __init__(self, model_path: str, max_ctx: int = 32768, chunk: Optional[int] = None, mtp: Optional[bool] = None):
         from transformers import AutoTokenizer
 
         why = unsupported_reason()
@@ -169,6 +176,12 @@ class RacelineBackend(Backend):
                         if i is not None and i >= 0}
         self.model_id = os.path.basename(model_path)
         self._lib = _library()
+        if chunk is None:
+            # Rows per prompt pass. A mixture of experts reads every expert once per
+            # pass, from the SSD when they are not all in memory: longer passes read
+            # fewer per token (Qwen3.5-35B-A3B on a 24 GB Mac, a 4096-token prompt:
+            # 1273 tok/s in passes of 2048 rows, 792 in passes of 1024).
+            chunk = 2048 if _model_config(model_path).get("num_experts") else 1024
         self._e = self._lib.rl_open(os.path.abspath(model_path).encode(), max_ctx, chunk)
         self._vocab = self._lib.rl_vocab(self._e)
         self._chunk, self._max_ctx = chunk, max_ctx

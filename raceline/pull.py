@@ -22,12 +22,14 @@ MODELS = {  # alias -> file name in the release
     "qwen3.5-9b": "qwen3.5-9b.rlm",
     "qwen3.8-27b": "qwen3.8-27b.rlm",
     "qwen3.5-35b-a3b": "qwen3.5-35b-a3b.rlm",
+    "qwen3.6-35b-a3b": "qwen3.6-35b-a3b.rlm",
 }
 CATALOG = {  # alias -> (file size, bytes of it that are experts and may stay on disk, what it is); `raceline pull` lists it
     "qwen3.5-4b": (2.5e9, 0, "small and quick"),
     "qwen3.5-9b": (4.7e9, 0, "the best agent per second; fits a 16 GB Mac"),
     "qwen3.8-27b": (13.8e9, 0, "dense, the strongest of the dense ones; wants 24 GB or more"),
     "qwen3.5-35b-a3b": (18.3e9, 16.3e9, "mixture of experts, 3B active: its experts can stay on the SSD"),
+    "qwen3.6-35b-a3b": (18.0e9, 16.3e9, "the newer 35B-A3B, stronger at agentic coding; experts on the SSD too"),
 }
 SOURCES = {  # where the files of model {alias} are, by source
     "github": "https://github.com/audenvenn/raceline/releases/download/models-v2",

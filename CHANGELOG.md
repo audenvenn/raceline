@@ -8,7 +8,17 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-13
+
 ### Added
+
+- Qwen3.6-35B-A3B: `raceline pull qwen3.6-35b-a3b` (18.0 GB, from the
+  `models-v2` release or Hugging Face). Qwen's newer 35B mixture of experts,
+  same architecture as Qwen3.5-35B-A3B and much stronger at agentic coding
+  in Qwen's evaluation. It is harder to quantize: KL 0.114 nats to the
+  float model (Qwen3.5-35B-A3B: 0.060), where MLX's 4-bit format, measured
+  by the converter on the same text, gets 0.121. On the agent tasks it
+  solves 7 of 8 and 6 of the 8 harder ones (Qwen3.5-35B-A3B: 7 and 5).
 
 - `raceline serve` keeps conversations set aside (#8). When a request starts
   another conversation (a second chat, or a side request such as a title in
@@ -257,7 +267,8 @@ First public release.
 - Project infrastructure: CI, contribution guide, security policy, issue and
   pull-request templates.
 
-[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/audenvenn/raceline/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/audenvenn/raceline/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/audenvenn/raceline/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/audenvenn/raceline/releases/tag/v0.2.0

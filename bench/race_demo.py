@@ -79,6 +79,7 @@ def record_agent(model, out, task_name):
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     for path, text in task["files"].items():
+        os.makedirs(os.path.dirname(os.path.join(work, path)), exist_ok=True)
         with open(os.path.join(work, path), "w", encoding="utf-8") as f:
             f.write(text)
         os.utime(os.path.join(work, path), (FIXED_TIME, FIXED_TIME))

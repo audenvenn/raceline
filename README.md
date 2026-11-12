@@ -86,6 +86,10 @@ weights, which write other text:
 | | **raceline** | 5 of 8 | 16,924 | **183.6 tok/s** | **161 s** |
 | | raceline, copied drafts off | 5 of 8 | 16,924 | 150.5 tok/s | 181 s |
 
+`--set extended` runs eight harder tasks for working on the agent (several
+files, a 600-line file, tests that must catch broken versions of the code, a
+new module from a description); the 9B solves 7 of them in 164 s.
+
 The 27B's whole run is 7.3 times shorter on raceline, partly because these
 weights wrote half as many tokens as MLX's on these tasks; decoding alone is
 3.6 times faster. Copied drafts made 14 to 56% of the 4B's output and 13 to

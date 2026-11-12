@@ -773,6 +773,13 @@ void Engine::encode_moe(int layer, int T) {
 
   const bool offload = cache_ && layer < c.layers;
   if (offload) {  // the CPU loads the experts this layer needs before the GPU goes on (ExpertCache)
+    // The wait must stay the very next command after the signal, so that the
+    // GPU is always waiting before the CPU answers. Running the shared expert
+    // in between (to hide the ~40 us the GPU takes to wake up from a wait)
+    // gave wrong results whenever the CPU answered first and had refilled a
+    // slot the GPU had read earlier in the same command buffer: a wait that is
+    // already satisfied when reached did not make those writes visible to the
+    // expert matmuls (tests/check_moe.py, chunks of 1 with the smallest cache).
     ExpertCache &x = *cache_;
     [enc_ endEncoding];
     const uint64_t ready = ++x.value, go = ++x.value;

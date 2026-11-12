@@ -10,6 +10,35 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Added
 
+- Mixture-of-experts models (Qwen3.5-35B-A3B and the like, #5). The
+  converter stacks each layer's experts into two 4-bit tensors in a file
+  section of their own; the engine routes on the GPU, sorts the
+  (token, expert) pairs by expert and runs every expert over just the rows
+  routed to it in one grouped matmul, sized by the GPU (indirect dispatch).
+  Prompts fed in chunks and speculative passes stay bit-identical, as with
+  the dense models. `tests/check_moe.py` runs every check on a tiny random
+  MoE model.
+
+- Experts on disk. When a MoE model does not fit in the memory the GPU may
+  use, the engine leaves the experts in the file and keeps the ones in use
+  in a cache: after each layer's routing a CPU thread reads the missing
+  experts from the SSD (in parallel, with `pread`) while the GPU waits.
+  Prompt chunks do not count as uses (a chunk needs every expert, a scan
+  that would flush plain LRU) and prefetch the next layer's experts while
+  the GPU works. `--expert-cache GB` / `RACELINE_EXPERT_CACHE` set the
+  cache (0: everything in memory); `RACELINE_EXPERT_NOCACHE=1` reads past
+  the system's file cache, to measure a smaller Mac on a larger one.
+  `bench/expert_cache_sim.py` replays routing traces
+  (`RACELINE_EXPERT_TRACE`) to compare replacement policies.
+
+- The converter quantizes each expert's down projection with GPTQ on that
+  expert's own inputs (they differ per expert, so one Hessian does not
+  apply).
+
+- Draft counts follow what a row of the verifying pass costs, measured
+  (a least-squares line through rows and GPU time of recent passes): free
+  on a dense model, not in a mixture of experts.
+
 - `bench/agent_eval.py --set extended`: eight harder agent tasks closer to
   real work (a bug across a small package, a 600-line file, tests that must
   catch three of four broken versions of the code, a module and a script

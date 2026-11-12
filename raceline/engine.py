@@ -33,7 +33,7 @@ from typing import Optional
 
 import numpy as np
 
-from .backends import Backend, Sampling, Snapshot
+from .backends import Backend, Sampling, Snapshot, without_torch_notice
 
 
 def unsupported_reason() -> Optional[str]:
@@ -163,7 +163,8 @@ class RacelineBackend(Backend):
     name = "raceline"
 
     def __init__(self, model_path: str, max_ctx: int = 32768, chunk: Optional[int] = None, mtp: Optional[bool] = None):
-        from transformers import AutoTokenizer
+        with without_torch_notice():
+            from transformers import AutoTokenizer
 
         why = unsupported_reason()
         if why:

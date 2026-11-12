@@ -65,6 +65,13 @@ def default_model():
     return os.path.join(d, found[0]) if len(found) == 1 else None
 
 
+def _experts_on_disk(size: float, ram: int) -> bool:
+    """Whether the engine will leave a mixture of experts' experts partly on disk on this Mac: it does
+    when the model, its attention cache and scratch (about 2.3 GB) need more than 85% of the memory
+    the GPU may use, which Metal puts at roughly 0.7 of the Mac's memory (19.1 GB of 24)."""
+    return size + 2.3e9 > 0.85 * 0.7 * ram
+
+
 def list_models() -> None:
     """What `raceline pull` can fetch, and how each one fits this Mac."""
     ram = _memory_bytes()
@@ -74,7 +81,7 @@ def list_models() -> None:
         fit = ""
         if ram and size - experts > 0.7 * ram:
             fit = "  [too large for this Mac]"
-        elif ram and experts and size > 0.7 * ram:
+        elif ram and experts and _experts_on_disk(size, ram):
             fit = "  [experts partly on the SSD here]"
         print(f"  {alias:18s} {size / 1e9:5.1f} GB  {what}{fit}{'  (downloaded)' if here else ''}")
     print("raceline pull <model> downloads one, from GitHub (--source huggingface: from Hugging Face).")
@@ -123,7 +130,7 @@ def pull(model: str, dest: str | None = None, source: str | None = None) -> str:
     if ram and resident > 0.7 * ram:
         print(f"  note: this Mac has {ram / 2**30:.0f} GB of memory; a {total / 1e9:.1f} GB model leaves too little "
               "for the system and the context, so it will page from disk and run far below its speed")
-    elif ram and moe and total > 0.7 * ram:
+    elif ram and moe and _experts_on_disk(total, ram):
         print(f"  note: this Mac has {ram / 2**30:.0f} GB of memory: the experts that do not fit stay in the file "
               "and are read from the SSD when a layer needs them, which is slower than holding them all")
     t0, fresh = time.time(), 0

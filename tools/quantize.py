@@ -316,7 +316,8 @@ def main():
     ap.add_argument("src", help="original (unquantized) model directory")
     ap.add_argument("dst", help="output .rlm file")
     ap.add_argument("--book", choices=sorted(quantlib.LMAX) + ["mlx-affine4"], default="fp4",
-                    help="codebook; mlx-affine4 measures MLX's 4-bit format on the same data and writes no file")
+                    help="codebook; mlx-affine4 (MLX's 4-bit format) and mxfp4 (FP4 with a power-of-two scale "
+                         "per 32 weights) are measured on the same data and write no file")
     ap.add_argument("--calib", nargs="*", help="text files to calibrate on")
     ap.add_argument("--eval", nargs="*", help="held-out text files for the quality report")
     ap.add_argument("--calib-seqs", type=int, default=32)
@@ -360,7 +361,7 @@ def main():
           f"{len(cal)} calibration and {len(ev)} evaluation sequences of {T} tokens")
 
     t_start = time.time()
-    write = book != "mlx-affine4"
+    write = book not in ("mlx-affine4", "mxfp4")     # measured only: the engine does not read these
     # An interrupted run leaves a file without a header. Its contents are found
     # again by replaying the writer's layout (`plan`); `out` opens once the
     # first layer that is not in the file is reached.

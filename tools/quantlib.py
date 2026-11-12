@@ -9,6 +9,10 @@ Codebooks (value of each 4-bit code, in code order)
   fp4    FP4 E2M1: 0, 0.5, 1, 1.5, 2, 3, 4, 6 and their negatives
   int15  two's-complement nibble, clipped to -7 .. 7
   int16  two's-complement nibble plus one half: +-0.5 .. +-7.5
+  mxfp4  FP4 E2M1 with, in addition, a power of two per 32 weights of a row
+         (the UE8M0 scale plane the accelerators apply themselves): the
+         scale of weight (n, k) is s[n] * 2^e[n][k / 32]. Here `s` comes back
+         as [N][K / 32], the row scale already multiplied in.
 
 The scale searches are element-wise and run on the GPU through MLX; so do the
 GPTQ blocks. Matrices are processed in row chunks and results are returned as
@@ -22,11 +26,14 @@ import numpy as np
 
 LEVELS = {
     "fp4": np.array([0, .5, 1, 1.5, 2, 3, 4, 6, -0., -.5, -1, -1.5, -2, -3, -4, -6], dtype=np.float32),
+    "mxfp4": np.array([0, .5, 1, 1.5, 2, 3, 4, 6, -0., -.5, -1, -1.5, -2, -3, -4, -6], dtype=np.float32),
     "int15": np.array([0, 1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1], dtype=np.float32),
     "int16": np.array([.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, -7.5, -6.5, -5.5, -4.5, -3.5, -2.5, -1.5, -.5],
                       dtype=np.float32),
 }
-LMAX = {"fp4": 6.0, "int15": 7.0, "int16": 7.5}
+LMAX = {"fp4": 6.0, "mxfp4": 6.0, "int15": 7.0, "int16": 7.5}
+GROUP = 32                                   # weights per power-of-two scale (mxfp4)
+EXPONENTS = (-4, -3, -2, -1, 0, 1)           # relative to the row scale
 
 
 def snap(x: np.ndarray, book: str) -> np.ndarray:
@@ -35,7 +42,7 @@ def snap(x: np.ndarray, book: str) -> np.ndarray:
         return np.clip(np.floor(x), -8, 7) + 0.5
     if book == "int15":
         return np.clip(np.rint(x), -7, 7)
-    if book == "fp4":
+    if book in ("fp4", "mxfp4"):
         m = np.abs(x)
         fine = np.rint(m * 2) * 0.5                    # 0 .. 1.5 in steps of 0.5 (1.75 rounds to 2)
         mid = np.rint(m)                               # 2, 3, 4
@@ -51,7 +58,7 @@ def encode(v: np.ndarray, book: str) -> np.ndarray:
         return (np.rint(v - 0.5).astype(np.int8) & 0x0F).astype(np.uint8)
     if book == "int15":
         return (np.rint(v).astype(np.int8) & 0x0F).astype(np.uint8)
-    if book == "fp4":  # sign(1) exponent(2) mantissa(1)
+    if book in ("fp4", "mxfp4"):  # sign(1) exponent(2) mantissa(1)
         m = np.abs(v)
         code = np.select([m < 0.25, m < 0.75, m < 1.25, m < 1.75, m < 2.5, m < 3.5, m < 5.0],
                          [0, 1, 2, 3, 4, 5, 6], default=7).astype(np.uint8)
@@ -60,8 +67,35 @@ def encode(v: np.ndarray, book: str) -> np.ndarray:
 
 
 def dequant(codes: np.ndarray, s: np.ndarray, c: np.ndarray, book: str) -> np.ndarray:
-    """codes [..., K], s [...] and c [K] -> float32 weights."""
+    """codes [..., K], s [...] (or [..., K / GROUP] for mxfp4) and c [K] -> float32 weights."""
+    if s.ndim == codes.ndim:
+        return LEVELS[book][codes] * np.repeat(s, codes.shape[-1] // s.shape[-1], axis=-1) * c
     return LEVELS[book][codes] * s[..., None] * c
+
+
+def group_scales(W: np.ndarray, c: np.ndarray, wgt: np.ndarray, s: np.ndarray, book: str) -> np.ndarray:
+    """mxfp4: per (row, group of GROUP columns) the power of two 2^e, e in
+    EXPONENTS, whose scale s[n] * 2^e rounds the group with the least weighted
+    error. -> the scales s[n] * 2^e as float32 [N][K / GROUP]."""
+    N, K = W.shape
+    G = K // GROUP
+    out = np.empty((N, G), dtype=np.float32)
+    wg, cm = mx.array(wgt.reshape(G, GROUP)), mx.array(c)
+    for i in range(0, N, CHUNK):
+        w = (mx.array(W[i:i + CHUNK]) / cm).reshape(-1, G, GROUP)
+        base = mx.array(s[i:i + CHUNK]).reshape(-1, 1, 1)
+        best_e = best_s = None
+        for e in EXPONENTS:
+            sc = base * float(2.0 ** e)
+            err = (mx.square(_snap_mx(w / sc, book) * sc - w) * wg).sum(axis=-1, keepdims=True)
+            if best_e is None:
+                best_e, best_s = err, sc + mx.zeros_like(err)
+            else:
+                take = err < best_e
+                best_s = mx.where(take, sc, best_s)
+                best_e = mx.where(take, err, best_e)
+        out[i:i + CHUNK] = np.array(best_s)[..., 0]
+    return out
 
 
 def _snap_mx(x, book: str):
@@ -155,6 +189,13 @@ def quantize_rtn(W: np.ndarray, h: np.ndarray | None, book: str, alphas=(0.0,), 
     """Round to nearest with searched row and column scales -> (codes[N][K] uint8, s[N], c[K])."""
     h, c = search_scales(W, h, book, alphas, betas)
     s, _, codes = row_scales(W, c, h * c * c, book, codes=True)
+    if book == "mxfp4":
+        s = group_scales(W, c, h * c * c, s, book)
+        codes = np.empty(W.shape, dtype=np.uint8)
+        for i in range(0, W.shape[0], CHUNK):
+            w = mx.array(W[i:i + CHUNK]) / mx.array(c)
+            sc = mx.array(np.repeat(s[i:i + CHUNK], GROUP, axis=1))
+            codes[i:i + CHUNK] = encode(np.array(_snap_mx(w / sc, book)), book)
     return codes, s, c
 
 
@@ -183,7 +224,7 @@ def _block_step(book: str):
 
     W1 [N, B] are the block's columns (already corrected by earlier blocks), U
     the matching [B, B] upper-triangular piece of the factor, sr [N, 1] the row
-    scales. Column j is rounded, and its error is pushed onto the columns to
+    scales (or [N, B], a scale per column). Column j is rounded, and its error is pushed onto the columns to
     its right (row j of U is zero to the left of the diagonal). Returns the
     chosen codebook values and the scaled errors, both [N, B].
     """
@@ -192,8 +233,9 @@ def _block_step(book: str):
             levs, errs = [], []
             for j in range(W1.shape[1]):
                 w = W1[:, j:j + 1]
-                lev = _snap_mx(w / sr, book)
-                e = (w - lev * sr) / U[j, j]
+                sj = sr if sr.shape[1] == 1 else sr[:, j:j + 1]
+                lev = _snap_mx(w / sj, book)
+                e = (w - lev * sj) / U[j, j]
                 W1 = W1 - e * U[j:j + 1, :]
                 levs.append(lev)
                 errs.append(e)
@@ -209,7 +251,8 @@ def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=
     using the inverse Hessian of the layer's input (H = E[x x^T]).
 
     Scales come from the round-to-nearest search and stay fixed; only the
-    choice of level per weight changes. With `act_order` the columns are
+    choice of level per weight changes. For mxfp4 the group scales are chosen
+    up front from the unrounded weights, so they too stay fixed. With `act_order` the columns are
     rounded in order of decreasing input energy, so the inputs that matter
     most are rounded while the most columns are left to absorb their error.
     In a format with per-group scales that order costs a lookup table at run
@@ -219,6 +262,9 @@ def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=
     N, K = W.shape
     h, c = search_scales(W, np.diag(H).astype(np.float32).copy(), book, alphas, betas)
     s, _ = row_scales(W, c, h * c * c, book)
+    grouped = book == "mxfp4"
+    if grouped:
+        s = group_scales(W, c, h * c * c, s, book)
 
     # Work on W / c, whose input is c * x: Hc = diag(c) H diag(c).
     Hc = (H.astype(np.float32) * c[None, :]) * c[:, None]
@@ -236,9 +282,14 @@ def quantize_gptq(W: np.ndarray, H: np.ndarray, book: str, alphas=(0.0,), betas=
     for r0 in range(0, N, chunk):
         rows = W[r0:r0 + chunk]
         rest = mx.array(rows[:, perm] if act_order else rows) / cm * live     # columns not yet rounded
-        sr = mx.array(s[r0:r0 + chunk, None])
+        if grouped:   # the scale of every column, in the order the columns are rounded
+            sr_all = mx.array(s[r0:r0 + chunk][:, perm // GROUP])
+        else:
+            sr = mx.array(s[r0:r0 + chunk, None])
         for i1 in range(0, K, block):
             i2 = min(i1 + block, K)
+            if grouped:
+                sr = sr_all[:, i1:i2]
             lev, err = step(rest[:, :i2 - i1], U[i1:i2, i1:i2], sr)
             if i2 < K:
                 rest = rest[:, i2 - i1:] - err @ U[i1:i2, i2:]

@@ -421,6 +421,19 @@ def log_softmax(z):
     return z - mx.logsumexp(z, axis=-1, keepdims=True)
 
 
+def tensor_end(t: dict) -> int:
+    """Where a tensor of the layout ends in the file: after its last part (column
+    scales of a 4-bit matrix, the half-precision blocks of a dense one, the floats
+    of a vector)."""
+    if t["kind"] in ("q4n", "q4n_rows"):
+        return t["c"] + 4 * t["k"]
+    if t["kind"] == "f16b":
+        return t["w"] + 2 * t["n_pad"] * t["k"]
+    if t["kind"] == "f32":
+        return t["offset"] + 4 * int(np.prod(t["shape"]))
+    raise ValueError(f"no end for a tensor of kind {t['kind']}")
+
+
 def drift(hq, hr) -> float:
     """How far the quantized model's hidden states have moved from the float model's on the
     held-out sequences, relative to their size. Printed per layer: it shows where quality is lost."""
@@ -590,8 +603,7 @@ def main():
             # Is this layer in the file? Lay it out and see whether its data ends within it.
             mark = (plan.pos, dict(plan.tensors), list(plan.sections))
             emit_layer(plan, i, layer, weights, stacks, None, book)
-            ends = [t["c"] + 4 * t["k"] if "c" in t else t["w"] + 2 * t["n_pad"] * t["k"]
-                    for name, t in plan.tensors.items() if name.startswith(f"layers.{i}.")]
+            ends = [tensor_end(t) for name, t in plan.tensors.items() if name.startswith(f"layers.{i}.")]
             if max(ends) <= have:
                 worst = 0.0
                 for name, parts in stacks:

@@ -94,10 +94,14 @@ def pull(model: str, dest: str | None = None, source: str | None = None) -> str:
     total, got = manifest["size"], sum(p["size"] for i, p in enumerate(manifest["parts"]) if i in done)
     print(f"{manifest['name']}: {total / 1e9:.2f} GB in {len(manifest['parts'])} parts"
           + (f", {got / 1e9:.2f} GB already here" if got else ""))
-    ram = _memory_bytes()
-    if ram and total > 0.7 * ram:
+    ram, moe = _memory_bytes(), manifest.get("moe")
+    resident = total - (moe or {}).get("experts_bytes", 0)    # what has to be in memory
+    if ram and resident > 0.7 * ram:
         print(f"  note: this Mac has {ram / 2**30:.0f} GB of memory; a {total / 1e9:.1f} GB model leaves too little "
               "for the system and the context, so it will page from disk and run far below its speed")
+    elif ram and moe and total > 0.7 * ram:
+        print(f"  note: this Mac has {ram / 2**30:.0f} GB of memory: the experts that do not fit stay in the file "
+              "and are read from the SSD when a layer needs them, which is slower than holding them all")
     t0, fresh = time.time(), 0
     with open(partial, "r+b" if os.path.isfile(partial) else "w+b") as f:
         offset = 0

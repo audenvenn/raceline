@@ -51,6 +51,13 @@ def cut(model, outdir, name=None, part_size=PART):
     manifest = dict(name=name, size=size, sha256=whole.hexdigest(), parts=parts,
                     source=hdr.get("source"), arch=hdr.get("arch"), quant=hdr.get("quant"),
                     quality=hdr.get("quality"), mtp=hdr.get("mtp"), license="Apache-2.0")
+    # A mixture of experts: how much of the file the experts are, which the
+    # engine can leave on disk (`raceline pull` says so instead of warning about memory).
+    experts = sum(s["nbytes"] for s in hdr.get("sections", []) if s["name"].startswith("experts."))
+    if experts:
+        cfg = hdr.get("config", {})
+        manifest["moe"] = dict(experts=cfg.get("num_experts"), per_token=cfg.get("num_experts_per_tok"),
+                               experts_bytes=experts)
     with open(os.path.join(outdir, name + ".json"), "w") as out:
         json.dump(manifest, out, indent=1)
     return manifest
@@ -67,7 +74,7 @@ tags:
 - metal
 - speculative-decoding
 - mtp
-- fp4
+- fp4{moe_tag}
 ---
 
 # {title} for raceline
@@ -81,7 +88,7 @@ column ({bits} bits per weight), quantized with GPTQ after a {rotation}; the mod
 multi-token-prediction head, which raceline uses for exact speculative decoding; and the tokenizer
 and chat template. It is split into parts of under 2 GB described by `{name}.json`. It needs
 raceline {needs} or later and is not usable with other runtimes.
-
+{moe_text}
 ## Use
 
 ```sh
@@ -112,7 +119,15 @@ def write_card(outdir, manifest, base, alias, needs="0.2.0"):
     q, m, quant = manifest["quality"], manifest.get("mtp") or {}, manifest["quant"]
     rot = (quant.get("rotation") or {}).get("kind")
     title = base.split("/")[-1]
+    moe = manifest.get("moe")
+    moe_text = "" if not moe else (
+        f"\nA mixture of experts: each layer routes a token to {moe['per_token']} of its {moe['experts']} experts "
+        f"plus a shared one, so a token reads a small part of the weights. The experts are "
+        f"{moe['experts_bytes'] / 1e9:.1f} GB of the file. On a Mac whose GPU may not hold the whole model, raceline "
+        "leaves them in the file and keeps the ones in use in memory, reading the others from the SSD when a layer "
+        "needs them (`--expert-cache GB` sets how much memory that cache takes).\n")
     text = CARD.format(base=base, title=title, alias=alias, name=manifest["name"], bits=f"{quant['bits']:.1f}",
+                       moe_tag="\n- moe" if moe else "", moe_text=moe_text,
                        rotation=("Hadamard rotation of the residual stream that is folded into the weights"
                                  if rot else "search of the row and column scales"),
                        positions=q["positions"], kl=q["kl"], ppl=q["ppl"], top1=100 * q["top1"],

@@ -161,6 +161,8 @@ class Runtime:
                 raise ValueError(f"the conversation is {len(prompt)} tokens; the context window holds {limit}")
             max_tokens = min(max_tokens, limit - len(prompt) - 2)
         counters = dict(getattr(self.backend, "counters", {}))
+        experts = getattr(self.backend, "expert_cache", lambda: None)
+        experts0 = experts()
         t0 = time.perf_counter()
         usage = self.session.sync(prompt, points, pin, progress)
         t_prefill = time.perf_counter() - t0
@@ -235,7 +237,12 @@ class Runtime:
         t_decode = time.perf_counter() - t1
         fed = usage["prompt_tokens"] - usage["cached_tokens"]
         drafts = {k: v - counters[k] for k, v in getattr(self.backend, "counters", {}).items() if k != "passes"}
+        experts1 = experts()
+        if experts0 and experts1:            # experts on disk: how often the cache had what a layer needed
+            hits, reads = experts1[1] - experts0[1], experts1[2] - experts0[2]
+            experts1 = dict(experts_from_cache=hits / max(1, hits + reads), experts_read=reads)
         yield ("done", dict(
+            **(experts1 if isinstance(experts1, dict) else {}),
             **({"drafts": drafts["drafts"], "drafts_accepted": drafts["accepted"]} if drafts.get("drafts") else {}),
             **({"copied_drafts": drafts["lookup_drafts"], "copied_drafts_accepted": drafts["lookup_accepted"]}
                if drafts.get("lookup_drafts") else {}),

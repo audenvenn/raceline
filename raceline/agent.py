@@ -377,6 +377,8 @@ class Agent:
                 f"({last['cached_tokens']} reused) · {totals['completion_tokens']} out at "
                 f"{last['decode_tokens_per_second']:.1f} tok/s"
                 + (f", {100 * last['drafts_accepted'] / last['drafts']:.0f}% of drafts accepted" if last.get("drafts") else "")
+                + (f", {100 * last['experts_from_cache']:.0f}% of experts from the cache" if "experts_from_cache" in last
+                   else "")
                 + f" · {totals['seconds']:.1f}s]")
 
 

@@ -266,6 +266,7 @@ later. It has been run on one machine, the M6 Mac mini above.
 python3 -m venv ~/.raceline && source ~/.raceline/bin/activate
 pip install git+https://github.com/audenvenn/raceline    # compiles the engine, half a minute
 
+raceline pull                 # the models, and how each fits this Mac
 raceline pull  qwen3.5-4b     # 2.5 GB, converted and ready to run
 raceline chat  qwen3.5-4b     # terminal agent in the current directory
 raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080

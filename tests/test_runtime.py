@@ -287,6 +287,25 @@ def test_layout_replay_matches_the_writer():
     w.finish({})
 
 
+def test_pull_lists_models_with_how_they_fit():
+    import contextlib
+    import io
+    import raceline.pull as pull
+
+    assert set(pull.CATALOG) == set(pull.MODELS)
+    saved = pull._memory_bytes
+    pull._memory_bytes = lambda: 16 << 30
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            pull.list_models()
+    finally:
+        pull._memory_bytes = saved
+    lines = {line.split()[0]: line for line in out.getvalue().splitlines() if line.startswith("  ")}
+    assert "too large" in lines["qwen3.8-27b"] and "[" not in lines["qwen3.5-9b"]
+    assert "experts partly on the SSD" in lines["qwen3.5-35b-a3b"]   # 2 GB must be resident, 18 GB in all
+
+
 def test_pull_assembles_parts_and_resumes():
     """A model cut into release parts comes back identical, also when the download was interrupted."""
     import json

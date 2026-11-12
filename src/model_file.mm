@@ -26,6 +26,7 @@ static int geti_or(NSDictionary *d, NSString *key, int fallback) {
 }
 
 ModelFile::ModelFile(Metal &mt, const std::string &path, bool map_experts) {
+  path_ = path;
   int fd = open(path.c_str(), O_RDONLY);
   if (fd < 0) fatal("cannot open %s", path.c_str());
   struct stat st;

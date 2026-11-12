@@ -12,6 +12,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <dispatch/dispatch.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <mutex>
 #include <pthread.h>
 #include <sys/qos.h>
@@ -78,8 +81,8 @@ struct Engine::ExpertCache {
   int layers = 0, E = 0, S = 0, slots = 0;
   size_t w_bytes[2] = {0, 0};
   int s_floats[2] = {0, 0};
-  std::vector<const uint8_t *> src_w[2];
-  std::vector<const float *> src_s[2];
+  std::vector<size_t> src_w[2], src_s[2];   // file offsets of each layer's stacks: codes, row scales
+  int fd = -1;
   id<MTLBuffer> w[2], s[2], table, sel;   // sel: the routing kernel's expert per assignment
   id<MTLBuffer> cols;                      // [layer][I] the down stacks' column scales (for SwiGLU)
   std::vector<std::pair<int, int>> owner;  // slot -> (layer, expert)
@@ -97,11 +100,21 @@ struct Engine::ExpertCache {
 
   int32_t *tab(int layer) const { return (int32_t *)table.contents + (size_t)layer * (E + 1); }
 
+  // One expert into one slot. pread() reads each part in one request (a copy
+  // out of the mapping would fault it in 16 KB at a time).
   void load(int layer, int e, int slot) {
     for (int k = 0; k < 2; k++) {
-      memcpy((char *)w[k].contents + slot * w_bytes[k], src_w[k][layer] + e * w_bytes[k], w_bytes[k]);
-      memcpy((float *)s[k].contents + (size_t)slot * s_floats[k], src_s[k][layer] + (size_t)e * s_floats[k],
-             s_floats[k] * sizeof(float));
+      read_all((char *)w[k].contents + slot * w_bytes[k], w_bytes[k], src_w[k][layer] + e * w_bytes[k]);
+      read_all((float *)s[k].contents + (size_t)slot * s_floats[k], s_floats[k] * sizeof(float),
+               src_s[k][layer] + (size_t)e * s_floats[k] * sizeof(float));
+    }
+  }
+
+  void read_all(void *dst, size_t n, size_t off) {
+    for (size_t got = 0; got < n;) {
+      const ssize_t r = pread(fd, (char *)dst + got, n - got, (off_t)(off + got));
+      if (r <= 0) fatal("reading experts from the model file failed");
+      got += (size_t)r;
     }
   }
 
@@ -123,14 +136,21 @@ struct Engine::ExpertCache {
     const uint64_t now = ++clock;
     for (int e = 0; e < E; e++)              // stamp first, so nothing needed now is evicted
       if (need[e] && t[e] >= 0) used[t[e]] = now, hits++;
+    // Slots for the missing experts first, then all of them read at once: the
+    // SSD serves parallel requests far faster than one after another.
+    std::vector<std::pair<int, int>> todo;   // (expert, slot)
     for (int e = 0; e < E; e++) {
       if (!need[e] || t[e] >= 0) continue;
       const int slot = take_slot();
-      load(r.layer, e, slot);
       owner[slot] = {r.layer, e};
       used[slot] = now;
-      t[e] = slot;
-      loads++;
+      todo.push_back({e, slot});
+    }
+    if (!todo.empty()) {
+      dispatch_apply(todo.size(), dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0),
+                     ^(size_t j) { load(r.layer, todo[j].first, todo[j].second); });
+      for (auto [e, slot] : todo) t[e] = slot;
+      loads += todo.size();
     }
   }
 
@@ -163,6 +183,7 @@ struct Engine::ExpertCache {
   }
 
   ~ExpertCache() {
+    if (fd >= 0) close(fd);
     {
       std::lock_guard<std::mutex> lock(mu);
       stop = true;
@@ -259,14 +280,16 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       x.layers = c.layers;
       x.E = c.experts;
       x.S = (int)S;
+      x.fd = open(model_->path().c_str(), O_RDONLY);
+      if (x.fd < 0) fatal("cannot open %s", model_->path().c_str());
       for (int kind = 0; kind < 2; kind++) {
         for (int i = 0; i < c.layers; i++) {
           const QTensor &t = model_->q(lname(i, kind ? "moe.down" : "moe.gate_up"));
           const int ne = kind ? c.hidden : 2 * c.moe_inter;
           x.w_bytes[kind] = (size_t)ne * t.k / 2;
           x.s_floats[kind] = ne;
-          x.src_w[kind].push_back(t.host + t.w);
-          x.src_s[kind].push_back((const float *)(t.host + t.s));
+          x.src_w[kind].push_back(model_->file_offset(t.host + t.w));
+          x.src_s[kind].push_back(model_->file_offset(t.host + t.s));
         }
       }
       const size_t per_slot = x.w_bytes[0] + x.w_bytes[1] + (x.s_floats[0] + x.s_floats[1]) * sizeof(float);

@@ -78,10 +78,14 @@ class ModelFile {
   const FTensor &f(const std::string &name) const;
   bool has(const std::string &name) const { return q_.count(name) || f_.count(name); }
   size_t file_bytes() const { return size_; }
+  // Where a pointer into the mapped file lies in the file, for reading it with pread().
+  size_t file_offset(const void *p) const { return (const uint8_t *)p - (const uint8_t *)map_; }
+  const std::string &path() const { return path_; }
 
  private:
   Config cfg_;
   void *map_ = nullptr;
+  std::string path_;
   size_t size_ = 0;
   struct Section {
     std::string name;

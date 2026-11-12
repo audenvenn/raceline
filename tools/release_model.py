@@ -125,7 +125,8 @@ def write_card(outdir, manifest, base, alias, needs="0.2.0"):
         f"plus a shared one, so a token reads a small part of the weights. The experts are "
         f"{moe['experts_bytes'] / 1e9:.1f} GB of the file. On a Mac whose GPU may not hold the whole model, raceline "
         "leaves them in the file and keeps the ones in use in memory, reading the others from the SSD when a layer "
-        "needs them (`--expert-cache GB` sets how much memory that cache takes).\n")
+        "needs them (`--expert-cache GB` sets how much memory that cache takes). The experts' down "
+        "projections are rounded to nearest; the other matrices are quantized with GPTQ.\n")
     text = CARD.format(base=base, title=title, alias=alias, name=manifest["name"], bits=f"{quant['bits']:.1f}",
                        moe_tag="\n- moe" if moe else "", moe_text=moe_text,
                        rotation=("Hadamard rotation of the residual stream that is folded into the weights"

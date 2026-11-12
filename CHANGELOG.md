@@ -8,7 +8,12 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
 ### Added
+
+- Qwen3.5-35B-A3B: `raceline pull qwen3.5-35b-a3b` (18.3 GB, from the
+  `models-v2` release or Hugging Face).
 
 - Mixture-of-experts models (Qwen3.5-35B-A3B and the like, #5). The
   converter stacks each layer's experts into two 4-bit tensors in a file
@@ -44,6 +49,10 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 - `raceline probe` measures SSD reads of an expert's size; `raceline chat`
   and `serve` say when a model's experts stay on disk and how much of them
   is kept in memory.
+
+- The converter (`tools/quantize.py`, `tools/add_mtp.py`) holds several GB
+  less per layer, and bounds MLX's pool of freed buffers; converting a MoE
+  model still needs most of a 24 GB Mac (#31).
 
 - Draft counts follow what a row of the verifying pass costs, measured
   (a least-squares line through rows and GPU time of recent passes): free
@@ -194,7 +203,8 @@ First public release.
 - Project infrastructure: CI, contribution guide, security policy, issue and
   pull-request templates.
 
-[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/audenvenn/raceline/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/audenvenn/raceline/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/audenvenn/raceline/releases/tag/v0.2.0
 [0.1.0]: https://github.com/audenvenn/raceline/releases/tag/v0.1.0

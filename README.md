@@ -271,8 +271,9 @@ raceline chat  qwen3.5-4b     # terminal agent in the current directory
 raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
 raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
 
-raceline pull  qwen3.5-9b     # 4.7 GB; fits a 16 GB Mac, and the best agent per second
-raceline pull  qwen3.8-27b    # 13.8 GB: the best; wants a Mac with 24 GB or more
+raceline pull  qwen3.5-9b         # 4.7 GB; fits a 16 GB Mac, and the best agent per second
+raceline pull  qwen3.8-27b        # 13.8 GB, dense; wants a Mac with 24 GB or more
+raceline pull  qwen3.5-35b-a3b    # 18.3 GB, a mixture of experts: its experts can stay on the SSD
 ```
 
 Without the Xcode command line tools, install the wheel attached to the

@@ -330,7 +330,9 @@ curl -s localhost:8080/v1/chat/completions -H 'Content-Type: application/json' -
 It also speaks Anthropic's Messages API (`POST /v1/messages`, streaming,
 tools, thinking blocks), so clients written for that API can use the local
 model, for example the anthropic SDK with `base_url="http://localhost:8080"`.
-Images are left out with a note (no vision input yet, #28).
+Images are left out with a note (no vision input yet, #28). The context
+window is 32768 tokens unless `--ctx` sets another (agents with long system
+prompts and tool lists need more; the models take up to 262144).
 
 Responses carry `usage.prompt_tokens_details.cached_tokens` and a `timings`
 object, so a client can see what a request cost. Requests are served one at

@@ -28,6 +28,11 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   model (checked with the anthropic SDK, whose parser reads every event).
   Images are left out with a note, as the model runs without vision input.
 
+- `raceline chat` and `serve` take `--ctx TOKENS`, the engine's context
+  window (32768 by default; agents with long system prompts and tool lists
+  need more). The attention cache costs 22 KB per token for the 35B-A3B
+  models and 68 KB for Qwen3.8-27B.
+
 - `raceline pull` without a model lists the models it can fetch, their
   sizes, and how each fits this Mac's memory.
 

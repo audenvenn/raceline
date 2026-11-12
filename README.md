@@ -362,6 +362,12 @@ Environment variables, all optional:
 | Passes with wrong, partly right and right drafts (chained by the head, or copied), abandoned drafts, state save and load, against a clean run (`tests/verify_spec.py`) | bit-identical logits and drafts, on both models |
 | Greedy and sampled text with and without drafts, through the runtime; whole agent sessions with and without copied drafts (`bench/agent_eval.py`) | identical |
 | Linear kernels against a double-precision CPU reference (`build/cmake/test_linear`) | pass |
+| Mixture of experts, on a tiny random MoE model (`tests/check_moe.py`):
+- conversion;
+- the engine against MLX on the decoded weights;
+- chunks of 96, 17 and 1 tokens with the experts in memory, on disk with the smallest cache, and on disk 70% cached;
+- speculative passes. | same top token; every run bit-identical |
+| Qwen3.5-35B-A3B's first 4 layers against MLX on the decoded weights (`tests/verify_moe.py`), experts in memory and on disk | logits within 1.5e-3 relative, same top token; bit-identical with the experts on disk |
 | Session reuse and snapshots, tool-call parsing, the sampler, copied drafts, resuming a conversion, model downloads (`tests/test_runtime.py`); the server (`tests/test_server.py`); the agent tasks' checks (`tests/test_agent_tasks.py`). No GPU needed, run by CI | pass |
 
 The comparisons with MLX in the first three rows are on Qwen3.5-4B: the float
@@ -387,6 +393,11 @@ positions (`tools/quantize.py` reports this for every conversion):
 | MLX affine 4-bit, groups of 64 | 4.5 | 0.105 | 1.861 | 92.2% |
 | **FP4, GPTQ, rotated (the published file)** | 4.0 | 0.148 | 1.979 | 90.6% |
 | FP4, GPTQ, not rotated (raceline 0.1.0) | 4.0 | 0.152 | 1.999 | 91.5% |
+
+| Qwen3.5-35B-A3B | Bits per weight | KL (nats) | Perplexity | Top-1 agreement |
+|---|---|---|---|---|
+| MLX affine 4-bit, groups of 64 | 4.5 | not measured: mlx-lm swaps on this Mac | | |
+| **FP4, GPTQ (down projections of the experts rounded to nearest), rotated (the published file)** | 4.0 | 0.060 | 2.209 | 92.1% |
 
 For the 4B model the rotation brings the 4-bit format level with MLX's at 0.5
 bits per weight less, and for the 9B ahead of it. For the 27B it does not: the published file is still

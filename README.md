@@ -113,10 +113,7 @@ written after the model was:
 | | | **raceline** | 230 tok/s | **29.4 tok/s** | |
 
 Chat answers, thinking off, three requests of up to 300 tokens
-(`bench/chat_bench.py`; `bench/race_demo.py` replays one of them side by
-side):
-
-![The same request answered by mlx-lm and by raceline, replayed at the measured speed](docs/race.gif)
+(`bench/chat_bench.py`):
 
 | Sampling | mlx-lm | raceline | raceline, drafts off |
 |---|---|---|---|

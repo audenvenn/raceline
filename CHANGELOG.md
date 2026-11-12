@@ -19,7 +19,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 - `bench/race_demo.py record-agent` records the terminal agent on one of the
   agent tasks, and `render --speed` replays faster than measured. The README
   now opens with the 27B agent fixing the same bug on mlx-lm and on raceline
-  (102.7 s against 30.1 s, replayed at three times the speed).
+  (102.7 s against 30.1 s, replayed at three times the speed); it is the
+  only image, as the older chat replay looked like a second copy of it.
 
 ## [0.3.0] - 2026-11-12
 

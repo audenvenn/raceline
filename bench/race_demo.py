@@ -8,11 +8,12 @@ to each other, so what the numbers in the README mean can be seen.
 
   bench/race_demo.py record models/Qwen3.8-27B-4bit race_mlx.json
   bench/race_demo.py record models/qwen3.8-27b.rlm race_raceline.json
-  bench/race_demo.py render race_mlx.json race_raceline.json docs/race.gif --title "Qwen3.8-27B on a 24 GB M6 Mac mini"
+  bench/race_demo.py render race_mlx.json race_raceline.json race.gif --title "Qwen3.8-27B on a 24 GB M6 Mac mini"
 
 `record-agent` records the terminal agent doing one of the tasks of
 bench/agent_tasks.py instead (everything it prints, tools included), and
-`render --speed 4` replays at four times the measured speed.
+`render --speed 3` replays at three times the measured speed: that is how
+docs/agent_race.gif, the README's first image, was made.
 
 Measure with nothing else using the GPU.
 """

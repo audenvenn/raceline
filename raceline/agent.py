@@ -316,8 +316,10 @@ class Agent:
             content, reasoning, calls, stats, shown = "", "", [], None, None
             t0 = time.perf_counter()
             try:
+                # The history keeps each reply's reasoning, so it can stay in the prompt: a new
+                # request then reuses the whole conversation (Qwen recommends it for agents).
                 for kind, value in self.rt.chat(self.messages, TOOLS, max_tokens=self.max_tokens,
-                                                thinking=self.thinking, effort=self.effort):
+                                                thinking=self.thinking, effort=self.effort, keep_reasoning=True):
                     if kind == "reasoning":
                         reasoning += value
                         if shown != kind:

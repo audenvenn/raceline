@@ -39,6 +39,17 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 - `raceline pull` without a model lists the models it can fetch, their
   sizes, and how each fits this Mac's memory.
 
+### Changed
+
+- The terminal agent keeps the reasoning of earlier replies in the prompt
+  where the chat template has the option (`preserve_thinking`: Qwen3.6, and
+  Qwen3.8, whose template keeps it by default), as Qwen recommends for
+  agents. With Qwen3.6's default, a new request re-renders the previous turn
+  without its reasoning, so everything from that turn's first reply on (tool
+  outputs included) was processed again; now the whole conversation is
+  reused. The Qwen3.5 templates have no such option. `raceline serve` takes
+  `preserve_thinking` from the request (or its `chat_template_kwargs`).
+
 ### Fixed
 
 - A conversation that does not fit the context window gets, from the OpenAI

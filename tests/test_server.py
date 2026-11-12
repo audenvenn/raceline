@@ -37,8 +37,9 @@ class ScriptedRuntime:
         return [0] * (7 * len(messages)), [], None
 
     def chat(self, messages, tools=None, sampling=None, max_tokens=2048, thinking=True, stop=None, progress=None,
-             effort=None):
-        self.calls.append(dict(messages=messages, tools=tools, sampling=sampling, thinking=thinking, effort=effort))
+             effort=None, keep_reasoning=None):
+        self.calls.append(dict(messages=messages, tools=tools, sampling=sampling, thinking=thinking, effort=effort,
+                               keep_reasoning=keep_reasoning))
         try:
             for ev in self.script:
                 if isinstance(ev, Exception):
@@ -105,6 +106,20 @@ def test_complete_with_reasoning_and_tool_call():
     assert body["choices"][0]["finish_reason"] == "tool_calls"
     assert body["usage"]["prompt_tokens_details"]["cached_tokens"] == 4
     assert rt.calls[0]["sampling"].temperature == 0.2 and rt.calls[0]["effort"] == "xhigh"
+    assert rt.calls[0]["keep_reasoning"] is None    # the chat template's default
+
+
+def test_preserve_thinking_reaches_the_template():
+    rt = ScriptedRuntime()
+    rt.script = [("content", "ok"), ("done", STATS)]
+    server, port = start(rt)
+    try:
+        for body in ({"preserve_thinking": True}, {"chat_template_kwargs": {"preserve_thinking": False}}):
+            code, text = post(port, dict(body, messages=[{"role": "user", "content": "hi"}]))
+            assert code == 200, text
+    finally:
+        server.shutdown()
+    assert [c["keep_reasoning"] for c in rt.calls] == [True, False]
 
 
 def test_stream_is_well_formed_and_reports_usage():

@@ -455,6 +455,34 @@ def test_parked_conversations_stay_within_their_budget():
     assert usage["cached_tokens"] == 40 and out == _fresh([6] * 40 + [5])
 
 
+def test_keep_reasoning_is_passed_to_the_template_as_preserve_thinking():
+    from raceline.chat import Runtime
+
+    class TemplateTokenizer:
+        def __init__(self):
+            self.kwargs = []
+
+        def convert_tokens_to_ids(self, token):
+            return {"<|im_start|>": 1, "<think>": 2, "</think>": 3, "<tool_call>": 4, "</tool_call>": 5}[token]
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.kwargs.append(kwargs)
+            return "rendered"
+
+        def encode(self, text, add_special_tokens=False):
+            return [1, 9, 1, 9]
+
+    backend = FakeBackend()
+    backend.tokenizer = TemplateTokenizer()
+    rt = Runtime(backend)
+    messages = [{"role": "user", "content": "hi"}]
+    rt.render(messages, None, thinking=True)
+    rt.render(messages, None, thinking=True, keep_reasoning=True)
+    rt.render(messages, None, thinking=False, keep_reasoning=False)
+    seen = [k.get("preserve_thinking", "unset") for k in backend.tokenizer.kwargs]
+    assert seen == ["unset", True, False], seen
+
+
 def test_transformers_notice_is_silenced_for_the_import_only():
     from raceline.backends import without_torch_notice
 

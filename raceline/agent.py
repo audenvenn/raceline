@@ -264,10 +264,13 @@ class Tools:
 class Agent:
     def __init__(self, runtime: Runtime, cwd: str, auto_approve: bool = False, thinking: bool = True,
                  max_tokens: int = 4096, max_steps: int = 40, interactive: bool = True, color: bool = True,
-                 effort: str = "low"):
+                 effort: str = "low", keep_reasoning: bool = True):
         self.rt = runtime
         self.cwd = os.path.abspath(cwd)
         self.thinking, self.max_tokens, self.max_steps, self.effort = thinking, max_tokens, max_steps, effort
+        # The history keeps each reply's reasoning, so it can stay in the prompt (`preserve_thinking`, where
+        # the template has it): a new request then reuses the whole conversation. Qwen recommends it for agents.
+        self.keep_reasoning = keep_reasoning
         self.auto_approve, self.interactive = auto_approve, interactive
         self.c = (lambda code, s: f"\033[{code}m{s}\033[0m") if color else (lambda code, s: s)
         self.tools = Tools(self.cwd, self._approve)
@@ -317,7 +320,8 @@ class Agent:
             t0 = time.perf_counter()
             try:
                 for kind, value in self.rt.chat(self.messages, TOOLS, max_tokens=self.max_tokens,
-                                                thinking=self.thinking, effort=self.effort):
+                                                thinking=self.thinking, effort=self.effort,
+                                                keep_reasoning=self.keep_reasoning):
                     if kind == "reasoning":
                         reasoning += value
                         if shown != kind:
@@ -347,6 +351,7 @@ class Agent:
             for k in ("prompt_tokens", "cached_tokens", "completion_tokens", "prefill_seconds", "decode_seconds"):
                 totals[k] += stats[k]
             totals["last"] = stats
+            totals.setdefault("first", stats)    # what the request itself cost to take in
 
             message = {"role": "assistant", "content": content}
             if reasoning:

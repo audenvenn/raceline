@@ -156,12 +156,23 @@ class Runtime:
         self._im_start, self._think, self._think_end = ids["<|im_start|>"], ids["<think>"], ids["</think>"]
         self._call, self._call_end = ids["<tool_call>"], ids["</tool_call>"]
 
-    def render(self, messages: list, tools: Optional[list], thinking: bool, effort: Optional[str] = None):
+    def render(self, messages: list, tools: Optional[list], thinking: bool, effort: Optional[str] = None,
+               keep_reasoning: Optional[bool] = None):
         """-> (prompt tokens, snapshot positions, position to pin). `effort` is the
-        reasoning effort for templates that take one (Qwen3.8: low, medium, xhigh)."""
+        reasoning effort for templates that take one (Qwen3.8: low, medium, xhigh).
+
+        `keep_reasoning` sets `preserve_thinking` for templates that take it
+        (Qwen3.6 and Qwen3.8; None leaves the template's default). With it, the
+        reasoning of earlier turns stays in the prompt as it was written, so
+        after a new user message the whole conversation is reused; without it
+        (Qwen3.6's default, and every Qwen3.5 template) the previous turn is
+        re-rendered without its reasoning and processed again from its first
+        reply on, tool outputs included."""
         tok = self.backend.tokenizer
         msgs = normalize_messages(messages)
         extra = {"reasoning_effort": effort} if effort and thinking else {}
+        if keep_reasoning is not None:
+            extra["preserve_thinking"] = keep_reasoning
         text = tok.apply_chat_template(msgs, tools=tools or None, add_generation_prompt=True, tokenize=False,
                                        enable_thinking=thinking, **extra)
         tokens = tok.encode(text, add_special_tokens=False)
@@ -175,16 +186,16 @@ class Runtime:
 
     def chat(self, messages: list, tools: Optional[list] = None, sampling: Optional[Sampling] = None,
              max_tokens: int = 2048, thinking: bool = True, stop: Optional[list] = None,
-             progress=None, effort: Optional[str] = None) -> Iterator[tuple]:
+             progress=None, effort: Optional[str] = None, keep_reasoning: Optional[bool] = None) -> Iterator[tuple]:
         """Yields ("reasoning", text), ("content", text), ("tool_call", {...}) and
         finally ("done", stats)."""
         with self.lock:
             yield from self._chat(messages, tools, sampling or self.defaults, max_tokens, thinking, stop or [],
-                                  progress, effort)
+                                  progress, effort, keep_reasoning)
 
-    def _chat(self, messages, tools, sampling, max_tokens, thinking, stop, progress, effort):
+    def _chat(self, messages, tools, sampling, max_tokens, thinking, stop, progress, effort, keep_reasoning):
         tok = self.backend.tokenizer
-        prompt, points, pin = self.render(messages, tools, thinking, effort)
+        prompt, points, pin = self.render(messages, tools, thinking, effort, keep_reasoning)
         limit = self.backend.max_context
         if limit is not None:
             if len(prompt) + 8 > limit:

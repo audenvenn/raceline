@@ -16,6 +16,11 @@ directly.
   RACELINE_LOOKUP=0 bench/agent_eval.py models/qwen3.8-27b.rlm --json out.json
   bench/agent_eval.py models/qwen3.5-4b.rlm --tasks rename,pathlib --transcripts out/
 
+--followup sends a second request after each task (once its check has run)
+and reports how much of the conversation that request processed again: the
+cost of a new request in a session. --drop-reasoning leaves earlier replies'
+reasoning out of the prompt (the chat template's default for Qwen3.5 / 3.6).
+
 Measure with nothing else using the GPU.
 """
 
@@ -78,6 +83,10 @@ def main():
     ap.add_argument("--no-think", action="store_true")
     ap.add_argument("--effort", default="low", choices=["low", "medium", "xhigh"])
     ap.add_argument("--max-steps", type=int, default=20)
+    ap.add_argument("--followup", nargs="?", const="In one sentence: what did you change?",
+                    help="a second request after each task (default text: %(const)r)")
+    ap.add_argument("--drop-reasoning", action="store_true",
+                    help="leave earlier replies' reasoning out of the prompt (no preserve_thinking)")
     ap.add_argument("--transcripts", help="directory to write each task's transcript to")
     ap.add_argument("--json", help="also write the results to this file")
     args = ap.parse_args()
@@ -118,7 +127,8 @@ def main():
             os.utime(os.path.join(work, path), (FIXED_TIME, FIXED_TIME))
         os.utime(work, (FIXED_TIME, FIXED_TIME))     # so `ls -l` prints the same in every run
         agent = Agent(rt, work, auto_approve=True, thinking=not args.no_think, max_tokens=4096,
-                      max_steps=args.max_steps, interactive=False, color=False, effort=args.effort)
+                      max_steps=args.max_steps, interactive=False, color=False, effort=args.effort,
+                      keep_reasoning=not args.drop_reasoning)
         before = dict(getattr(backend, "counters", {}))
         experts = getattr(backend, "expert_cache", lambda: None)   # a MoE model with its experts on disk
         e0 = experts()
@@ -137,6 +147,16 @@ def main():
         if e0 and e1:
             hits, reads = e1[1] - e0[1], e1[2] - e0[2]
             res.update(experts_from_cache=hits / max(1, hits + reads), experts_read=reads)
+        if args.followup:
+            log.write(f"\n> {args.followup}\n")
+            t1 = time.perf_counter()
+            with contextlib.redirect_stdout(log):
+                more = agent.turn(args.followup)
+            first = more.get("first") or {}
+            res.update(followup_seconds=time.perf_counter() - t1, followup_steps=more["steps"],
+                       followup_prompt_tokens=first.get("prompt_tokens", 0),
+                       followup_processed=first.get("prompt_tokens", 0) - first.get("cached_tokens", 0),
+                       followup_prefill_seconds=first.get("prefill_seconds", 0.0))
         results.append(res)
         if args.transcripts:
             with open(os.path.join(args.transcripts, f"{name}.txt"), "w", encoding="utf-8") as f:
@@ -145,6 +165,9 @@ def main():
         ok = f"{100 * c['accepted'] / c['drafts']:.0f}%" if c.get("drafts") else "-"
         copied = f"{100 * c['lookup_accepted'] / res['completion_tokens']:.0f}%" if c.get("lookup_drafts") else "-"
         cached = f"  {100 * res['experts_from_cache']:.0f}% experts cached" if "experts_from_cache" in res else ""
+        if args.followup:
+            cached += (f"  follow-up: {res['followup_processed']} of {res['followup_prompt_tokens']} prompt tokens "
+                       f"processed in {res['followup_prefill_seconds']:.2f}s")
         print(f"{name:16s} {'solved' if solved else 'FAILED':8s} {res['steps']:5d} {seconds:6.1f}s "
               f"{res['completion_tokens']:7d} {tps:6.1f} tok/s {ok:>9s} {copied:>7s}{cached}  {why}", flush=True)
 
@@ -154,10 +177,15 @@ def main():
     total = sum(r["seconds"] for r in results)
     print(f"\n{n_ok}/{len(results)} solved; {total:.0f}s in all; {out} tokens written at {out / dec:.1f} tok/s"
           if dec else f"\n{n_ok}/{len(results)} solved")
+    if args.followup:
+        processed = sum(r["followup_processed"] for r in results)
+        prompt = sum(r["followup_prompt_tokens"] for r in results)
+        print(f"follow-up requests: {processed} of {prompt} prompt tokens processed again "
+              f"({sum(r['followup_prefill_seconds'] for r in results):.1f}s of prompt processing)")
     if args.json:
         with open(args.json, "w") as f:
             json.dump(dict(model=args.model, backend=backend.name, sampling=dataclasses.asdict(sampling),
-                           thinking=not args.no_think,
+                           thinking=not args.no_think, keep_reasoning=not args.drop_reasoning, followup=args.followup,
                            effort=args.effort, lookup=getattr(backend, "lookup_drafts", None), tasks=results), f, indent=1)
 
 

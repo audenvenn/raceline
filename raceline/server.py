@@ -11,8 +11,12 @@ runtime's lock makes one that arrives meanwhile wait its turn): the model has
 one context, and reusing it across turns is the point.
 
 Extensions to the OpenAI schema, all optional: `top_k`, `repetition_penalty`,
-`enable_thinking` (also read from `chat_template_kwargs`), and in responses
+`enable_thinking` and `preserve_thinking` (also read from
+`chat_template_kwargs`), and in responses
 `usage.prompt_tokens_details.cached_tokens` plus a `timings` object.
+`preserve_thinking: true` keeps earlier replies' reasoning (sent back as
+`reasoning_content`) in the prompt where the chat template supports it
+(Qwen3.6, Qwen3.8), so a new user message reuses the whole conversation.
 `reasoning_effort` low / medium / high selects the model's reasoning effort
 where its chat template has one (Qwen3.8); none / minimal turns thinking off.
 """
@@ -44,6 +48,14 @@ def _thinking(body: dict) -> bool:
         if "enable_thinking" in src:
             return bool(src["enable_thinking"])
     return body.get("reasoning_effort") not in ("none", "minimal")
+
+
+def _keep_reasoning(body: dict):
+    """The client's `preserve_thinking`, if it sent one; None leaves the chat template's default."""
+    for src in (body, body.get("chat_template_kwargs") or {}):
+        if src.get("preserve_thinking") is not None:
+            return bool(src["preserve_thinking"])
+    return None
 
 
 def _effort(body: dict):
@@ -110,7 +122,7 @@ def make_handler(runtime: Runtime, model_id: str):
             max_tokens = body.get("max_completion_tokens") or body.get("max_tokens") or 4096
             self._started = False
             events = runtime.chat(messages, tools, _sampling(runtime, body), int(max_tokens), _thinking(body), stop,
-                                  effort=_effort(body))
+                                  effort=_effort(body), keep_reasoning=_keep_reasoning(body))
             try:
                 if body.get("stream"):
                     # The first event comes once the prompt has been read: a prompt that does not fit fails

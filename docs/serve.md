@@ -35,9 +35,9 @@ print(reply.choices[0].message.content)
 
 Tool calls, streaming and `stream_options.include_usage` work as in OpenAI's
 API. The model's reasoning arrives as `reasoning_content`. Extensions, all
-optional: `top_k`, `repetition_penalty`, `enable_thinking` (also inside
-`chat_template_kwargs`), and `reasoning_effort` for the models whose template
-has one (Qwen3.8).
+optional: `top_k`, `repetition_penalty`, `enable_thinking` and
+`preserve_thinking` (both also inside `chat_template_kwargs`), and
+`reasoning_effort` for the models whose template has one (Qwen3.8).
 
 ## Anthropic's API
 
@@ -89,3 +89,11 @@ nothing of it is processed again. On Qwen3.5-35B-A3B with 8,000 tokens of
 history, the first token after a side request comes in 0.33 s instead of
 6.47 s (`bench/switch_bench.py`). `RACELINE_PARK_GB` sets the memory for
 this (by default a twelfth of the Mac's memory, at most 2 GB).
+
+With Qwen3.6 and Qwen3.8, send earlier replies' reasoning back
+(`reasoning_content`) and set `preserve_thinking: true`: the template then
+renders the history exactly as it was written, and a new request reuses all
+of it. Without it, Qwen3.6's template drops the earlier reasoning, so the
+previous turn is processed again from its first reply on (Qwen3.8's keeps it
+by default; the Qwen3.5 templates have no such option). `raceline chat` sets
+it.

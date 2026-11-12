@@ -10,6 +10,12 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Added
 
+- `bench/agent_eval.py --set extended`: eight harder agent tasks closer to
+  real work (a bug across a small package, a 600-line file, tests that must
+  catch three of four broken versions of the code, a module and a script
+  written from a description, a signature change across files, a command
+  to implement in a CLI). The original eight stay the default (`core`).
+
 - `bench/race_demo.py record-agent` records the terminal agent on one of the
   agent tasks, and `render --speed` replays faster than measured. The README
   now opens with the 27B agent fixing the same bug on mlx-lm and on raceline

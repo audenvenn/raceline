@@ -68,7 +68,8 @@ def check(task, work):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("model")
-    ap.add_argument("--tasks", help="comma-separated names (default: all)")
+    ap.add_argument("--tasks", help="comma-separated names (default: every task of --set)")
+    ap.add_argument("--set", default="core", choices=["core", "extended", "all"])
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--temperature", type=float)
     ap.add_argument("--top-p", type=float)
@@ -87,7 +88,7 @@ def main():
     from raceline.cli import agent_sampling
 
     warn_if_busy()
-    names = args.tasks.split(",") if args.tasks else list(TASKS)
+    names = args.tasks.split(",") if args.tasks else [n for n, t in TASKS.items() if args.set in ("all", t["group"])]
     backend = load_backend(args.model)
     sampling = agent_sampling(args.model, backend, not args.no_think)   # what `raceline chat` uses
     sampling.seed = args.seed
@@ -111,6 +112,7 @@ def main():
         shutil.rmtree(work, ignore_errors=True)
         os.makedirs(work)
         for path, text in task["files"].items():
+            os.makedirs(os.path.dirname(os.path.join(work, path)), exist_ok=True)
             with open(os.path.join(work, path), "w", encoding="utf-8") as f:
                 f.write(text)
             os.utime(os.path.join(work, path), (FIXED_TIME, FIXED_TIME))

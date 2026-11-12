@@ -73,16 +73,115 @@ def total_size(folder):
     return sum(p.stat().st_size for p in Path(folder).iterdir() if p.is_file())
 '''},
     "bisect": {"search.py": lambda s: s.replace("lo, hi = 0, len(items) - 1", "lo, hi = 0, len(items)")},
+    "cart": {"shop/cart.py": lambda s: s.replace(
+        "sum(apply_discount(price * qty, self.discount_percent) for _, price, qty in self.lines)",
+        "sum(price * qty for _, price, qty in self.lines)")},
+    "write-tests": {"test_durations.py": lambda s: '''from durations import parse_duration
+
+
+def test_units():
+    assert parse_duration("2h") == 7200 and parse_duration("3m") == 180 and parse_duration("45s") == 45
+
+
+def test_combined():
+    assert parse_duration("1h30m") == 5400 and parse_duration("2h5s") == 7205 and parse_duration("1h1m1s") == 3661
+
+
+def expect_error(text):
+    try:
+        parse_duration(text)
+    except ValueError:
+        return
+    raise AssertionError(f"no ValueError for {text!r}")
+
+
+def test_invalid():
+    for text in ("", "5x", "1m2h", "1h1h", "h"):
+        expect_error(text)
+
+
+def test_spaces():
+    assert parse_duration(" 10m ") == 600
+
+
+if __name__ == "__main__":
+    test_units()
+    test_combined()
+    test_invalid()
+    test_spaces()
+    print("all tests passed")
+'''},
+    "lru": {"lru.py": lambda s: '''from collections import OrderedDict
+
+
+class LRUCache:
+    def __init__(self, capacity):
+        self.capacity, self.data = capacity, OrderedDict()
+
+    def get(self, key, default=None):
+        if key not in self.data:
+            return default
+        self.data.move_to_end(key)
+        return self.data[key]
+
+    def put(self, key, value):
+        self.data[key] = value
+        self.data.move_to_end(key)
+        if len(self.data) > self.capacity:
+            self.data.popitem(last=False)
+
+    def __len__(self):
+        return len(self.data)
+'''},
+    "csv-report": {"report.py": lambda s: '''import csv
+from collections import defaultdict
+from decimal import Decimal
+
+totals = defaultdict(Decimal)
+with open("sales.csv", newline="") as f:
+    for row in csv.DictReader(f):
+        totals[row["region"]] += Decimal(row["amount"])
+for region, total in sorted(totals.items(), key=lambda kv: (-round(kv[1], 2), kv[0])):
+    print(f"{region}: {total:.2f}")
+'''},
+    "email": {"validator.py": lambda s: s.replace(r"^[a-zA-Z0-9._-]+@[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*$",
+                                                  r"^[a-zA-Z0-9._+-]+@[a-zA-Z0-9]+(-[a-zA-Z0-9]+)*(\.[a-zA-Z0-9-]+)+$")},
+    "long-file": {"stats.py": lambda s: s.replace(
+        "    return s[int(p / 100 * len(s))]",
+        "    import math\n    return s[0] if p == 0 else s[math.ceil(p / 100 * len(s)) - 1]")},
+    "signature": {
+        "notify.py": lambda s: s.replace('''def send(user, text):
+    """The message as it goes out."""
+    return f"To {user}: {text}"''', '''def send(user, text, channel="email"):
+    """The message as it goes out."""
+    if channel == "sms":
+        return ("SMS: " + f"To {user}: {text}")[:160]
+    return f"To {user}: {text}"'''),
+        "billing.py": lambda s: s.replace('''possible to avoid a late fee, or contact us if you believe this is an error.")''',
+                                          '''possible to avoid a late fee, or contact us if you believe this is an error.",
+                channel="sms")''')},
+    "todo-cli": {"todo.py": lambda s: s.replace('''        print("not implemented yet", file=sys.stderr)
+        return 2''', '''        if not 1 <= args.n <= len(items):
+            print(f"no item {args.n}", file=sys.stderr)
+            return 1
+        items[args.n - 1]["done"] = True
+        save(items)''')},
 }
 
 
 def _materialize(task, edits=None):
     work = tempfile.mkdtemp()
-    for name, text in task["files"].items():
+    files = dict(task["files"])
+    for name in edits or {}:
+        files.setdefault(name, None)             # a file the solution creates
+    for name, text in files.items():
         if edits and name in edits:
             new = edits[name](text)
             assert new != text, f"{task['name']}: the reference edit of {name} changed nothing"
             text = new
+        if text is None:
+            continue
+        os.makedirs(os.path.dirname(os.path.join(work, name)), exist_ok=True)
         with open(os.path.join(work, name), "w", encoding="utf-8") as f:
             f.write(text)
     return work

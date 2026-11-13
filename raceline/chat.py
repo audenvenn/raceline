@@ -303,6 +303,13 @@ class Runtime:
         experts0 = experts()
         t0 = time.perf_counter()
         usage = self.session.sync(prompt, points, pin, progress, images=self._image_rows)
+        if self._tower is not None and getattr(self.backend, "expert_cache", lambda: None)():
+            # Experts on disk: the model does not fit in the GPU's memory, and the engine sized its expert
+            # cache when it opened, without the tower. Hand its memory back (reading it in again later
+            # takes 0.1 to 0.3 s, against a second to encode an image).
+            mx = self._tower.mx
+            self._tower = None
+            mx.clear_cache()
         self.prompt_usage = usage     # for a reply that reports it before the first token (Anthropic's stream)
         t_prefill = time.perf_counter() - t0
 

@@ -89,6 +89,9 @@ def _library() -> ctypes.CDLL:
     lib.rl_rope_position.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     lib.rl_set_dump_dir.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     lib.rl_rope_angles.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    lib.rl_set_mark.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.rl_save_mark.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.rl_mark_position.argtypes = [ctypes.c_void_p]
     lib.rl_state_bytes.restype = ctypes.c_size_t
     lib.rl_last_gpu_seconds.restype = ctypes.c_double
     for fn in ("rl_close", "rl_vocab", "rl_position", "rl_reset", "rl_argmax", "rl_state_bytes",
@@ -307,18 +310,40 @@ class RacelineBackend(Backend):
         self.counters["passes"] += 1
         self._logits = np.ctypeslib.as_array(ptr, shape=(self._vocab,))   # a view, valid until the next forward
 
-    def prefill(self, tokens, progress=None, images=()) -> None:
-        for i in range(0, len(tokens), self._chunk):
+    # prefill() takes the positions to snapshot inside its passes (Engine::set_mark), so the session
+    # need not end a pass at each of them: on a mixture of experts with experts on disk a pass costs
+    # a sweep of SSD reads.
+    marks_in_passes = True
+
+    def prefill(self, tokens, progress=None, images=(), marks=()) -> list:
+        """Feeds tokens; -> snapshots at `marks` (offsets into `tokens`, 1 .. len - 1), taken
+        inside the passes where they fall (one per pass: a second one ends the pass)."""
+        marks = sorted(set(m for m in marks if 0 < m < len(tokens)))
+        snaps, i = [], 0
+        while i < len(tokens):
             j = min(i + self._chunk, len(tokens))
+            inside = [m for m in marks if i < m < j]
+            if len(inside) > 1:
+                j = inside[1]                    # at most one mark per pass: the second ends it
             spans = []
             for im in images:
                 a, b = max(im.start, i), min(im.start + len(im.vectors), j)
                 if a < b:
                     spans.append((a - i, b - a, im.offset + a - im.start, im.width,
                                   im.vectors[a - im.start:b - im.start]))
+            if inside:
+                self._lib.rl_set_mark(self._e, inside[0] - i)
             self._forward(tokens[i:j], spans)
+            if inside:
+                state = np.empty(self._lib.rl_state_bytes(self._e), dtype=np.uint8)
+                self._lib.rl_save_mark(self._e, state.ctypes.data)
+                snaps.append(Snapshot(self._lib.rl_mark_position(self._e), state, None, state.nbytes))
+            if j in marks:
+                snaps.append(self.snapshot())    # a mark at the end of a pass: a plain snapshot
+            i = j
             if progress:
                 progress(j, len(tokens))
+        return snaps
 
     def dump_layers(self, directory: Optional[str]) -> None:
         """Debug: every pass from now on writes the residual stream after each layer to

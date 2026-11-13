@@ -428,6 +428,7 @@ Environment variables, all optional:
 | Image processor and vision tower against transformers' (`tests/verify_vision.py`, references from `tests/reference_image.py`) | patches identical; the tower's output within 8e-5 relative in float32, cosine 0.99998 in float16 |
 | Image input end to end on Qwen3.5-4B against transformers (`tests/verify_image_input.py`) | every rotary position equal, rotary angles within 1.9e-6; on the answer after an image KL 0.072 nats and 94.7% top-1 agreement, against 0.165 and 89.8% for a prompt without one; 1.65 nats with the image's rows zeroed |
 | Images through the chat runtime (`tests/check_image_chat.py`) | read right; a follow-up reuses the image's rows; another image of the same size is not taken for it; set aside and continued without computing its rows again |
+| Snapshots taken inside a prompt pass against a pass that ends there (`tests/verify_marks.py`), on Qwen3.5-4B and Qwen3.6-35B-A3B | the same state byte for byte, the same logits, the same drafted tokens after restoring |
 | Session reuse and snapshots, tool-call parsing, the sampler, copied drafts, resuming a conversion, model downloads, image parts and their rows (`tests/test_runtime.py`); the server (`tests/test_server.py`); the agent tasks' checks (`tests/test_agent_tasks.py`). No GPU needed, run by CI | pass |
 
 The comparisons with MLX in the first three rows are on Qwen3.5-4B: the float

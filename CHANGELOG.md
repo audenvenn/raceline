@@ -8,6 +8,25 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Added
+
+- `tools/act_study.py`: what 8-bit activations would cost, measured on the
+  decoded model before any kernel (#6). On Qwen3.5-4B, int8 inputs to the
+  matrices that read the normed (rotated) residual stream leave the KL to
+  the float model at 0.0599; on every matrix it rises to 0.0677.
+
+### Changed
+
+- The session's snapshots at branch points (the end of the system prompt,
+  the start of the reply) are taken inside the prompt's passes
+  (`Engine::set_mark`: the DeltaNet recurrence and the conv windows keep
+  their state at that row) instead of ending a pass there (#60). On a
+  mixture of experts with its experts on disk each extra pass was a sweep of
+  SSD reads: a 3,490-token request with both branch points on
+  Qwen3.6-35B-A3B on a 24 GB Mac now syncs in 3.3 s instead of 4.5, reading
+  a third fewer experts. Dense models are as before. `tests/verify_marks.py`
+  checks the state against a pass that ends at the mark, byte for byte.
+
 ## [0.6.0] - 2026-11-13
 
 ### Added

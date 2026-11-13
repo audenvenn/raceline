@@ -158,19 +158,26 @@ class Session:
         if pin is not None and start <= pin < len(prompt):
             self._pinned = pin
         branches = {p for p in branch_points if start < p < len(prompt)}
-        cuts = sorted(branches | {len(prompt)})
-        position = start
-        for cut in cuts:
-            if cut > position:
-                self._feed(prompt[position:cut], progress)
-                position = cut
+        if getattr(b, "marks_in_passes", False):
+            # Snapshots at the branch points from inside the passes: no pass has to end there.
+            for snap in self._feed(prompt[start:], progress, marks=[p - start for p in sorted(branches)]):
+                self._remember(snap)
             self._remember(b.snapshot())
+        else:
+            cuts = sorted(branches | {len(prompt)})
+            position = start
+            for cut in cuts:
+                if cut > position:
+                    self._feed(prompt[position:cut], progress)
+                    position = cut
+                self._remember(b.snapshot())
         self._branches = {p for p in self._branches if p <= start} | branches
         self.tokens = list(prompt)
         return dict(prompt_tokens=len(prompt), cached_tokens=start - redone)
 
-    def _feed(self, keys: Sequence[int], progress=None) -> None:
-        """Feeds keys to the backend: tokens, and the image rows among them as vectors."""
+    def _feed(self, keys: Sequence[int], progress=None, marks=()):
+        """Feeds keys to the backend: tokens, and the image rows among them as vectors; `marks`
+        (offsets into keys) go to a backend that snapshots inside its passes, -> its snapshots."""
         b = self.backend
         tokens, rows, i = list(keys), [], 0
         while i < len(keys):
@@ -187,10 +194,10 @@ class Session:
             rows.append(ImageRows(i, vectors[row:row + j - i], width, row))
             tokens[i:j] = [b.image_token] * (j - i)
             i = j
-        if rows:
-            b.prefill(tokens, progress, images=rows)
-        else:
-            b.prefill(tokens, progress)
+        extra = {"images": rows} if rows else {}
+        if marks:
+            extra["marks"] = marks
+        return b.prefill(tokens, progress, **extra) or []
 
     def generate(self, sampling: Sampling, max_tokens: int, stop_ids=()) -> Iterator[int]:
         """Yields sampled tokens, ending after one in `stop_ids` (which is yielded too)."""

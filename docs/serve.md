@@ -110,7 +110,11 @@ its 4627 tokens.
 
 Requests are served one at a time. The server keeps the model where the last
 request left it, so a client that resends a growing conversation only pays
-for what is new.
+for what is new. It also keeps the model's state at the end of the system
+prompt and where the reply begins, which later requests often branch from;
+those snapshots are taken from inside the prompt's passes, so they cost no
+extra pass (on Qwen3.6-35B-A3B with its experts on disk, a 3,490-token request
+with both is read in 3.3 s instead of 4.5).
 
 A client that switches to another conversation and back (a second chat, or a
 side request such as a title in the middle of a long session) finds the

@@ -596,6 +596,44 @@ void Engine::save_state(void *dst) const {
   }
 }
 
+void Engine::set_mark(int row) {
+  if (row < 0) fatal("set_mark: row %d", row);
+  mark_row_ = row;
+  if (row == 0 || mark_h_) return;
+  const Config &c = config();
+  mark_conv_.assign(lin_.size(), nil);
+  mark_S_.assign(lin_.size(), nil);
+  for (size_t i = 0; i < lin_.size(); i++) {
+    if (!lin_[i]) continue;
+    mark_conv_[i] = mt_.alloc(lin_[i]->conv[0].length);
+    mark_S_[i] = mt_.alloc(lin_[i]->S[0].length);
+  }
+  mark_h_ = mt_.alloc((size_t)c.hidden * sizeof(float));
+}
+
+// The layout of save_state, from the mark's buffers.
+void Engine::save_mark(void *dst) const {
+  if (mark_pos_ < 0) fatal("save_mark: no mark was kept (set_mark before a forward)");
+  char *p = (char *)dst;
+  for (size_t i = 0; i < lin_.size(); i++) {
+    if (!lin_[i]) continue;
+    memcpy(p, mark_conv_[i].contents, lin_[i]->conv[0].length);
+    p += lin_[i]->conv[0].length;
+    memcpy(p, mark_S_[i].contents, lin_[i]->S[0].length);
+    p += lin_[i]->S[0].length;
+  }
+  if (has_mtp_) {
+    MtpState st{};
+    st.mtp_pos = mtp_ ? mark_pos_ - 1 : 0;   // the mark's last row waits for its next token,
+    st.n_tok = 0;                            // as after a pass that ended at the mark
+    st.draft_next = -1;
+    st.draft_rows = draft_rows_;
+    memcpy(p, &st, sizeof st);
+    memset(p + sizeof st, 0, mtp_h_.length);
+    if (mtp_) memcpy(p + sizeof st, mark_h_.contents, (size_t)config().hidden * sizeof(float));
+  }
+}
+
 void Engine::load_state(const void *src, int position) {
   if (position < 0 || position > max_ctx_) fatal("load_state: position %d out of range", position);
   const char *p = (const char *)src;
@@ -704,8 +742,9 @@ void Engine::keep_drafts(int accepted) {
       [enc_ setBuffer:L->S[1 - L->scur] offset:0 atIndex:3];
       [enc_ setBuffer:scratch_yo_ offset:0 atIndex:4];
       set_params(enc_, DeltaParams{keep, c.lin_k_heads, c.lin_k_dim, c.lin_v_heads, c.lin_v_dim, 2 * kd, (int)C, 2 * kd,
-                                   2 * c.lin_v_heads, vd}, 5);
+                                   2 * c.lin_v_heads, vd, 0}, 5);
       [enc_ setBuffer:L->S[L->scur] offset:0 atIndex:6];
+      [enc_ setBuffer:L->S[L->scur] offset:0 atIndex:7];  // no mark: never written
       run_groups(c.lin_v_dim / 8, c.lin_v_heads);
     }
     flush(false);
@@ -987,8 +1026,10 @@ void Engine::encode_linear_attn(int layer, int T, bool spec) {
   [enc_ setBuffer:y offset:0 atIndex:3];
   [enc_ setBuffer:L.conv[1 - L.cur] offset:0 atIndex:4];
   [enc_ setBuffer:(spec ? L.sp_in : L.conv[1 - L.cur]) offset:0 atIndex:6];
-  set_params(enc_, ConvParams{T, C, proj_stride_, C, spec ? 1 : 0}, 5);
-  run_threads(C, T + 3 + (spec ? T : 0));
+  const int at = spec ? 0 : mark_row_;  // the pass's mark (set_mark)
+  [enc_ setBuffer:(at ? mark_conv_[layer] : L.conv[1 - L.cur]) offset:0 atIndex:7];
+  set_params(enc_, ConvParams{T, C, proj_stride_, C, spec ? 1 : 0, at}, 5);
+  run_threads(C, T + 3 + (spec ? T : 0) + (at ? 3 : 0));
   mark("lin_conv");
   L.cur = 1 - L.cur;
 
@@ -1021,8 +1062,9 @@ void Engine::encode_linear_attn(int layer, int T, bool spec) {
   [enc_ setBuffer:bg offset:0 atIndex:2];
   [enc_ setBuffer:L.S[L.scur] offset:0 atIndex:3];
   [enc_ setBuffer:yo_ offset:0 atIndex:4];
-  set_params(enc_, DeltaParams{T, Hk, Dk, Hv, Dv, 2 * kd, C, 2 * kd, 2 * Hv, vd}, 5);
+  set_params(enc_, DeltaParams{T, Hk, Dk, Hv, Dv, 2 * kd, C, 2 * kd, 2 * Hv, vd, at}, 5);
   [enc_ setBuffer:L.S[out] offset:0 atIndex:6];
+  [enc_ setBuffer:(at ? mark_S_[layer] : L.S[out]) offset:0 atIndex:7];
   run_groups(Dv / 8, Hv);
   if (repeating("gated_delta")) {  // a repeat must not advance the state again: it runs on scratch
     if (!scratch_state_) {
@@ -1032,6 +1074,7 @@ void Engine::encode_linear_attn(int layer, int T, bool spec) {
     [enc_ setBuffer:scratch_state_ offset:0 atIndex:3];
     [enc_ setBuffer:scratch_yo_ offset:0 atIndex:4];
     [enc_ setBuffer:scratch_state_ offset:0 atIndex:6];
+    [enc_ setBuffer:scratch_state_ offset:0 atIndex:7];
   }
   mark("gated_delta");
   L.scur = out;
@@ -1468,6 +1511,10 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec, const ImageRow
   if (spec && n_carry != 0) fatal("forward_draft: call draft_logits first");
   gpu_seconds_ = 0;
 
+  const int at = spec ? 0 : mark_row_;  // a snapshot inside this pass (set_mark)
+  if (at && at >= T) fatal("forward: mark at row %d of a pass of %d rows", at, T);
+  mark_row_ = 0;
+  mark_pos_ = -1;
   memcpy(tok_.contents, tokens, (size_t)T * sizeof(int32_t));
   spans_.assign(spans, spans + n_spans);
   set_positions(pos_, T, spans, n_spans);
@@ -1503,6 +1550,7 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec, const ImageRow
     }
     encode_embed(tok_, T);
     encode_image_rows(0, T);
+    mark_row_ = at;   // read by encode_linear_attn
     for (int i = 0; i < c.layers; i++) {
       if (c.is_linear_layer(i)) encode_linear_attn(i, T, spec);
       else encode_full_attn(i, T, pos_, rope_);
@@ -1523,12 +1571,15 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec, const ImageRow
     encode_norm(2, 0, out_rows, (size_t)(T - out_rows) * c.hidden * sizeof(float));
     const QTensor &head = model_->q("lm_head");
     encode_linear(head, out_rows, logits_, 0, head.n_pad, false, "linear:lm_head");
+    if (at && mtp_) encode_copy_rows(mark_h_, 0, at - 1, 1);  // the head's waiting row at the mark
     if (mtp_) {
       if (spec) encode_copy_rows(mtp_h_, 0, 0, T);
       else encode_mtp(n_carry, T - 1, T - 1, false);
     }
     flush(false);
   }
+  mark_row_ = 0;
+  if (at) mark_pos_ = pos_ + at;
 
   spans_.clear();
   pos_ += T;

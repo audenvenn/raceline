@@ -530,7 +530,9 @@ def test_image_parts_become_pictures_or_notes():
     for bad in ([{"role": "assistant", "content": parts}],
                 [{"role": "user", "content": [{"type": "image", "path": path}]}],     # a client never names a file
                 [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x/y.png"}}]}],
-                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]):
+                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}],
+                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,!!!"}}]}],
+                [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "data": "!!!"}}]}]):
         try:
             normalize_messages(bad, images=True)
             raise AssertionError(f"accepted {bad}")

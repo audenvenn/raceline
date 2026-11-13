@@ -394,6 +394,7 @@ Environment variables, all optional:
 | `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 | `RACELINE_EXPERT_CACHE` | Mixture-of-experts models: GB of experts kept in memory, the rest read from disk when needed (`0`: all in memory; by default the engine decides from the memory the GPU may use). |
+| `RACELINE_GPU_KEEPALIVE` | `0` stops the light kernel that keeps the GPU busy while a mixture of experts waits for experts read from disk (on by default; see "Experts on disk"). |
 | `RACELINE_PARK_GB` | `raceline serve`: memory for conversations set aside while the client is in another one (default: a twelfth of the Mac's memory, at most 2; `0` keeps none). |
 | `RACELINE_ANY_GPU` | `1` lets the engine try a Mac it does not support (before Apple M5); please report the result in #2. |
 

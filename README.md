@@ -150,11 +150,11 @@ measured back to back on 2026-11-13; mlx-lm's row on the 12th:
 
 Drafting does most of it: without drafts both decode at about 40 tok/s (38
 to 44 over repeated runs; `raceline-engine bench`, 1,024 tokens of context),
-with them at 112.6 and 116.7. Decoding with experts on disk also depends on the operating system's
-file cache: when it still holds the experts a model misses, as after a few
-runs, misses cost less (Qwen3.5-35B-A3B decoded at 52.9 tok/s without drafts
-on a quiet evening, 32 the next morning after 90 GB of downloads and
-conversions had gone through the cache). As a 16 GB Mac would run them, with
+with them at 112.6 and 116.7. Single-token decoding with experts on disk
+varies between sessions for a reason not yet established (#47):
+Qwen3.5-35B-A3B decoded at 52.9 tok/s without drafts on the first evening
+and 32 to 40 the next morning, with the same experts loaded and the SSD as
+fast; passes with drafts cost the same on both days. As a 16 GB Mac would run them, with
 5.5 to 5.8 GB of experts in memory and every miss read from the SSD past the
 file cache (`RACELINE_EXPERT_CACHE=<GB> RACELINE_EXPERT_NOCACHE=1`): 15.6
 tok/s for Qwen3.6-35B-A3B and 15.5 for 3.5, 28.1 and 26.7 with drafts,

@@ -32,7 +32,11 @@ ModelFile::ModelFile(Metal &mt, const std::string &path, bool map_experts) {
   struct stat st;
   fstat(fd, &st);
   size_ = (size_t)st.st_size;
-  map_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+  // Shared, not private: the file is only read, and a private mapping is copy-on-write. A
+  // fork marks it so in this process too, and when the GPU driver then wires the pages of the
+  // no-copy buffers made from it, the kernel copies them: every later pass is ten times
+  // slower (#53). A shared mapping is simply shared with a child.
+  map_ = mmap(nullptr, size_, PROT_READ, MAP_SHARED, fd, 0);
   close(fd);
   if (map_ == MAP_FAILED) fatal("cannot mmap %s", path.c_str());
 

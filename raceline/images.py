@@ -40,8 +40,9 @@ class Picture:
         try:
             with Image.open(io.BytesIO(data)) as im:
                 self.size = im.size                       # width, height
-        except Exception as e:  # noqa: BLE001  (PIL raises several kinds for data it cannot read)
-            raise ValueError(f"an image part this runtime cannot read: {e}") from None
+        except Exception:  # noqa: BLE001  (PIL raises several kinds for data it cannot read)
+            raise ValueError(f"an image part this runtime cannot read ({len(data)} bytes that are not a PNG, JPEG, "
+                             "GIF, WebP, BMP or TIFF image)") from None
         self.data = data
         self.digest = image_digest(data)
 
@@ -73,12 +74,19 @@ def key_row(key: int) -> tuple:
     return v >> KEY_ROW_BITS, v & ((1 << KEY_ROW_BITS) - 1)
 
 
+def _base64(data) -> bytes:
+    try:
+        return base64.b64decode(data or "", validate=True)
+    except (ValueError, TypeError):
+        raise ValueError("an image part whose base64 data is not valid") from None
+
+
 def _data_url(url: str) -> bytes:
     if not isinstance(url, str) or not url.startswith("data:") or ";base64," not in url[:120]:
         shown = url if isinstance(url, str) and len(url) < 80 else str(url)[:77] + "..."
         raise ValueError(f"images are taken as base64 data URLs (data:image/png;base64,...), not {shown!r}: "
                          "this server does not fetch from the network")
-    return base64.b64decode(url.split(",", 1)[1])
+    return _base64(url.split(",", 1)[1])
 
 
 def picture_of(part) -> Optional[Picture]:
@@ -94,7 +102,7 @@ def picture_of(part) -> Optional[Picture]:
     if kind == "image":
         source = part.get("source") or {}
         if source.get("type") == "base64":
-            return Picture(base64.b64decode(source.get("data", "")))
+            return Picture(_base64(source.get("data")))
         if source.get("type") == "url":
             return Picture(_data_url(source.get("url")))
         raise ValueError("an image part without its data (base64 source or a data URL)")

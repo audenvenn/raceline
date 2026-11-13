@@ -91,7 +91,8 @@ def normalize_messages(messages: list, images: bool = False) -> list:
             m["role"] = "user"
         content = _content(m.get("content"), images and m.get("role") != "system")
         if isinstance(content, list) and m.get("role") not in ("user", "tool"):
-            raise ValueError(f"images in a {m.get('role')} message: only user messages and tool results take them")
+            raise ValueError(f"an image in a message of role '{m.get('role')}': only user messages and tool results "
+                             "take images")
         m["content"] = content
         calls = []
         for call in m.get("tool_calls") or []:

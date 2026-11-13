@@ -8,6 +8,17 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Changed
+
+- The vision tower computes attention in float16 like its matrix products
+  (MLX's kernel accumulates in float32) instead of float32: a 1280 x 800
+  screenshot takes 0.85 s instead of 1.05 s with the towers of the 9B, 27B
+  and 35B models (0.54 s instead of 0.56 s with the 4B's), and a screenshot
+  request on Qwen3.6-35B-A3B with experts on disk 2.6 s instead of 2.9 s.
+  The tower's output stays within the checks against transformers, 1.1%
+  (relative RMS) from a float32 run where the checkpoint's own bfloat16 is
+  8.2% away.
+
 ## [0.7.1] - 2026-11-13
 
 ### Fixed

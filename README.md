@@ -401,6 +401,7 @@ Environment variables, all optional:
 | `RACELINE_TOKENIZER` | Tokenizer directory for a model file that does not embed one. |
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 | `RACELINE_EXPERT_CACHE` | Mixture-of-experts models: GB of experts kept in memory, the rest read from disk when needed (`0`: all in memory; by default the engine decides from the memory the GPU may use). |
+| `RACELINE_EXPERT_PRELOAD` | `0` stops the background filling of a fresh expert cache (on by default; see "Experts on disk"). |
 | `RACELINE_GPU_KEEPALIVE` | `0` stops the light kernel that keeps the GPU busy while a mixture of experts waits for experts read from disk (on by default; see "Experts on disk"). |
 | `RACELINE_IMAGE_PIXELS` | Pixels an image is scaled down to at most (default 1048576, a megapixel: 1024 rows of context; the models take up to 16.7 million). |
 | `RACELINE_VISION` | The vision file to use, when it is not the one next to the model file. |
@@ -590,6 +591,14 @@ of Qwen3.6-35B-A3B 59% faster, and that of the tiny test model 2.6 times
 such a kernel running back to back on a queue of its own and stops it 50 ms
 after the last one (`RACELINE_GPU_KEEPALIVE=0` turns it off). Dense models
 do not wait on the CPU inside a pass and gain nothing from it.
+
+A fresh cache is empty, and the first prompt would read nearly every expert
+from the SSD. While no pass is waiting, the CPU thread therefore fills the
+free slots in the background, a hundred megabytes at a time and never
+evicting anything; a request that comes in waits for one such step at most.
+On the 24 GB Mac a 3,490-token first request to Qwen3.6-35B-A3B, sent five
+seconds after the model opened, takes 2.6 s instead of 3.7
+(`RACELINE_EXPERT_PRELOAD=0` turns the preload off).
 
 **Images.** The Qwen3.5 / 3.6 / 3.8 checkpoints carry a vision tower, which
 the `.rlm` conversion leaves out: `tools/convert_vision.py` writes it to a

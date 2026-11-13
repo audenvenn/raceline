@@ -26,6 +26,13 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   Qwen3.6-35B-A3B on a 24 GB Mac now syncs in 3.3 s instead of 4.5, reading
   a third fewer experts. Dense models are as before. `tests/verify_marks.py`
   checks the state against a pass that ends at the mark, byte for byte.
+- A fresh expert cache fills its free slots in the background while no pass
+  is waiting, a hundred megabytes at a time and without evicting anything,
+  instead of staying empty until prompts bring the experts in. The first
+  request to Qwen3.6-35B-A3B on a 24 GB Mac, 3,490 tokens sent five seconds
+  after the model opened: 2.6 s instead of 3.7, with half the experts read
+  on demand; one sent at once is no slower. Outputs are bit-identical.
+  `RACELINE_EXPERT_PRELOAD=0` turns it off.
 
 ## [0.6.0] - 2026-11-13
 

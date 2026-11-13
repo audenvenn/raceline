@@ -8,6 +8,18 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Fixed
+
+- A process that forked after the engine had loaded a model (a program
+  embedding the runtime that runs `subprocess`, a notebook's `!command`)
+  ran every later pass slower: Qwen3.6-35B-A3B decoded at 6 instead of 69
+  tok/s, Qwen3.8-27B at 8 instead of 18 (#53). The model file was mapped
+  private, which is copy-on-write; a fork marks it so in the parent too, and
+  the GPU driver's wiring of the weights then made the kernel copy them. The
+  file is now mapped shared (it is only read); outputs are bit-identical.
+  `tests/check_fork.py` checks it on a real model. raceline's own agent and
+  probe did not fork after loading.
+
 ## [0.5.1] - 2026-11-13
 
 ### Fixed

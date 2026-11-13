@@ -8,6 +8,16 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Fixed
+
+- A model whose weights, attention cache and scratch need more GPU memory
+  than Metal recommends for the Mac loaded fine and then failed halfway
+  through the first long prompt ("Insufficient Memory"): Qwen3.8-27B with
+  `--ctx 65536` on a 24 GB Mac needs 19.3 GB of the 19.1 allowed. The engine
+  now refuses it when it opens and names a context that fits with room for
+  images (`--ctx 32768` there; 62208 is the limit). `RACELINE_ANY_SIZE=1`
+  loads it anyway.
+
 ## [0.7.0] - 2026-11-13
 
 ### Added

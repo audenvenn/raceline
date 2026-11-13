@@ -246,7 +246,8 @@ class Runtime:
             self._pictures.move_to_end(pic.digest)
             out += tokens[prev:i] + image_keys(pic.digest, n)
             prev = i + 1
-        while len(self._pictures) > 64:             # the oldest: a new request would bring them again
+        # The oldest go (a request that has them brings them again), never one of this prompt.
+        while len(self._pictures) > max(64, len({p.digest for p in pictures})):
             self._pictures.popitem(last=False)
         return out + tokens[prev:]
 
@@ -268,6 +269,15 @@ class Runtime:
                 raise RuntimeError(f"the tower made an image {width} rows wide, the prompt has {entry[1]}")
             entry[2] = vectors
             self._tower.mx.clear_cache()            # the tower's working memory back to the system
+            # Vectors are kept for 512 MB of pictures, the least recently used dropped first: they are
+            # only needed again where a conversation's rows have to be computed again.
+            kept = 0
+            for other in reversed(self._pictures.values()):
+                if other[2] is not None:
+                    kept += other[2].nbytes
+                    if kept > 512 << 20 and other is not entry:
+                        other[2] = None
+        self._pictures.move_to_end(digest)
         return entry[2], entry[1]
 
     def chat(self, messages: list, tools: Optional[list] = None, sampling: Optional[Sampling] = None,

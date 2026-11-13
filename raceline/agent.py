@@ -214,8 +214,7 @@ class Tools:
         full = self._path(path)
         if self.images and full.lower().endswith(IMAGE_FILES):
             from .images import Picture
-            with open(full, "rb") as f:
-                picture = Picture(f.read())
+            picture = Picture.from_file(full)
             w, h = picture.size
             return [{"type": "image", "image": picture},
                     {"type": "text", "text": f"{self._show(full)}: an image of {w} x {h} pixels."}]
@@ -342,8 +341,9 @@ class Agent:
         """Runs one user request to completion (the model may take many tool steps).
         `images`: paths of image files that come with it."""
         if images:
-            self.messages.append({"role": "user", "content": [{"type": "image", "path": p} for p in images]
-                                  + [{"type": "text", "text": text}]})
+            from .images import Picture
+            self.messages.append({"role": "user", "content": [{"type": "image", "image": Picture.from_file(p)}
+                                                              for p in images] + [{"type": "text", "text": text}]})
         else:
             self.messages.append({"role": "user", "content": text})
         totals = dict(prompt_tokens=0, cached_tokens=0, completion_tokens=0, steps=0, seconds=0.0,

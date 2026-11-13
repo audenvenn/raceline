@@ -517,7 +517,7 @@ def test_image_parts_become_pictures_or_notes():
              {"type": "image_url", "image_url": {"url": url}},                                   # OpenAI
              {"type": "image", "source": {"type": "base64", "media_type": "image/png",
                                           "data": base64.b64encode(data).decode()}},             # Anthropic
-             {"type": "image", "path": path}]                                                    # raceline's own
+             {"type": "image", "image": Picture.from_file(path)}]                                # the agent's
     msgs = normalize_messages([{"role": "user", "content": parts}], images=True)
     content = msgs[0]["content"]
     assert [p["type"] for p in content] == ["text", "image", "image", "image"], content
@@ -528,6 +528,7 @@ def test_image_parts_become_pictures_or_notes():
     sys_msg = normalize_messages([{"role": "system", "content": parts}], images=True)[0]["content"]
     assert isinstance(sys_msg, str) and "image left out" in sys_msg
     for bad in ([{"role": "assistant", "content": parts}],
+                [{"role": "user", "content": [{"type": "image", "path": path}]}],     # a client never names a file
                 [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x/y.png"}}]}],
                 [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]):
         try:

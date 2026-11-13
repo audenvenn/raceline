@@ -40,6 +40,7 @@ def main():
     from raceline.backends import Sampling
     from raceline.chat import Runtime
     from raceline.engine import RacelineBackend
+    from raceline.images import Picture
 
     model = sys.argv[1]
     work = tempfile.mkdtemp()
@@ -71,7 +72,7 @@ def main():
         return text.strip(), stats
 
     q = "What shapes, colors and text are in this picture? Answer in one sentence."
-    first = [{"role": "user", "content": [{"type": "image", "path": a}, {"type": "text", "text": q}]}]
+    first = [{"role": "user", "content": [{"type": "image", "image": Picture.from_file(a)}, {"type": "text", "text": q}]}]
     answer1, s1 = ask(first)
     print(f"1. {answer1!r}  [{s1['prompt_tokens']} prompt tokens, {s1['prefill_seconds']:.2f} s]")
     low = answer1.lower()
@@ -86,7 +87,7 @@ def main():
     print(f"{'ok  ' if ok2 else 'FAIL'}  the follow-up reuses the first request (tower runs: {len(encoded)}) "
           "and says blue")
 
-    other = [{"role": "user", "content": [{"type": "image", "path": b}, {"type": "text", "text": q}]}]
+    other = [{"role": "user", "content": [{"type": "image", "image": Picture.from_file(b)}, {"type": "text", "text": q}]}]
     answer3, s3 = ask(other)
     print(f"3. {answer3!r}  [{s3['cached_tokens']} of {s3['prompt_tokens']} prompt tokens reused]")
     low = answer3.lower()

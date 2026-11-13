@@ -1,9 +1,11 @@
 """Images in conversations: the content parts clients send, and their rows in the prompt (#28).
 
 Clients send an image as a content part of a message: OpenAI's
-`{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}`,
-Anthropic's `{"type": "image", "source": {"type": "base64", ...}}`, or here
-`{"type": "image", "path": "..."}`. Each becomes a Picture. The chat
+`{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}` or
+Anthropic's `{"type": "image", "source": {"type": "base64", ...}}`; the
+terminal agent puts a Picture in the part itself (`{"type": "image", "image":
+picture}`). Parts never name a file: a client of the server cannot make it
+read one. Each becomes a Picture. The chat
 template marks its place with one `<|image_pad|>`, which the prompt widens to
 one row per 2x2 block of 16-pixel patches; those rows get keys of their own
 (`image_keys`), negative numbers no token has, so that a context holding
@@ -26,6 +28,11 @@ KEY_ROW_BITS = 15        # rows per picture: below 32768 (16384 at the checkpoin
 
 class Picture:
     """An image in a conversation: its file's bytes, its size, and what names it."""
+
+    @classmethod
+    def from_file(cls, path: str) -> "Picture":
+        with open(os.path.expanduser(path), "rb") as f:
+            return cls(f.read())
 
     def __init__(self, data: bytes):
         from PIL import Image
@@ -85,9 +92,6 @@ def picture_of(part) -> Optional[Picture]:
         url = part.get("image_url")
         return Picture(_data_url(url.get("url") if isinstance(url, dict) else url))
     if kind == "image":
-        if part.get("path"):
-            with open(os.path.expanduser(part["path"]), "rb") as f:
-                return Picture(f.read())
         source = part.get("source") or {}
         if source.get("type") == "base64":
             return Picture(base64.b64decode(source.get("data", "")))

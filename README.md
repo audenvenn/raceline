@@ -613,9 +613,12 @@ seconds after the model opened, takes 2.6 s instead of 3.7
 the `.rlm` conversion leaves out: `tools/convert_vision.py` writes it to a
 vision file of its own that `raceline pull` fetches with the model. The tower
 is a ViT over 16-pixel patches (24 layers for the 4B, 27 for the others) and
-runs in MLX (`raceline/vision.py`), in float16: in 8 bits its output was a
-hundred times further from transformers'. On the M6 it takes 0.6 s for a
-1280 x 800 screenshot with the 4B's tower and 1.1 s with the others'. Its
+runs in MLX (`raceline/vision.py`), in float16, attention included (MLX's
+kernel accumulates in float32): on a 1280 x 800 screenshot its output is
+1.1% (relative RMS) from a float32 run, where the checkpoint's own bfloat16
+is 8.2% away; in 8 bits it was a hundred times further from transformers'.
+On the M6 a 1280 x 800 screenshot takes 0.54 s with the 4B's tower and
+0.85 s with the others'. Its
 output, one vector per 2 x 2 patches, enters the engine in place of the
 image's `<|image_pad|>` rows (`forward_embeds`), rotated like the model's
 residual stream, with Qwen's three-dimensional rotary positions: time, row
@@ -625,8 +628,9 @@ rows are keyed by the image's content, so a conversation that goes on reuses
 them and another image of the same size is never taken for it; their
 positions travel with a conversation set aside. Qwen3.6-35B-A3B on the 24 GB
 Mac, experts on disk: a 1280 x 800 screenshot and a question (1021 rows) are
-read in 3.4 s, tower included, and text decodes at 74 tok/s before and after
-it, without swapping: the tower's 0.9 GB fit beside the model.
+read in 2.6 s, tower included (2.3 s for the next screenshot), and text
+decodes at 74 tok/s before and after it, without swapping: the tower's
+0.9 GB fit beside the model.
 
 **Hardware limits.** `raceline probe` prints them for your Mac:
 
@@ -670,8 +674,8 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 
 - One model family: Qwen3.5 / 3.6 / 3.8, dense and mixture of experts.
   Images, but not video.
-- Images go through the vision tower in MLX rather than the engine: 0.6 to
-  1.1 s per screenshot, and the tower stays in memory (0.67 GB for the 4B,
+- Images go through the vision tower in MLX rather than the engine: 0.54 to
+  0.85 s per screenshot, and the tower stays in memory (0.67 GB for the 4B,
   about 0.9 GB for the others) once an image has come; with a mixture of
   experts whose experts are on disk it is read in again for each request
   that has one (0.1 to 0.3 s) and its memory handed back after.

@@ -100,6 +100,12 @@ with), and the API key is not checked. Fewer tools mean a shorter prompt
 of the previous one. A local model is not Claude: expect it to need more
 guidance on larger tasks.
 
+Claude Code's `Read` of an image file sends the image back as a tool result,
+which the model reads with its vision tower. Asked which test failed in a
+1280 x 800 screenshot of a CI run, Qwen3.6-35B-A3B on the 24 GB Mac called
+`Read` and answered in 20 s over two requests, the second reusing 3610 of
+its 4627 tokens.
+
 ## What is reused between requests
 
 Requests are served one at a time. The server keeps the model where the last

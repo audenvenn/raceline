@@ -644,7 +644,7 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 | `tools/convert_vision.py` | The checkpoint's vision tower to a vision file (float16) for image input. |
 | `tools/release_model.py`, `tools/publish_model.py` | Cut a model file into release parts with a model card; upload them to the GitHub release and Hugging Face. |
 | `setup.py` | Builds the engine into the Python package on `pip install`. |
-| `tools/mtp_study.py`, `tools/quant_study.py` | The measurements behind the design choices above. |
+| `tools/mtp_study.py`, `tools/quant_study.py`, `tools/act_study.py` | The measurements behind the design choices above, and what 8-bit activations would cost (#6). |
 | `tests/`, `bench/` | Verification against MLX and CPU references; benchmarks and hardware probes. |
 
 ## Limits

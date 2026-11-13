@@ -488,7 +488,12 @@ DeltaNet layer; more calibration data, GPTQ act-order and keeping the
 DeltaNet gates in half precision were measured and do not change that, nor
 would a low-rank correction of the weights' error (`tools/lowrank_study.py`:
 rank 32 removes 1 to 2.5% of a matrix's output error, rank 128 at most 6%;
-after the rotation the error has no low-rank structure to catch).
+after the rotation the error has no low-rank structure to catch). Rotating
+the MLP down projection's input as well (QuaRot's online Hadamard;
+`tools/hadamard_down_study.py`) brings that input's kurtosis from the
+hundreds or thousands down to single digits but the down projection's
+output error only 4 to 11% lower: what limits it is 4 bits with a scale per
+row and per column, not outliers.
 
 ## How it works
 
@@ -658,7 +663,7 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 | `tools/convert_vision.py` | The checkpoint's vision tower to a vision file (float16) for image input. |
 | `tools/release_model.py`, `tools/publish_model.py` | Cut a model file into release parts with a model card; upload them to the GitHub release and Hugging Face. |
 | `setup.py` | Builds the engine into the Python package on `pip install`. |
-| `tools/mtp_study.py`, `tools/quant_study.py`, `tools/act_study.py`, `tools/lowrank_study.py` | The measurements behind the design choices above: what 8-bit activations would cost (#6), what a low-rank correction of the weights would gain (#15). |
+| `tools/mtp_study.py`, `tools/quant_study.py`, `tools/act_study.py`, `tools/lowrank_study.py`, `tools/hadamard_down_study.py` | The measurements behind the design choices above: what 8-bit activations would cost (#6), what a low-rank correction of the weights would gain (#15). |
 | `tests/`, `bench/` | Verification against MLX and CPU references; benchmarks and hardware probes. |
 
 ## Limits

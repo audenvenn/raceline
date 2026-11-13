@@ -99,18 +99,19 @@ weights, which write other text:
 `--set extended` runs eight harder tasks (several files, a 600-line file,
 tests that must catch broken versions of the code, a new module from a
 description, a signature change across files). They separate the models
-more than the first eight:
+more than the first eight (all four on 2026-11-13; the two 35B-A3B rows ran
+alongside an upload, which slowed their decoding by about a tenth):
 
 | Model on raceline | First eight tasks | Extended eight |
 |---|---|---|
 | Qwen3.8-27B | 7 of 8 in 317 s | **8 of 8** in 310 s |
-| Qwen3.5-9B | 7 of 8 in 128 s | 7 of 8 in 164 s |
-| Qwen3.6-35B-A3B, experts on disk | 7 of 8 in 167 s | 6 of 8 in 164 s |
-| Qwen3.5-35B-A3B, experts on disk | 7 of 8 in 136 s | 5 of 8 in 172 s |
+| Qwen3.6-35B-A3B, experts on disk | 7 of 8 in 167 s | **7 of 8** in 169 s |
+| Qwen3.5-9B | 7 of 8 in 128 s | 6 of 8 in 155 s |
+| Qwen3.5-35B-A3B, experts on disk | 7 of 8 in 136 s | 6 of 8 in 204 s |
 
 One run each with seed 1: a task more or less is within the noise. The 27B
-is the strongest agent here and the slowest; the 9B solves nearly as much in
-half the time.
+is the strongest agent here and the slowest; Qwen3.6-35B-A3B solves nearly
+as much in about half the time.
 
 **A conversation's next request.** `--followup` asks one more question after
 each task, as a user does in a session. The Qwen3.5 templates leave the

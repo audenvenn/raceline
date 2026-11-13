@@ -10,7 +10,7 @@ On an M6 Mac mini with 24 GB it runs **Qwen3.8-27B at 25 to 40 tokens/s,
 where mlx-lm manages 8 to 9** on the same machine, Qwen3.5-9B at 57 to 114
 against 27 to 29, and Qwen3.5-4B at 94 to 178 against 46 to 51.
 **Qwen3.6-35B-A3B, a mixture of experts too large for the memory the GPU may
-use, runs at 45 to 110 tokens/s with its experts read from the SSD as they
+use, runs at 61 to 118 tokens/s with its experts read from the SSD as they
 are needed; mlx-lm has to hold all of such a model and swaps (3.5 tok/s on
 Qwen3.5-35B-A3B, the same size).** Its agent
 finishes eight small coding tasks with the 27B in 5 minutes where the same
@@ -74,8 +74,9 @@ lets a hidden check decide each task. Thinking on (effort low), seed 1, each
 model's general-purpose sampling (temperature 1.0, top-p 0.95 for the 27B;
 0.7, 0.8 for the 4B), except the 9B, measured later with the coding setting
 `raceline chat` uses now (0.6, 0.95; it solves as many on the other two),
-and the two 35B-A3B models, measured with it a day later (the date is in the
-agent's system prompt, so their text differs from the day before). The time
+and the two 35B-A3B models, measured with it a day later with the GPU
+keep-alive (the date is in the agent's system prompt, so their text differs
+from the day before). The time
 is the whole run: prompt processing, writing and the tools. Drafting never changes what is written, so the two
 raceline rows of a model wrote the same tokens; mlx-lm runs other 4-bit
 weights, which write other text:
@@ -86,9 +87,9 @@ weights, which write other text:
 | | **raceline** | 7 of 8 | 9,038 | **32.1 tok/s** | **317 s** |
 | | raceline, copied drafts off | 7 of 8 | 9,038 | 31.5 tok/s | 322 s |
 | Qwen3.6-35B-A3B | mlx-lm, MLX 4-bit weights | does not fit | | | |
-| | **raceline**, experts on disk | 7 of 8 | 8,384 | **60.6 tok/s** | **167 s** |
+| | **raceline**, experts on disk | 7 of 8 | 8,384 | **70.3 tok/s** | **148 s** |
 | Qwen3.5-35B-A3B | mlx-lm, MLX 4-bit weights | does not fit | | | |
-| | **raceline**, experts on disk | 7 of 8 | 6,993 | **62.4 tok/s** | **136 s** |
+| | **raceline**, experts on disk | 7 of 8 | 6,993 | **67.1 tok/s** | **128 s** |
 | Qwen3.5-9B | mlx-lm, MLX 4-bit weights | 5 of 8 | 13,318 | 27.4 tok/s | 500 s |
 | | **raceline** | 7 of 8 | 11,513 | **99.9 tok/s** | **128 s** |
 | | raceline, copied drafts off | 7 of 8 | 11,513 | 89.9 tok/s | 140 s |
@@ -99,15 +100,15 @@ weights, which write other text:
 `--set extended` runs eight harder tasks (several files, a 600-line file,
 tests that must catch broken versions of the code, a new module from a
 description, a signature change across files). They separate the models
-more than the first eight (all four on 2026-11-13; the two 35B-A3B rows ran
-alongside an upload, which slowed their decoding by about a tenth):
+more than the first eight (all four on 2026-11-13, the 35B-A3B models with
+the GPU keep-alive described under "How it works"):
 
 | Model on raceline | First eight tasks | Extended eight |
 |---|---|---|
 | Qwen3.8-27B | 7 of 8 in 317 s | **8 of 8** in 310 s |
-| Qwen3.6-35B-A3B, experts on disk | 7 of 8 in 167 s | **7 of 8** in 169 s |
+| Qwen3.6-35B-A3B, experts on disk | 7 of 8 in 148 s | **7 of 8** in 144 s |
 | Qwen3.5-9B | 7 of 8 in 128 s | 6 of 8 in 155 s |
-| Qwen3.5-35B-A3B, experts on disk | 7 of 8 in 136 s | 6 of 8 in 204 s |
+| Qwen3.5-35B-A3B, experts on disk | 7 of 8 in 128 s | 6 of 8 in 163 s |
 
 One run each with seed 1: a task more or less is within the noise. The 27B
 is the strongest agent here and the slowest; Qwen3.6-35B-A3B solves nearly
@@ -118,11 +119,10 @@ each task, as a user does in a session. The Qwen3.5 templates leave the
 reasoning of earlier replies out of the prompt, so the previous turn is
 rendered differently from what the model wrote and is processed again; on
 Qwen3.5-35B-A3B the eight follow-ups processed 10,955 of their 20,019 prompt
-tokens again (10.0 s). Qwen3.6 and Qwen3.8 can keep that reasoning
+tokens again (9.6 s). Qwen3.6 and Qwen3.8 can keep that reasoning
 (`preserve_thinking`), which `raceline chat` asks for: on Qwen3.6-35B-A3B
-the follow-ups processed 160 of 24,579 tokens (1.5 s), 20 per request, the
-new message itself; with the template's default it was 12,270 of 21,334
-(9.4 s).
+the follow-ups processed 160 of 24,579 tokens (1.4 s), 20 per request, the
+new message itself; with the template's default it was 12,270 of 21,334.
 
 The 27B's whole run is 7.3 times shorter on raceline, partly because these
 weights wrote half as many tokens as MLX's on these tasks; decoding alone is
@@ -139,26 +139,25 @@ mlx-lm loads the whole model: after a 1,024-token prompt Qwen3.5-35B-A3B
 decoded at 3.5 tok/s with 21.3 GB in use, swapping; its 4,096-token run was
 still going after 11 minutes when swap passed 8 GB and a watchdog stopped
 it, as it stopped mlx-lm's other runs. The two raceline columns were
-measured back to back on 2026-11-13; mlx-lm's row on the 12th:
+measured back to back on 2026-11-13 with the GPU keep-alive described below;
+mlx-lm's row on the 12th:
 
 | Benchmark | mlx-lm, MLX 4-bit (3.5) | raceline, Qwen3.6-35B-A3B | raceline, Qwen3.5-35B-A3B |
 |---|---|---|---|
-| standard library, 1,024 tokens: prompt / decoding | 290 / 3.5 tok/s, swapping | 1147 / **110.5 tok/s** | 1144 / **111.0 tok/s** |
-| standard library, 4,096 tokens: prompt / decoding | stopped (swap) | 1650 / **70.5 tok/s** | 1673 / **91.5 tok/s** |
-| chat answers, greedy / temperature 0.7 / 1.0 | | **45.5 / 52.3 / 51.9 tok/s** | **56.6 / 48.4 / 43.9 tok/s** |
+| standard library, 1,024 tokens: prompt / decoding | 290 / 3.5 tok/s, swapping | 1171 / **118.0 tok/s** | 1118 / **120.1 tok/s** |
+| standard library, 4,096 tokens: prompt / decoding | stopped (swap) | 1542 / **74.5 tok/s** | 1647 / **97.3 tok/s** |
+| chat answers, greedy / temperature 0.7 / 1.0 | | **61.4 / 68.7 / 71.5 tok/s** | **60.0 / 64.8 / 63.0 tok/s** |
 | memory | 21.3 GB and swap | 14.4 GB | 14.1 GB |
 
-Drafting does most of it: without drafts both decode at about 40 tok/s (38
-to 44 over repeated runs; `raceline-engine bench`, 1,024 tokens of context),
-with them at 112.6 and 116.7. Single-token decoding with experts on disk
-varies between sessions for a reason not yet established (#47):
-Qwen3.5-35B-A3B decoded at 52.9 tok/s without drafts on the first evening
-and 32 to 40 the next morning, with the same experts loaded and the SSD as
-fast; passes with drafts cost the same on both days. As a 16 GB Mac would run them, with
-5.5 to 5.8 GB of experts in memory and every miss read from the SSD past the
-file cache (`RACELINE_EXPERT_CACHE=<GB> RACELINE_EXPERT_NOCACHE=1`): 15.6
-tok/s for Qwen3.6-35B-A3B and 15.5 for 3.5, 28.1 and 26.7 with drafts,
-prompts at about 750 to 830 tok/s. Prompts are processed 2,048 rows at a
+Without drafts both decode at about 55 tok/s (`raceline-engine bench`,
+1,024 tokens of context), with them at 118. As a 16 GB Mac would run them,
+with 5.5 to 5.8 GB of experts in memory and every miss read from the SSD
+past the file cache (`RACELINE_EXPERT_CACHE=<GB> RACELINE_EXPERT_NOCACHE=1`):
+30.1 tok/s for Qwen3.6-35B-A3B and 25.6 for 3.5, 39.8 and 32.5 with drafts,
+prompts at about 750 to 830 tok/s. Before the keep-alive, the same runs gave
+15.6 and 15.5 (28.1 and 26.7 with drafts), and on a 24 GB Mac 32 to 53 tok/s
+without drafts depending on the session, 61.4 against 45.5 greedy in chat
+(#47). Prompts are processed 2,048 rows at a
 time for MoE models: a pass reads each missing expert once.
 
 **Qwen3.8-27B.** Continuing source code after a prompt of that length,
@@ -567,6 +566,16 @@ end of the cache. Replayed on synthetic agent sessions
 (`bench/expert_cache_sim.py`) with 73% of the experts cached, that reads 58%
 fewer experts for prompts than plain LRU and 6% fewer while decoding.
 `--expert-cache GB` sets the cache's size by hand.
+
+Those waits cost more than their own length. The GPU's power management
+takes a GPU that waits on the CPU for an idle one and lowers its
+performance, so everything after the wait runs slower: on the M6, a light
+kernel running alongside on another command queue made single-token passes
+of Qwen3.6-35B-A3B 59% faster, and that of the tiny test model 2.6 times
+(#47). While passes with experts on disk come in, the engine therefore keeps
+such a kernel running back to back on a queue of its own and stops it 50 ms
+after the last one (`RACELINE_GPU_KEEPALIVE=0` turns it off). Dense models
+do not wait on the CPU inside a pass and gain nothing from it.
 
 **Hardware limits.** `raceline probe` prints them for your Mac:
 

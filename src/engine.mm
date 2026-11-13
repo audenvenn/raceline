@@ -18,6 +18,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <sys/qos.h>
+#include <chrono>
 #include <thread>
 
 namespace rl {
@@ -115,6 +116,51 @@ struct Engine::ExpertCache {
   std::condition_variable cv;
   std::deque<Request> queue;
   bool stop = false;
+
+  // The GPU's power management lowers its performance when the GPU looks idle,
+  // and with experts on disk every MoE layer makes the GPU wait for this
+  // thread. Measured on an M6 (#47): single-token passes of Qwen3.6-35B-A3B
+  // ran at 32.5 tok/s, and at 51.7 with a light kernel running alongside on
+  // another queue. So while passes come (one submitted within the last 50 ms),
+  // a thread of its own keeps such a kernel running back to back; it sleeps
+  // when generation stops. RACELINE_GPU_KEEPALIVE=0 turns it off.
+  id<MTLCommandQueue> ka_queue = nil;
+  id<MTLComputePipelineState> ka_pipe = nil;
+  id<MTLBuffer> ka_buf = nil;
+  std::thread ka_thread;
+  std::mutex ka_mu;
+  std::condition_variable ka_cv;
+  std::atomic<int64_t> ka_last{0};   // steady_clock ns of the last request
+  bool ka_stop = false;
+
+  static int64_t now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+
+  void keepalive() {
+    constexpr int64_t kIdle = 50'000'000;   // ns without a request before it stops
+    for (;;) {
+      {
+        std::unique_lock<std::mutex> lock(ka_mu);
+        ka_cv.wait(lock, [&] { return ka_stop || now_ns() - ka_last.load() < kIdle; });
+        if (ka_stop) return;
+      }
+      while (!ka_stop && now_ns() - ka_last.load() < kIdle) {
+        @autoreleasepool {
+          id<MTLCommandBuffer> cb = [ka_queue commandBuffer];
+          id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+          [enc setComputePipelineState:ka_pipe];
+          [enc setBuffer:ka_buf offset:0 atIndex:0];
+          for (int j = 0; j < 8; j++)
+            [enc dispatchThreads:MTLSizeMake(1024, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+          [enc endEncoding];
+          [cb commit];
+          [cb waitUntilCompleted];
+        }
+      }
+    }
+  }
 
   int32_t *tab(int layer) const { return (int32_t *)table.contents + (size_t)layer * (E + 1); }
 
@@ -249,6 +295,10 @@ struct Engine::ExpertCache {
       queue.push_back(r);
     }
     cv.notify_one();
+    if (ka_pipe) {
+      ka_last = now_ns();
+      ka_cv.notify_one();
+    }
   }
 
   ~ExpertCache() {
@@ -257,6 +307,12 @@ struct Engine::ExpertCache {
       stop = true;
     }
     cv.notify_one();
+    {
+      std::lock_guard<std::mutex> lock(ka_mu);
+      ka_stop = true;
+    }
+    ka_cv.notify_one();
+    if (ka_thread.joinable()) ka_thread.join();
     if (worker.joinable()) worker.join();   // before the file it reads from is closed
     if (fd >= 0) close(fd);
     if (trace) fclose(trace);
@@ -402,6 +458,12 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       x.sel = moe_sel_;
       x.ev = [mt_.device() newSharedEvent];
       x.worker = std::thread([&x] { x.run(); });
+      if (const char *v = getenv("RACELINE_GPU_KEEPALIVE"); !(v && *v && !atoi(v))) {
+        x.ka_queue = [mt_.device() newCommandQueue];
+        x.ka_pipe = mt_.pipeline("keepalive.metal", "keepalive");
+        x.ka_buf = mt_.alloc(1024 * sizeof(float));
+        x.ka_thread = std::thread([&x] { x.keepalive(); });
+      }
     }
   }
 

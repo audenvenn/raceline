@@ -38,3 +38,43 @@ qwen3.5-35b-a3b run 3: warm decode:  256 tokens in 6.356s = 40.3 tok/s (GPU time
 qwen3.6-35b-a3b run 2: warm decode:  256 tokens in 6.434s = 39.8 tok/s (GPU time 6.317s = 40.5 tok/s; 256 passes)
 qwen3.6-35b-a3b run 3: warm decode:  256 tokens in 5.822s = 44.0 tok/s (GPU time 5.707s = 44.9 tok/s; 256 passes)
 == done 05:54
+
+# Again with the GPU keep-alive (#47), 2026-11-13 09:03-09:07, same script plus the 16 GB simulation. Output as printed.
+ 9:02  up 5 days, 18:47, 5 users, load averages: 1.51 1.71 1.68
+== qwen3.5-35b-a3b: a 16 GB Mac (misses past the file cache), drafts 0 / 4
+warm decode:  256 tokens in 10.008s = 25.6 tok/s (GPU time 9.895s = 25.9 tok/s; 256 passes)
+warm decode:  256 tokens in 7.865s = 32.5 tok/s (GPU time 7.771s = 32.9 tok/s; 57 passes)
+== qwen3.5-35b-a3b: engine bench 09:03
+warm prefill: 1024 tokens in 0.892s = 1148.2 tok/s (GPU time 0.891s = 1149.0 tok/s)
+warm decode:  256 tokens in 4.643s = 55.1 tok/s (GPU time 4.546s = 56.3 tok/s; 256 passes)
+expert cache: 7548 slots, 91.9% of routed experts found loaded (15745 read from disk)
+warm prefill: 1024 tokens in 0.900s = 1137.2 tok/s (GPU time 0.895s = 1144.5 tok/s)
+warm decode:  256 tokens in 2.172s = 117.9 tok/s (GPU time 2.111s = 121.2 tok/s; 57 passes)
+expert cache: 7548 slots, 90.0% of routed experts found loaded (15778 read from disk)
+== qwen3.5-35b-a3b: chat answers 09:04
+raceline greedy                                    763 tokens    60.0 tok/s   77% of drafts accepted   95.4% of experts from the cache
+raceline temperature 0.7, top_p 0.8, top_k 20      751 tokens    64.8 tok/s   68% of drafts accepted   96.7% of experts from the cache
+raceline temperature 1.0, top_p 0.95, top_k 20     759 tokens    63.0 tok/s   71% of drafts accepted   96.8% of experts from the cache
+== qwen3.5-35b-a3b: continuing code 09:04
+model                              backend   prompt   load      prefill       decode  drafts ok  peak mem
+qwen3.5-35b-a3b.rlm                raceline    1024   0.9s   1118 tok/s  120.1 tok/s        79%   14.1 GB
+qwen3.5-35b-a3b.rlm                raceline    4096   0.8s   1647 tok/s   97.3 tok/s        76%   14.1 GB
+== qwen3.6-35b-a3b: a 16 GB Mac (misses past the file cache), drafts 0 / 4
+warm decode:  256 tokens in 8.499s = 30.1 tok/s (GPU time 8.388s = 30.5 tok/s; 256 passes)
+warm decode:  256 tokens in 6.433s = 39.8 tok/s (GPU time 6.343s = 40.4 tok/s; 57 passes)
+== qwen3.6-35b-a3b: engine bench 09:05
+warm prefill: 1024 tokens in 0.933s = 1097.4 tok/s (GPU time 0.933s = 1098.0 tok/s)
+warm decode:  256 tokens in 4.659s = 54.9 tok/s (GPU time 4.562s = 56.1 tok/s; 256 passes)
+expert cache: 7738 slots, 92.2% of routed experts found loaded (15168 read from disk)
+warm prefill: 1024 tokens in 0.930s = 1101.6 tok/s (GPU time 0.926s = 1105.8 tok/s)
+warm decode:  256 tokens in 2.162s = 118.4 tok/s (GPU time 2.102s = 121.8 tok/s; 57 passes)
+expert cache: 7738 slots, 90.0% of routed experts found loaded (15363 read from disk)
+== qwen3.6-35b-a3b: chat answers 09:06
+raceline greedy                                    818 tokens    61.4 tok/s   75% of drafts accepted   95.9% of experts from the cache
+raceline temperature 0.7, top_p 0.8, top_k 20      815 tokens    68.7 tok/s   65% of drafts accepted   97.3% of experts from the cache
+raceline temperature 1.0, top_p 0.95, top_k 20     808 tokens    71.5 tok/s   73% of drafts accepted   97.1% of experts from the cache
+== qwen3.6-35b-a3b: continuing code 09:06
+model                              backend   prompt   load      prefill       decode  drafts ok  peak mem
+qwen3.6-35b-a3b.rlm                raceline    1024   0.9s   1171 tok/s  118.0 tok/s        74%   14.4 GB
+qwen3.6-35b-a3b.rlm                raceline    4096   0.8s   1542 tok/s   74.5 tok/s        65%   14.4 GB
+== done 09:07

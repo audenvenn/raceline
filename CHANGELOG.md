@@ -8,6 +8,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-13
+
 ### Fixed
 
 - A model whose weights, attention cache and scratch need more GPU memory
@@ -387,7 +389,8 @@ First public release.
 - Project infrastructure: CI, contribution guide, security policy, issue and
   pull-request templates.
 
-[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/audenvenn/raceline/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/audenvenn/raceline/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/audenvenn/raceline/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/audenvenn/raceline/compare/v0.5.0...v0.5.1

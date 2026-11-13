@@ -604,7 +604,10 @@ and column, interleaved over the 32 rotary frequencies. Text has all three
 equal, so text comes out bit-for-bit as before. In the session an image's
 rows are keyed by the image's content, so a conversation that goes on reuses
 them and another image of the same size is never taken for it; their
-positions travel with a conversation set aside.
+positions travel with a conversation set aside. Qwen3.6-35B-A3B on the 24 GB
+Mac, experts on disk: a 1280 x 800 screenshot and a question (1021 rows) are
+read in 3.4 s, tower included, and text decodes at 74 tok/s before and after
+it, without swapping: the tower's 0.9 GB fit beside the model.
 
 **Hardware limits.** `raceline probe` prints them for your Mac:
 
@@ -648,9 +651,9 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 
 - One model family: Qwen3.5 / 3.6 / 3.8, dense and mixture of experts.
   Images, but not video.
-- Images go through the vision tower in MLX rather than the engine: about a
-  second per screenshot, and the tower stays in memory (0.67 GB for the 4B,
-  0.92 GB for the others) once an image has come.
+- Images go through the vision tower in MLX rather than the engine: 0.6 to
+  1.1 s per screenshot, and the tower stays in memory (0.67 GB for the 4B,
+  about 0.9 GB for the others) once an image has come.
 - The 27B conversion loses more quality than MLX's 4-bit format does (KL
   0.148 against 0.105 nats to the float model on held-out text, #15; a
   power-of-two scale per 32 weights, which the accelerators could apply, did

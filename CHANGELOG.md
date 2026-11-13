@@ -12,8 +12,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 - Image input (#28). The models read images with their own vision tower,
   which `tools/convert_vision.py` writes to a vision file (float16, 0.67 GB
-  for the 4B, 0.92 GB for the others) that `raceline pull` fetches with the
-  model. The terminal agent takes `--image FILE` and `/image FILE`, and its
+  for the 4B, about 0.9 GB for the others) that `raceline pull` fetches with
+  the model. The terminal agent takes `--image FILE` and `/image FILE`, and its
   `read_file` shows the model image files; the server reads OpenAI's
   `image_url` parts with a data URL and Anthropic's base64 `image` blocks, in
   user messages and tool results. An image is scaled down to a megapixel at

@@ -664,7 +664,9 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
   Images, but not video.
 - Images go through the vision tower in MLX rather than the engine: 0.6 to
   1.1 s per screenshot, and the tower stays in memory (0.67 GB for the 4B,
-  about 0.9 GB for the others) once an image has come.
+  about 0.9 GB for the others) once an image has come; with a mixture of
+  experts whose experts are on disk it is read in again for each request
+  that has one (0.1 to 0.3 s) and its memory handed back after.
 - The 27B conversion loses more quality than MLX's 4-bit format does (KL
   0.148 against 0.105 nats to the float model on held-out text, #15; a
   power-of-two scale per 32 weights, which the accelerators could apply, did

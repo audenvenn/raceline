@@ -17,6 +17,16 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   now refuses it when it opens and names a context that fits with room for
   images (`--ctx 32768` there; 62208 is the limit). `RACELINE_ANY_SIZE=1`
   loads it anyway.
+- Clearer errors for image parts that cannot be read: invalid base64 is
+  refused as such (it was decoded leniently, so `!!!` became an empty image),
+  and data that is not an image no longer shows a Python object's address.
+
+### Changed
+
+- With a mixture of experts whose experts are on disk, the vision tower's
+  memory (0.9 GB) is handed back after each request that used it: the engine
+  sized its expert cache without it, and on a 16 GB Mac there is no room to
+  spare. Reading it in again takes 0.1 to 0.3 s.
 
 ## [0.7.0] - 2026-11-13
 

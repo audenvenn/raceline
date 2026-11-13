@@ -3,13 +3,13 @@
   "model": "models/qwen3.6-35b-a3b.rlm",
   "backend": "raceline",
   "mtp": true,
-  "load_s": 0.8979754580068402,
+  "load_s": 0.8824164170073345,
   "prompt_tokens": 1024,
   "gen_tokens": 128,
   "corpus": "stdlib",
   "samples": 1,
-  "prefill_tps": 1146.7789310266442,
-  "decode_tps": 110.47512795404351,
+  "prefill_tps": 1171.132497948526,
+  "decode_tps": 118.01015067974627,
   "tokens": [
    318,
    17,
@@ -28,20 +28,20 @@
    681,
    198
   ],
-  "drafts_accepted": 0.7037037037037037,
-  "peak_gb": 14.35957284
+  "drafts_accepted": 0.7364341085271318,
+  "peak_gb": 14.360588624
  },
  {
   "model": "models/qwen3.6-35b-a3b.rlm",
   "backend": "raceline",
   "mtp": true,
-  "load_s": 0.7952956670196727,
+  "load_s": 0.8072318329941481,
   "prompt_tokens": 4096,
   "gen_tokens": 128,
   "corpus": "stdlib",
   "samples": 1,
-  "prefill_tps": 1649.8428978699776,
-  "decode_tps": 70.50454356336306,
+  "prefill_tps": 1542.328293488035,
+  "decode_tps": 74.54169596051317,
   "tokens": [
    13514,
    264,
@@ -60,7 +60,7 @@
    2424,
    364
   ],
-  "drafts_accepted": 0.6138613861386139,
-  "peak_gb": 14.358442392
+  "drafts_accepted": 0.6526315789473685,
+  "peak_gb": 14.361194808
  }
 ]

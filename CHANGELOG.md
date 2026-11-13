@@ -10,6 +10,18 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ### Fixed
 
+- Mixture-of-experts models with experts on disk ran well below their speed,
+  by an amount that changed from session to session (#47). Every MoE layer
+  makes the GPU wait while the CPU reads the missing experts, and the GPU's
+  power management takes those waits for idleness and lowers the GPU's
+  performance. While such passes come in, the engine now keeps a small
+  kernel running on a command queue of its own (`RACELINE_GPU_KEEPALIVE=0`
+  turns it off). Qwen3.6-35B-A3B on a 24 GB Mac: chat answers at 61 to 72
+  tok/s instead of 45 to 52, about 55 tok/s without drafts instead of 32 to
+  44; as a 16 GB Mac would run it, 30.1 tok/s instead of 15.6 (39.8 with
+  drafts instead of 28.1). Dense models wait for nothing inside a pass and
+  are unchanged.
+
 - `bench/agent_eval.py`: the `write-tests` task counted only test
   functions at module level, so tests written as a `unittest.TestCase`
   (as both 35B-A3B models wrote them) failed although they ran and caught

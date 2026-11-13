@@ -1,0 +1,38 @@
+# The GPU keep-alive (#47), M6 Mac mini 24 GB, 2026-11-13. raceline-engine bench, throughput from GPU time; on/off alternated (RACELINE_GPU_KEEPALIVE=0).
+# Dense models with an external light kernel alongside (no keep-alive in the engine for them). Output as printed.
+== tiny MoE, 512 tokens without drafts
+resident:            warm prefill: 128 89717.0 tok/s) warm decode:  512 1247.9 tok/s; 512 passes) 
+offloaded, keep-alive: warm prefill: 128 31895.7 tok/s) warm decode:  512 707.8 tok/s; 512 passes) 
+offloaded, without:    warm prefill: 128 23008.1 tok/s) warm decode:  512 334.5 tok/s; 512 passes) 
+resident:            warm prefill: 128 90294.5 tok/s) warm decode:  512 1253.0 tok/s; 512 passes) 
+offloaded, keep-alive: warm prefill: 128 72913.7 tok/s) warm decode:  512 892.4 tok/s; 512 passes) 
+offloaded, without:    warm prefill: 128 22955.7 tok/s) warm decode:  512 307.3 tok/s; 512 passes) 
+== Qwen3.6-35B-A3B, experts on disk
+drafts 0, keep-alive: warm prefill: 1024 1101.0 tok/s) warm decode:  256 56.1 tok/s; 256 passes) 
+drafts 0, without:    warm prefill: 1024 1088.6 tok/s) warm decode:  256 44.2 tok/s; 256 passes) 
+drafts 4, keep-alive: warm prefill: 1024 1100.2 tok/s) warm decode:  256 121.8 tok/s; 57 passes) 
+drafts 4, without:    warm prefill: 1024 1077.0 tok/s) warm decode:  256 116.0 tok/s; 57 passes) 
+drafts 0, keep-alive: warm prefill: 1024 1105.1 tok/s) warm decode:  256 56.6 tok/s; 256 passes) 
+drafts 0, without:    warm prefill: 1024 1057.0 tok/s) warm decode:  256 44.4 tok/s; 256 passes) 
+drafts 4, keep-alive: warm prefill: 1024 1096.3 tok/s) warm decode:  256 122.0 tok/s; 57 passes) 
+drafts 4, without:    warm prefill: 1024 1085.7 tok/s) warm decode:  256 116.4 tok/s; 57 passes) 
+== a 16 GB Mac (5.79 GB of experts, misses past the file cache), drafts 0 / 4
+drafts 0, keep-alive: warm prefill: 1024 780.9 tok/s) warm decode:  256 24.1 tok/s; 256 passes) 
+drafts 0, without:    warm prefill: 1024 776.1 tok/s) warm decode:  256 15.6 tok/s; 256 passes) 
+drafts 4, keep-alive: warm prefill: 1024 763.6 tok/s) warm decode:  256 30.1 tok/s; 57 passes) 
+drafts 4, without:    warm prefill: 1024 765.4 tok/s) warm decode:  256 28.2 tok/s; 57 passes) 
+== dense models: an external keep-alive alongside, or not
+qwen3.5-4b.rot drafts 0, alone:          warm prefill: 1024 2045.6 tok/s) warm decode:  256 51.4 tok/s; 256 passes) 
+qwen3.5-4b.rot drafts 0, with keep-alive: warm prefill: 1024 1964.1 tok/s) warm decode:  256 50.7 tok/s; 256 passes) 
+qwen3.5-4b.rot drafts 6, alone:          warm prefill: 1024 1967.2 tok/s) warm decode:  256 163.0 tok/s; 42 passes) 
+qwen3.5-4b.rot drafts 6, with keep-alive: warm prefill: 1024 1905.1 tok/s) warm decode:  256 158.6 tok/s; 42 passes) 
+qwen3.5-9b drafts 0, alone:          warm prefill: 1024 1119.2 tok/s) warm decode:  256 31.9 tok/s; 256 passes) 
+qwen3.5-9b drafts 0, with keep-alive: warm prefill: 1024 996.8 tok/s) warm decode:  256 30.9 tok/s; 256 passes) 
+qwen3.5-9b drafts 6, alone:          warm prefill: 1024 1086.9 tok/s) warm decode:  256 96.2 tok/s; 43 passes) 
+qwen3.5-9b drafts 6, with keep-alive: warm prefill: 1024 955.8 tok/s) warm decode:  256 90.7 tok/s; 43 passes) 
+== done 09:01
+
+# Before the fix: Qwen3.6-35B-A3B without drafts alone, then with an external light kernel (1024 or 4096 threads) running alongside
+alone, no drafts:  32.5 tok/s; drafts: 109.7 tok/s; prefill 1055 tok/s
+external 1024 threads: 51.7 tok/s; drafts 113.2 tok/s; prefill 1122 tok/s
+external 4096 threads: 48.8 tok/s; drafts 110.0 tok/s; prefill 1122 tok/s

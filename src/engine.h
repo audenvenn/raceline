@@ -30,6 +30,25 @@ class Engine {
   // the last one. The pointer stays valid until the next call.
   const float *forward(const int32_t *tokens, int T);
 
+  // Rows of a chunk that carry an image instead of a token's table row: rows
+  // [first, first + rows) of the chunk are the vision tower's output rows
+  // [offset, offset + rows) of an image `width` merged patches wide. An image
+  // continued from the previous chunk (offset > 0) starts the chunk.
+  struct ImageRows { int first, rows, offset, width; };
+  // forward() with rows given as vectors: `embeds` holds the spans' rows in
+  // order, [rows][hidden] floats in the model's own basis (the engine rotates
+  // them for a rotated model). Rotary positions follow Qwen3.5's M-RoPE: the
+  // patch in row r, column c of an image sits at (time, height, width) =
+  // (s, s + r, s + c), s being where a text token would have been, and the
+  // text after the image goes on from one past the largest of them.
+  const float *forward_embeds(const int32_t *tokens, int T, const ImageRows *spans, int n_spans,
+                              const float *embeds);
+  // Rotary position (time, height, width) of context position p < position().
+  void rope_position(int p, int32_t out[3]) const;
+  // What the attention layers rotate context position p by: cos then sin of
+  // the 32 rotary frequencies (for checks against a reference).
+  void rope_angles(int p, float out[64]) const;
+
   // Greedy pick from the logits of the last forward().
   int argmax() const;
 
@@ -56,7 +75,8 @@ class Engine {
 
   // Attention entries of positions [from, to) in every attention layer, the
   // draft head's included, in whole blocks of 256 positions (from rounded
-  // down, to up). With a saved state they set a conversation aside: after
+  // down, to up), with the positions' rotary positions. With a saved state
+  // they set a conversation aside: after
   // another one has used the context, load_kv puts its entries back and
   // load_state continues it, provided the positions before the first block
   // still hold the same tokens.
@@ -139,9 +159,15 @@ class Engine {
   // Tensor name of a layer's part; layer == config().layers is the MTP head's decoder layer.
   std::string lname(int layer, const char *suffix) const;
   bool is_linear(int layer) const { return layer < config().layers && config().is_linear_layer(layer); }
-  const float *run(const int32_t *tokens, int T, bool spec);
+  const float *run(const int32_t *tokens, int T, bool spec, const ImageRows *spans = nullptr, int n_spans = 0);
+  // Rotary positions of context positions p0 .. p0+T-1: text, or the spans' image rows (chunk rows).
+  void set_positions(int p0, int T, const ImageRows *spans = nullptr, int n_spans = 0);
+  int32_t text_position(int p) const;  // a text token's at context position p
+  void rope_row(int p, float *out) const;  // cos[32], sin[32] of context position p
   void fill_rope(id<MTLBuffer> buf, int pos0, int T);
   void encode_embed(id<MTLBuffer> tok, int T);
+  // Rows of h_ from emb_ for the spans of this pass: chunk row i -> h_ row i + shift, rows < M.
+  void encode_image_rows(int shift, int M);
   void encode_linear(const QTensor &w, int rows, id<MTLBuffer> out, size_t out_offset, int out_stride,
                      bool accum, const char *what);
   // which: 0 = a layer's input norm, 1 = its post-attention norm, 2 = the final norm.
@@ -164,7 +190,7 @@ class Engine {
   void encode_mtp_hidden(id<MTLBuffer> src, const FTensor &w1, int rows, int first_row);
   // The head from its input projection on, for M rows whose next tokens are
   // in mtp_tok_ and whose hidden halves are in xn_; positions pos0.. .
-  void encode_mtp_layer(int M, int pos0, bool logits);
+  void encode_mtp_layer(int M, int pos0, bool logits, int image_shift = 0);  // image rows: chunk row i -> head row i + image_shift
   // Runs the head over n_carry rows of mtp_h_ followed by n_chunk rows of h_,
   // after saving row keep_row of h_.
   void encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits);
@@ -182,6 +208,13 @@ class Engine {
   std::unique_ptr<ModelFile> model_;
   int max_ctx_, max_chunk_, rows_cap_;
   int pos_ = 0;
+  // Rotary position (time, height, width) of every context position, and of
+  // the positions drafts may reach past them; all three equal for text.
+  std::vector<int32_t> rpos_;
+  // The image rows of the pass being encoded (forward_embeds): the spans, and
+  // their vectors in emb_ ([max_chunk_][hidden] floats, rotated as the model is).
+  std::vector<ImageRows> spans_;
+  id<MTLBuffer> emb_ = nil, emb_rot_ = nil;  // emb_rot_: the rotation's signs / sqrt(block)
   double gpu_seconds_ = 0;
   std::string dump_dir_;
   std::string repeat_;

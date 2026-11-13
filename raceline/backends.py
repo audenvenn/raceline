@@ -16,7 +16,7 @@ from __future__ import annotations
 import contextlib
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 
 @contextlib.contextmanager
@@ -60,6 +60,19 @@ class Snapshot:
     nbytes: int
 
 
+@dataclass
+class ImageRows:
+    """Rows of the tokens given to prefill() that carry an image instead: rows
+    [start, start + len(vectors)) are rows [offset, offset + len(vectors)) of
+    an image `width` merged patches wide, `vectors` [rows][hidden] float32 from
+    the vision tower (raceline.vision). An image cut off at the start of the
+    tokens continues one already in the context (offset > 0, start 0)."""
+    start: int
+    vectors: Any
+    width: int
+    offset: int = 0
+
+
 class Backend:
     """Interface. `position` is the number of tokens in the context."""
 
@@ -72,8 +85,12 @@ class Backend:
     def reset(self) -> None:
         raise NotImplementedError
 
-    def prefill(self, tokens: list, progress: Optional[Callable[[int, int], None]] = None) -> None:
-        """Appends tokens to the context."""
+    # Whether prefill() takes images (the token id their rows hold, else None).
+    image_token: Optional[int] = None
+
+    def prefill(self, tokens: list, progress: Optional[Callable[[int, int], None]] = None,
+                images: Sequence[ImageRows] = ()) -> None:
+        """Appends tokens to the context; `images` replaces some of their rows."""
         raise NotImplementedError
 
     def generate(self, sampling: Sampling, max_tokens: int, history: list) -> Iterator[int]:
@@ -129,7 +146,9 @@ class MLXBackend(Backend):
         self.position = 0
         self._logits = None
 
-    def prefill(self, tokens, progress=None) -> None:
+    def prefill(self, tokens, progress=None, images=()) -> None:
+        if images:
+            raise ValueError("image input needs raceline's engine (a .rlm model)")
         mx = self._mx
         for i in range(0, len(tokens), self.PREFILL_CHUNK):
             part = tokens[i:i + self.PREFILL_CHUNK]

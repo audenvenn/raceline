@@ -213,6 +213,22 @@ kernel void mtp_hidden_rot(device const float *x [[buffer(0)]],
   for (int k = int(tid); k < ROT_D; k += ROT_THREADS) o[k] = half(v[k] * w2[k] * inv2);
 }
 
+// Rows given to the model from outside (an image's embeddings) into its
+// rotated residual stream, in place: x -> x Q = FWHT(x * s) / sqrt(ROT_BLOCK)
+// per block (s2 = s / sqrt(ROT_BLOCK)).
+kernel void rotate_rows(device float *x [[buffer(0)]],
+                        device const float *s2 [[buffer(1)]],
+                        constant CopyParams &p [[buffer(2)]],
+                        uint3 tg [[threadgroup_position_in_grid]],
+                        uint tid [[thread_index_in_threadgroup]])
+{
+  threadgroup float v[ROT_D];
+  device float *row = x + size_t(tg.y) * p.D;
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) v[k] = row[k] * s2[k];
+  fwht_blocks(v, tid);
+  for (int k = int(tid); k < ROT_D; k += ROT_THREADS) row[k] = v[k];
+}
+
 // The draft head's output on its way into the model's output head, which
 // expects the rotated stream with the final norm folded in:
 //   out = FWHT((u / rms(u)) * g) * c,   g = (wm / wf) * s / sqrt(ROT_BLOCK)

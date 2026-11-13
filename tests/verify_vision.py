@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """raceline/vision.py against transformers' Qwen3.5 vision model (a reference run saved by the caller).
 
-  .venv/bin/python tests/verify_vision.py models/Qwen3.5-4B image.png ref_dir
+  .venv/bin/python tests/verify_vision.py VISION image.png ref_dir
+
+VISION is a vision file (tools/convert_vision.py) or the original checkpoint directory.
 
 ref_dir holds pixel_values.npy, grid_thw.npy and embeds.npy from transformers' image processor and
-Qwen3_5VisionModel in float32 (see the script that made them). Checks the patches and the tower's output
+Qwen3_5VisionModel in float32 (tests/reference_image.py --tower). Checks the patches and the tower's output
 in float32, then in float16 (what raceline runs).
 """
 

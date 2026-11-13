@@ -22,6 +22,14 @@ int rl_position(const rl_engine *e) { return e->engine.position(); }
 void rl_reset(rl_engine *e) { e->engine.reset(); }
 
 const float *rl_forward(rl_engine *e, const int32_t *tokens, int n) { return e->engine.forward(tokens, n); }
+const float *rl_forward_embeds(rl_engine *e, const int32_t *tokens, int n, const int32_t *spans, int n_spans,
+                               const float *embeds) {
+  static_assert(sizeof(rl::Engine::ImageRows) == 4 * sizeof(int32_t), "ImageRows is four ints");
+  return e->engine.forward_embeds(tokens, n, (const rl::Engine::ImageRows *)spans, n_spans, embeds);
+}
+void rl_rope_position(const rl_engine *e, int p, int32_t *out3) { e->engine.rope_position(p, out3); }
+void rl_rope_angles(const rl_engine *e, int p, float *out64) { e->engine.rope_angles(p, out64); }
+void rl_set_dump_dir(rl_engine *e, const char *dir) { e->engine.set_dump_dir(dir ? dir : ""); }
 int rl_argmax(const rl_engine *e) { return e->engine.argmax(); }
 double rl_last_gpu_seconds(const rl_engine *e) { return e->engine.last_gpu_seconds(); }
 

@@ -15,10 +15,19 @@ tests/verify_vision.py checks it against them.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
+import os
 from typing import Optional
 
 import numpy as np
+
+FORMAT = "raceline-vision-1"     # metadata["format"] of a vision file (tools/convert_vision.py)
+# Pixels an image is scaled down to at most (RACELINE_IMAGE_PIXELS overrides). The
+# checkpoints accept up to 16.7 million, 16384 rows of context; a megapixel is
+# 1024 rows (a 1280 x 800 screenshot: 1000), what an agent can afford per image.
+MAX_PIXELS = 1 << 20
 
 
 def smart_resize(height: int, width: int, factor: int = 32, min_pixels: int = 65536,
@@ -69,9 +78,11 @@ def _block_order(gh: int, gw: int, merge: int) -> tuple:
 
 class VisionTower:
     """The tower's weights and its forward pass. `weights` maps the checkpoint's names below
-    `model.visual.` (blocks.0.attn.qkv.weight, ...) to arrays."""
+    `model.visual.` (blocks.0.attn.qkv.weight, ...) to arrays; `processor` holds the image
+    processor's settings and `tokens` the image token ids (see tools/convert_vision.py)."""
 
-    def __init__(self, config: dict, weights: dict, dtype=None):
+    def __init__(self, config: dict, weights: dict, dtype=None, processor: Optional[dict] = None,
+                 tokens: Optional[dict] = None, source: str = ""):
         import mlx.core as mx
 
         self.mx = mx
@@ -79,14 +90,38 @@ class VisionTower:
         self.hidden = config["hidden_size"]
         self.heads = config["num_heads"]
         self.depth = config["depth"]
+        self.out_hidden = config.get("out_hidden_size")
         self.merge = config.get("spatial_merge_size", 2)
         self.patch = config.get("patch_size", 16)
         self.temporal = config.get("temporal_patch_size", 2)
         self.side = int(math.isqrt(config.get("num_position_embeddings", 2304)))
         self.theta = float((config.get("rope_parameters") or {}).get("rope_theta", 10000.0))
-        w = {k: mx.array(np.asarray(v, dtype=np.float32)).astype(self.dtype) for k, v in weights.items()}
+        self.processor = dict(processor or {})
+        self.tokens = dict(tokens or {})
+        self.source = source
+        # Float16 throughout: 8-bit matrices (groups of 64) cost the output 100 times the error
+        # (cosine to a float32 reference 0.998, the worst row 0.97, against 0.99998 and 0.9997).
+        w = {k: (v if isinstance(v, mx.array) else mx.array(np.asarray(v, dtype=np.float32))).astype(self.dtype)
+             for k, v in weights.items()}
         w["patch_embed.proj.weight"] = w["patch_embed.proj.weight"].reshape(self.hidden, -1)
         self.w = w
+        mx.eval(list(w.values()))
+
+    def linear(self, x, name: str):
+        """x @ W.T + b for the matrix `name`, in float32 out."""
+        w = self.w
+        return (x.astype(self.dtype) @ w[name + ".weight"].T + w[name + ".bias"]).astype(self.mx.float32)
+
+    def encode(self, image, max_pixels: Optional[int] = None) -> tuple:
+        """A PIL image -> (vectors [rows][text hidden] float32, width in merged patches)."""
+        p = self.processor
+        if max_pixels is None:
+            max_pixels = int(os.environ.get("RACELINE_IMAGE_PIXELS", MAX_PIXELS))
+        px, grid = preprocess(image, self.patch, self.merge, self.temporal,
+                              min_pixels=int(p.get("min_pixels") or 65536),
+                              max_pixels=min(max_pixels, int(p.get("max_pixels") or max_pixels)),
+                              mean=float((p.get("image_mean") or [0.5])[0]), std=float((p.get("image_std") or [0.5])[0]))
+        return np.array(self(px, grid)), grid[2] // self.merge
 
     def _pos_embed(self, gh: int, gw: int):
         """The learned side x side table resampled bilinearly (corners aligned) to gh x gw, in block order."""
@@ -126,8 +161,7 @@ class VisionTower:
             raise ValueError("one image at a time (video is not supported)")
         n, d, heads = gh * gw, self.hidden, self.heads
         hd = d // heads
-        x = mx.array(np.asarray(patches, dtype=np.float32)).astype(self.dtype)
-        x = (x @ w["patch_embed.proj.weight"].T + w["patch_embed.proj.bias"]).astype(mx.float32)
+        x = self.linear(mx.array(np.asarray(patches, dtype=np.float32)), "patch_embed.proj")
         x = x + self._pos_embed(gh, gw)
         cos, sin = self._rotary(gh, gw)
 
@@ -139,40 +173,74 @@ class VisionTower:
         for i in range(self.depth):
             p = f"blocks.{i}."
             h = mx.fast.layer_norm(x, w[p + "norm1.weight"].astype(mx.float32), w[p + "norm1.bias"].astype(mx.float32), 1e-6)
-            qkv = (h.astype(self.dtype) @ w[p + "attn.qkv.weight"].T + w[p + "attn.qkv.bias"]).astype(mx.float32)
+            qkv = self.linear(h, p + "attn.qkv")
             qkv = qkv.reshape(n, 3, heads, hd).transpose(1, 2, 0, 3)     # 3, heads, N, hd
             q, k, v = rope(qkv[0]), rope(qkv[1]), qkv[2]
-            a = mx.fast.scaled_dot_product_attention(q[None], k[None], v[None], scale=hd ** -0.5)[0]
+            # Queries a block at a time: the scores of a megapixel image (4096 patches) would be 1 GB at once.
+            a = mx.concatenate([mx.fast.scaled_dot_product_attention(q[None, :, r:r + 1024], k[None], v[None],
+                                                                     scale=hd ** -0.5)[0]
+                                for r in range(0, n, 1024)], axis=1)
             a = a.transpose(1, 0, 2).reshape(n, d)
-            x = x + (a.astype(self.dtype) @ w[p + "attn.proj.weight"].T + w[p + "attn.proj.bias"]).astype(mx.float32)
+            x = x + self.linear(a, p + "attn.proj")
             h = mx.fast.layer_norm(x, w[p + "norm2.weight"].astype(mx.float32), w[p + "norm2.bias"].astype(mx.float32), 1e-6)
-            u = (h.astype(self.dtype) @ w[p + "mlp.linear_fc1.weight"].T + w[p + "mlp.linear_fc1.bias"]).astype(mx.float32)
+            u = self.linear(h, p + "mlp.linear_fc1")
             u = 0.5 * u * (1 + mx.tanh(math.sqrt(2 / math.pi) * (u + 0.044715 * u * u * u)))   # gelu, tanh form
-            x = x + (u.astype(self.dtype) @ w[p + "mlp.linear_fc2.weight"].T + w[p + "mlp.linear_fc2.bias"]).astype(mx.float32)
+            x = x + self.linear(u, p + "mlp.linear_fc2")
             mx.eval(x)
         h = mx.fast.layer_norm(x, w["merger.norm.weight"].astype(mx.float32), w["merger.norm.bias"].astype(mx.float32), 1e-6)
         h = h.reshape(n // (self.merge * self.merge), -1)
-        h = (h.astype(self.dtype) @ w["merger.linear_fc1.weight"].T + w["merger.linear_fc1.bias"]).astype(mx.float32)
+        h = self.linear(h, "merger.linear_fc1")
         h = 0.5 * h * (1 + mx.erf(h / math.sqrt(2)))                                          # gelu, exact
-        out = (h.astype(self.dtype) @ w["merger.linear_fc2.weight"].T + w["merger.linear_fc2.bias"]).astype(mx.float32)
+        out = self.linear(h, "merger.linear_fc2")
         mx.eval(out)
         return out
 
 
-def load_tower(model_dir: str, dtype=None) -> Optional[VisionTower]:
-    """The tower of an original checkpoint directory (safetensors), or None if it has none."""
-    import json
-    import os
-
-    cfg = json.load(open(os.path.join(model_dir, "config.json")))
-    if "vision_config" not in cfg:
-        return None
-    index = json.load(open(os.path.join(model_dir, "model.safetensors.index.json")))["weight_map"]
+def load_tower(path: str, dtype=None) -> Optional[VisionTower]:
+    """The tower in a vision file (tools/convert_vision.py), or in an original checkpoint
+    directory; None if a checkpoint has none."""
     import mlx.core as mx
 
+    if os.path.isfile(path):
+        weights, meta = mx.load(path, return_metadata=True)
+        if meta.get("format") != FORMAT:
+            raise ValueError(f"{path} is not a raceline vision file")
+        return VisionTower(json.loads(meta["config"]), weights, dtype, json.loads(meta["processor"]),
+                           json.loads(meta["tokens"]), meta.get("source", ""))
+    cfg = json.load(open(os.path.join(path, "config.json")))
+    if "vision_config" not in cfg:
+        return None
+    index = json.load(open(os.path.join(path, "model.safetensors.index.json")))["weight_map"]
     weights = {}
     for shard in sorted({s for n, s in index.items() if n.startswith("model.visual.")}):
-        for name, arr in mx.load(os.path.join(model_dir, shard)).items():
+        for name, arr in mx.load(os.path.join(path, shard)).items():
             if name.startswith("model.visual."):
-                weights[name[len("model.visual."):]] = np.array(arr.astype(mx.float32))
-    return VisionTower(cfg["vision_config"], weights, dtype)
+                weights[name[len("model.visual."):]] = arr
+    proc = json.load(open(os.path.join(path, "preprocessor_config.json")))
+    size = proc.get("size") or {}
+    processor = {"min_pixels": size.get("shortest_edge"), "max_pixels": size.get("longest_edge"),
+                 "image_mean": proc.get("image_mean"), "image_std": proc.get("image_std")}
+    return VisionTower(cfg["vision_config"], weights, dtype, processor, {"image_pad": cfg.get("image_token_id")},
+                       os.path.basename(os.path.normpath(path)))
+
+
+def find_vision(model_path: str) -> Optional[str]:
+    """The vision file of a model file: $RACELINE_VISION, or <name>.vision.safetensors next to it,
+    variant suffixes of the name (".rot", ".fp4") dropped one at a time."""
+    env = os.environ.get("RACELINE_VISION")
+    if env:
+        return env
+    stem = model_path[:-4] if model_path.endswith(".rlm") else model_path
+    while True:
+        candidate = stem + ".vision.safetensors"
+        if os.path.isfile(candidate):
+            return candidate
+        head, dot, tail = stem.rpartition(".")
+        if not dot or not tail.isalnum() or not head or head.endswith("/"):
+            return None
+        stem = head
+
+
+def image_digest(data: bytes) -> int:
+    """A number naming an image's content (its file bytes), for telling images apart in a context."""
+    return int.from_bytes(hashlib.sha256(data).digest()[:6], "big")

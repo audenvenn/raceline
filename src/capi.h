@@ -23,6 +23,21 @@ void rl_reset(rl_engine *e);
 // Appends n tokens (1 <= n <= max_chunk) and returns the logits of the last
 // one: rl_vocab() floats, valid until the next call on this engine.
 const float *rl_forward(rl_engine *e, const int32_t *tokens, int n);
+// rl_forward with some rows given as vectors, an image's embeddings: n_spans
+// spans of four ints (first row in the chunk, rows, index of the first one in
+// its image, the image's width in merged patches; see Engine::ImageRows) and
+// the spans' vectors in order, [rows][rl_hidden_size()] floats in the model's
+// own basis.
+const float *rl_forward_embeds(rl_engine *e, const int32_t *tokens, int n, const int32_t *spans, int n_spans,
+                               const float *embeds);
+// Rotary position (time, height, width) of context position p.
+void rl_rope_position(const rl_engine *e, int p, int32_t *out3);
+// What attention rotates context position p by: cos then sin of the 32
+// rotary frequencies (64 floats).
+void rl_rope_angles(const rl_engine *e, int p, float *out64);
+// Debug: every forward also writes the residual stream after each layer to
+// <dir>/layer_NN.f32 ([n][hidden] float32) and logits.f32 (NULL or "": off).
+void rl_set_dump_dir(rl_engine *e, const char *dir);
 int rl_argmax(const rl_engine *e);
 double rl_last_gpu_seconds(const rl_engine *e);
 

@@ -255,6 +255,41 @@ struct Engine::ExpertCache {
     busy_need.swap(need);
   }
 
+  // A fresh cache is empty, and the first prompt would read nearly every
+  // expert from the SSD (Qwen3.6-35B-A3B on a 24 GB Mac: a 1024-token prompt
+  // in 3.2 s instead of 1.2). So when no request is waiting, the worker reads
+  // experts into the free slots, a step of at most 64 at a time (about 100 MB),
+  // layer by layer, at the cold end of the recency order: a request that comes
+  // in waits for one step at most, and nothing is ever evicted for it.
+  // RACELINE_EXPERT_PRELOAD=0 turns it off.
+  bool preload_on = false;
+  int pl_layer = 0, pl_e = 0;
+  std::atomic<uint64_t> preloaded{0};
+  bool preload_step() {   // -> whether there is more to do
+    if (next_free >= slots || pl_layer >= layers) return false;
+    int32_t *t = tab(pl_layer);
+    std::vector<std::pair<int, int>> todo;   // (expert, slot)
+    for (; pl_e < E && next_free < slots && todo.size() < 64; pl_e++) {
+      if (t[pl_e] >= 0) continue;            // a request brought it in already
+      const int slot = next_free++;
+      owner[slot] = {pl_layer, pl_e};
+      insert(slot, false);
+      todo.push_back({pl_e, slot});
+    }
+    const int layer = pl_layer;
+    if (!todo.empty()) {
+      dispatch_apply(todo.size(), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0),
+                     ^(size_t j) { load(layer, todo[j].first, todo[j].second); });
+      for (auto [e, slot] : todo) t[e] = slot;   // only once read: a pass may look any time after
+      preloaded += todo.size();
+    }
+    if (pl_e >= E) {
+      pl_e = 0;
+      pl_layer++;
+    }
+    return next_free < slots && pl_layer < layers;
+  }
+
   // While the GPU computes a prompt chunk's layer, the next layer's experts
   // that are not cached: a chunk of 4 * E / topk rows or more needs about 98%
   // of them, and reading them now overlaps the reads with the GPU's work.
@@ -270,8 +305,13 @@ struct Engine::ExpertCache {
       Request r;
       {
         std::unique_lock<std::mutex> lock(mu);
-        cv.wait(lock, [&] { return stop || !queue.empty(); });
+        cv.wait(lock, [&] { return stop || !queue.empty() || preload_on; });
         if (stop) return;
+        if (queue.empty()) {                 // nothing waiting: a step of the preload
+          lock.unlock();
+          preload_on = preload_step();
+          continue;
+        }
         r = queue.front();
         queue.pop_front();
       }
@@ -458,6 +498,8 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       x.next_free = c.layers;
       x.sel = moe_sel_;
       x.ev = [mt_.device() newSharedEvent];
+      x.preload_on = !(getenv("RACELINE_EXPERT_PRELOAD") && *getenv("RACELINE_EXPERT_PRELOAD") &&
+                       !atoi(getenv("RACELINE_EXPERT_PRELOAD")));
       x.worker = std::thread([&x] { x.run(); });
       if (const char *v = getenv("RACELINE_GPU_KEEPALIVE"); !(v && *v && !atoi(v))) {
         x.ka_queue = [mt_.device() newCommandQueue];

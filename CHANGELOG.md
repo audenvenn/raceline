@@ -8,6 +8,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-13
+
 ### Fixed
 
 - Mixture-of-experts models with experts on disk ran well below their speed,
@@ -32,6 +34,9 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 - `raceline pull` without a model marks a mixture of experts whose experts
   stay partly on the SSD by the rule the engine applies (the memory the GPU
   may use, not the Mac's); Qwen3.6-35B-A3B went unmarked on a 24 GB Mac.
+
+- `tests/check_moe.py` removes its work directory (about 800 MB) after a
+  pass instead of leaving it in the temporary directory.
 
 ## [0.5.0] - 2026-11-13
 
@@ -293,7 +298,8 @@ First public release.
 - Project infrastructure: CI, contribution guide, security policy, issue and
   pull-request templates.
 
-[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/audenvenn/raceline/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/audenvenn/raceline/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/audenvenn/raceline/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/audenvenn/raceline/compare/v0.2.0...v0.3.0

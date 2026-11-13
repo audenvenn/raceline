@@ -685,6 +685,13 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 - Converted files are published for the models named above; anything else
   has to be converted locally from the original checkpoint.
 
+## Related
+
+[h3metal](https://github.com/audenvenn/h3metal): image generation on the
+matrix units of M5/M6 Macs with its own Metal engine. It runs FLUX.2 [klein]
+4B/9B, Z-Image-Turbo and MiniMax-H3-Image with LoRA adapters, 2.1-2.3x
+faster than mflux.
+
 ## Contributing
 
 Issues and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has

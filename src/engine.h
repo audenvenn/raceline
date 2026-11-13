@@ -73,6 +73,14 @@ class Engine {
   void save_state(void *dst) const;
   void load_state(const void *src, int position);
 
+  // A snapshot inside the next forward(): the recurrent state as it is before
+  // row `row` (1 .. T-1) of that pass, which save_mark() then writes as
+  // save_state() would have after a pass that ended there (load_state takes
+  // it, with mark_position()). One mark per pass; 0 clears it.
+  void set_mark(int row);
+  void save_mark(void *dst) const;
+  int mark_position() const { return mark_pos_; }
+
   // Attention entries of positions [from, to) in every attention layer, the
   // draft head's included, in whole blocks of 256 positions (from rounded
   // down, to up), with the positions' rotary positions. With a saved state
@@ -208,6 +216,11 @@ class Engine {
   std::unique_ptr<ModelFile> model_;
   int max_ctx_, max_chunk_, rows_cap_;
   int pos_ = 0;
+  // The mark of the next pass (set_mark) and the position of the last one kept (-1: none); its
+  // state per linear layer (conv window, DeltaNet matrices) and the draft head's waiting row.
+  int mark_row_ = 0, mark_pos_ = -1;
+  std::vector<id<MTLBuffer>> mark_conv_, mark_S_;
+  id<MTLBuffer> mark_h_ = nil;
   // Rotary position (time, height, width) of every context position, and of
   // the positions drafts may reach past them; all three equal for text.
   std::vector<int32_t> rpos_;

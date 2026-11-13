@@ -34,6 +34,9 @@ int rl_argmax(const rl_engine *e) { return e->engine.argmax(); }
 double rl_last_gpu_seconds(const rl_engine *e) { return e->engine.last_gpu_seconds(); }
 
 size_t rl_state_bytes(const rl_engine *e) { return e->engine.state_bytes(); }
+void rl_set_mark(rl_engine *e, int row) { e->engine.set_mark(row); }
+void rl_save_mark(const rl_engine *e, void *dst) { e->engine.save_mark(dst); }
+int rl_mark_position(const rl_engine *e) { return e->engine.mark_position(); }
 void rl_save_state(const rl_engine *e, void *dst) { e->engine.save_state(dst); }
 void rl_load_state(rl_engine *e, const void *src, int position) { e->engine.load_state(src, position); }
 size_t rl_kv_bytes(const rl_engine *e, int from, int to) { return e->engine.kv_bytes(from, to); }

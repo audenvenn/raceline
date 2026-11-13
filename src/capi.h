@@ -45,6 +45,12 @@ double rl_last_gpu_seconds(const rl_engine *e);
 size_t rl_state_bytes(const rl_engine *e);
 void rl_save_state(const rl_engine *e, void *dst);
 void rl_load_state(rl_engine *e, const void *src, int position);
+// A snapshot inside the next pass: the state before its row `row` (1..n-1),
+// which rl_save_mark writes as rl_save_state would have at rl_mark_position()
+// after a pass that ended there (see Engine::set_mark).
+void rl_set_mark(rl_engine *e, int row);
+void rl_save_mark(const rl_engine *e, void *dst);
+int rl_mark_position(const rl_engine *e);
 // Attention entries of positions [from, to) in whole blocks of 256, for setting
 // a conversation aside and continuing it later (see Engine::save_kv).
 size_t rl_kv_bytes(const rl_engine *e, int from, int to);

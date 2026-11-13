@@ -276,7 +276,8 @@ kernel void copy_rows(device const float *src [[buffer(0)]],
 // of the grid write the next conv state (the last three pre-conv inputs).
 // With p.spec set, T more rows copy the pre-conv inputs to `keep`, from which
 // the state after any prefix of the tokens can be rebuilt (speculative rows
-// that turn out wrong are taken back).
+// that turn out wrong are taken back). With p.mark set, three more rows write
+// the state as it is before row p.mark to `at_mark` (a snapshot inside the pass).
 kernel void lin_conv(device const float *proj [[buffer(0)]],
                      device const float *st_in [[buffer(1)]],
                      device const float *cw [[buffer(2)]],
@@ -284,10 +285,17 @@ kernel void lin_conv(device const float *proj [[buffer(0)]],
                      device float *st_out [[buffer(4)]],
                      constant ConvParams &p [[buffer(5)]],
                      device float *keep [[buffer(6)]],
+                     device float *at_mark [[buffer(7)]],
                      uint2 tid [[thread_position_in_grid]])
 {
   const int c = int(tid.x), r = int(tid.y);
-  if (c >= p.C || r >= p.T + 3 + p.T * p.spec) return;
+  const int base = p.T + 3 + p.T * p.spec;
+  if (c >= p.C || r >= base + (p.mark > 0 ? 3 : 0)) return;
+  if (r >= base) {
+    const int j = r - base, tau = p.mark - 3 + j;
+    at_mark[j * p.C + c] = tau >= 0 ? proj[size_t(tau) * p.in_stride + c] : st_in[(3 + tau) * p.C + c];
+    return;
+  }
   if (r >= p.T + 3) {
     const int j = r - p.T - 3;
     keep[j * p.C + c] = proj[size_t(j) * p.in_stride + c];
@@ -358,6 +366,7 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
                         device float *yo [[buffer(4)]],
                         constant DeltaParams &p [[buffer(5)]],
                         device float *S_out [[buffer(6)]],
+                        device float *S_mark [[buffer(7)]],     // p.mark > 0: the state before that row
                         uint3 tg [[threadgroup_position_in_grid]],
                         uint lane [[thread_index_in_simdgroup]])
 {
@@ -378,6 +387,10 @@ kernel void gated_delta(device const float *qk [[buffer(0)]],
   device float *op = yo + hv * p.Dv + row;
 
   for (int t = 0; t < p.T; ++t) {
+    if (t == p.mark && t > 0) {
+      device float *mk = S_mark + at;
+      for (int e = 0; e < E; ++e) mk[e] = state[e];
+    }
     const float beta = bg[size_t(t) * p.bg_stride + hv];
     const float g = bg[size_t(t) * p.bg_stride + p.Hv + hv];
     const device float *k = kp + size_t(t) * p.qk_stride;

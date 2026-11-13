@@ -613,6 +613,41 @@ def test_session_feeds_image_rows_by_their_keys():
     assert s.backend.state == ref.state
 
 
+class MarkFakeBackend(KVFakeBackend):
+    """KVFakeBackend that snapshots inside its prefill (as the engine's marks do)."""
+
+    marks_in_passes = True
+
+    def __init__(self):
+        super().__init__()
+        self.prefills = 0
+
+    def prefill(self, tokens, progress=None, images=(), marks=()):
+        self.prefills += 1
+        snaps, done = [], 0
+        for m in sorted(marks):
+            for t in tokens[done:m]:
+                self._feed(t)
+            snaps.append(self.snapshot())
+            done = m
+        for t in tokens[done:]:
+            self._feed(t)
+        return snaps
+
+
+def test_branch_point_snapshots_come_from_inside_the_prompt_pass():
+    prompt = list(range(40, 120))
+    cut, marked = Session(KVFakeBackend()), Session(MarkFakeBackend())
+    for s in (cut, marked):
+        s.sync(prompt, (30, 70), 30)
+    assert [x.position for x in marked._snaps] == [x.position for x in cut._snaps] == [30, 70, 80]
+    assert marked.backend.state == cut.backend.state and marked.backend.prefills == 1
+    # Branching from the second point restores it and generates as a fresh run would.
+    other = prompt[:70] + [5, 6, 7]
+    assert _run(marked, other)[1] == _fresh(other)
+    assert marked._pinned == 30
+
+
 def test_transformers_notice_is_silenced_for_the_import_only():
     from raceline.backends import without_torch_notice
 

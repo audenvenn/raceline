@@ -84,6 +84,7 @@ id<MTLBuffer> Metal::alloc(size_t bytes) {
   size_t len = round_up(bytes ? bytes : 1, page_size());
   id<MTLBuffer> buf = [dev_ newBufferWithLength:len options:MTLResourceStorageModeShared];
   if (!buf) fatal("cannot allocate %zu-byte buffer", len);
+  allocated_ += len;
   return buf;
 }
 

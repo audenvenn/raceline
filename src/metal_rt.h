@@ -28,6 +28,7 @@ class Metal {
 
   // Shared-storage buffer, zero-filled, length rounded up to a whole page.
   id<MTLBuffer> alloc(size_t bytes);
+  size_t allocated() const { return allocated_; }   // bytes alloc() has handed out
 
   // Wraps existing page-aligned memory (e.g. an mmap'd weight file) without copying.
   id<MTLBuffer> wrap(void *ptr, size_t bytes);
@@ -36,6 +37,7 @@ class Metal {
   static size_t round_up(size_t x, size_t a) { return (x + a - 1) / a * a; }
 
  private:
+  size_t allocated_ = 0;
   std::string load_source(const std::string &file, int depth = 0);
 
   id<MTLDevice> dev_;

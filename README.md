@@ -406,6 +406,7 @@ Environment variables, all optional:
 | `RACELINE_IMAGE_PIXELS` | Pixels an image is scaled down to at most (default 1048576, a megapixel: 1024 rows of context; the models take up to 16.7 million). |
 | `RACELINE_VISION` | The vision file to use, when it is not the one next to the model file. |
 | `RACELINE_PARK_GB` | `raceline serve`: memory for conversations set aside while the client is in another one (default: a twelfth of the Mac's memory, at most 2; `0` keeps none). |
+| `RACELINE_ANY_SIZE` | `1` loads a model whose weights, attention cache and scratch need more GPU memory than Metal recommends for this Mac (refused by default: such a model fails halfway through a long prompt). |
 | `RACELINE_ANY_GPU` | `1` lets the engine try a Mac it does not support (before Apple M5); please report the result in #2. |
 
 ## What is checked

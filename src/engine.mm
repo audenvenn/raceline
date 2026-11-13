@@ -577,6 +577,28 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
       attn_[i] = A;
     }
   }
+
+  // Everything the GPU will hold: the weights it reads from the file (all of them, or all but the
+  // experts when they stay on disk) and what the engine allocated (attention cache, scratch, expert
+  // cache). Past Metal's recommended working set a long prompt fails with "Insufficient Memory"
+  // halfway through, so say it now, with the context that fits (Qwen3.8-27B on a 24 GB Mac: 32768
+  // tokens run, 65536 do not).
+  const double mapped = (double)model_->file_bytes() - (cache_ ? (double)model_->expert_bytes() : 0.0);
+  const double need = mapped + (double)mt_.allocated(), limit = (double)mt_.device().recommendedMaxWorkingSetSize;
+  if (need > limit && !getenv("RACELINE_ANY_SIZE")) {
+    size_t kv = 0;
+    for (const auto &A : attn_)
+      if (A) kv += A->K.length + A->V.length;
+    // The context to suggest leaves a tenth of the limit to images (the vision tower runs on the same
+    // GPU: 0.7 to 0.9 GB, about as much again while it works) and to other apps.
+    const double per_token = (double)kv / (kv_blocks_ * 256.0);
+    const int fit = (int)std::max(0.0, (0.9 * limit - (need - kv)) / per_token) / 4096 * 4096;
+    fatal("with a context of %d tokens this model needs about %.1f GB of GPU memory, more than the %.1f GB this Mac "
+          "allows; %s",
+          max_ctx_, need / 1e9, limit / 1e9,
+          fit >= 4096 ? (std::string("--ctx ") + std::to_string(fit) + " fits, with room for images").c_str()
+                      : "a smaller model fits better");
+  }
 }
 
 std::string Engine::lname(int layer, const char *suffix) const {

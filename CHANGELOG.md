@@ -14,6 +14,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   functions at module level, so tests written as a `unittest.TestCase`
   (as both 35B-A3B models wrote them) failed although they ran and caught
   the broken versions of the code. Methods of a test class count now.
+  Measured again: on the extended set Qwen3.6-35B-A3B solves 7 of 8 (0.5.0's
+  notes said 6), Qwen3.5-35B-A3B 6 (said 5), Qwen3.5-9B 6.
 
 - `raceline pull` without a model marks a mixture of experts whose experts
   stay partly on the SSD by the rule the engine applies (the memory the GPU
@@ -29,7 +31,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   in Qwen's evaluation. It is harder to quantize: KL 0.114 nats to the
   float model (Qwen3.5-35B-A3B: 0.060), where MLX's 4-bit format, measured
   by the converter on the same text, gets 0.121. On the agent tasks it
-  solves 7 of 8 and 6 of the 8 harder ones (Qwen3.5-35B-A3B: 7 and 5).
+  solves 7 of 8 and, with the check fixed after the release, 7 of the 8
+  harder ones (Qwen3.5-35B-A3B: 7 and 6).
 
 - `raceline serve` keeps conversations set aside (#8). When a request starts
   another conversation (a second chat, or a side request such as a title in

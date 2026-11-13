@@ -1618,6 +1618,15 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec, const ImageRow
     for (int i = 0; i < c.layers; i++) {
       if (c.is_linear_layer(i)) encode_linear_attn(i, T, spec);
       else encode_full_attn(i, T, pos_, rope_);
+      if (!dump_dir_.empty()) {   // the stream between the attention and the MLP (the MLP's input before its norm)
+        flush(true);
+        char path[1024];
+        snprintf(path, sizeof path, "%s/mid_%02d.f32", dump_dir_.c_str(), i);
+        FILE *f = fopen(path, "wb");
+        if (!f) fatal("cannot write %s", path);
+        fwrite(h_.contents, sizeof(float), (size_t)T * c.hidden, f);
+        fclose(f);
+      }
       encode_mlp(i, T);
       if (!dump_dir_.empty()) {
         flush(true);

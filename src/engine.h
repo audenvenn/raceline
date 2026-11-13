@@ -155,7 +155,8 @@ class Engine {
   }
 
   // Debug: when set, forward() also writes the residual stream after every
-  // layer to <dir>/layer_NN.f32 ([T][hidden] float32), plus logits.f32.
+  // layer to <dir>/layer_NN.f32 ([T][hidden] float32), between its attention
+  // and its MLP to <dir>/mid_NN.f32, plus logits.f32.
   void set_dump_dir(const std::string &dir) { dump_dir_ = dir; }
 
  private:

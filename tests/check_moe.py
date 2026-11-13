@@ -17,6 +17,7 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,8 +43,24 @@ def main():
     ap.add_argument("tokenizer_from", help="a model directory with the Qwen tokenizer (e.g. models/Qwen3.5-4B)")
     ap.add_argument("tokens", help="a token file (raw int32), e.g. build/ref/tokens_96.i32")
     ap.add_argument("--engine", default="build/cmake/raceline-engine")
+    ap.add_argument("--keep", action="store_true", help="keep the work directory (it is kept anyway when a check fails)")
     args = ap.parse_args()
     work = tempfile.mkdtemp(prefix="raceline-moe-")
+    ok = False
+    try:
+        ok = checks(args, work)
+    finally:
+        # The checkpoint, its conversion and the logits are about 800 MB: remove them unless asked to keep
+        # them or a check failed (then they are what to look at).
+        if ok and not args.keep:
+            shutil.rmtree(work, ignore_errors=True)
+        else:
+            print(f"work directory kept: {work}")
+    print("PASS" if ok else "FAIL")
+    sys.exit(0 if ok else 1)
+
+
+def checks(args, work) -> bool:
     src, rlm = os.path.join(work, "tiny-moe"), os.path.join(work, "tiny-moe.rlm")
     per_expert = 2 * I * H // 2 + H * I // 2 + (2 * I + H) * 4     # 4-bit codes and row scales
     modes = (("in memory", {"RACELINE_EXPERT_CACHE": "0"}),
@@ -53,7 +70,7 @@ def main():
     ok = ok and run("conversion", [PY, "tools/quantize.py", src, rlm, "--calib-seqs", "4", "--eval-seqs", "2"])
     ok = ok and run("MTP head", [PY, "tools/add_mtp.py", src, rlm, "--calib-seqs", "4", "--eval-seqs", "2"])
     if not ok:
-        sys.exit(1)
+        return False
     ok = run("engine against MLX on the decoded weights", [PY, "tests/verify_moe.py", rlm, args.tokens])
 
     outs = {}
@@ -70,8 +87,7 @@ def main():
 
     for label, env in modes:
         ok = run(f"speculative decoding exact, experts {label}", [PY, "tests/verify_spec.py", rlm, args.tokens], env) and ok
-    print("PASS" if ok else "FAIL")
-    sys.exit(0 if ok else 1)
+    return ok
 
 
 if __name__ == "__main__":

@@ -8,6 +8,8 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-13
+
 ### Added
 
 - Image input (#28). The models read images with their own vision tower,
@@ -337,7 +339,8 @@ First public release.
 - Project infrastructure: CI, contribution guide, security policy, issue and
   pull-request templates.
 
-[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/audenvenn/raceline/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/audenvenn/raceline/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/audenvenn/raceline/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/audenvenn/raceline/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/audenvenn/raceline/compare/v0.3.0...v0.4.0

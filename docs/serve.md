@@ -39,6 +39,29 @@ optional: `top_k`, `repetition_penalty`, `enable_thinking` and
 `preserve_thinking` (both also inside `chat_template_kwargs`), and
 `reasoning_effort` for the models whose template has one (Qwen3.8).
 
+## Images
+
+A model whose vision file was pulled with it (`raceline pull` fetches both)
+reads images in user messages and in tool results, sent as base64 data:
+OpenAI's `image_url` parts with a `data:` URL, Anthropic's `image` blocks
+with a `base64` source. The server does not fetch URLs. Without the vision
+file an image is replaced by a note saying so.
+
+```python
+import base64
+
+image = base64.b64encode(open("screenshot.png", "rb").read()).decode()
+reply = client.chat.completions.create(model="local", messages=[{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image}"}},
+    {"type": "text", "text": "What does this screenshot show?"}]}])
+```
+
+An image is scaled down to a megapixel at most (`RACELINE_IMAGE_PIXELS` sets
+another limit) and takes a row of the context per 32 x 32 pixels: a 1280 x
+800 screenshot is 1000 rows. Its rows are computed once: a conversation that
+goes on, or comes back after another one, reuses them, and an image is never
+taken for another of the same size.
+
 ## Anthropic's API
 
 ```python
@@ -55,9 +78,10 @@ print(message.content[0].text)
 Streaming, tools, `stop_sequences` and `count_tokens` work as in Anthropic's
 API. `thinking: {"type": "enabled"}` turns the model's reasoning on and
 returns it as thinking blocks; without it the model answers directly.
-Server-side tools (web search and the like) are left out, images are
-replaced by a note (no vision input yet, #28), and forcing a tool with
-`tool_choice` is treated as `auto`. `usage.input_tokens` counts what was
+Server-side tools (web search and the like) are left out, images go to the
+model as described above (also inside tool results, such as Claude Code's
+`Read` of an image file), documents are replaced by a note, and forcing a
+tool with `tool_choice` is treated as `auto`. `usage.input_tokens` counts what was
 processed and `cache_read_input_tokens` what the session reused.
 
 ### Claude Code

@@ -8,6 +8,33 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Added
+
+- Image input (#28). The models read images with their own vision tower,
+  which `tools/convert_vision.py` writes to a vision file (float16, 0.67 GB
+  for the 4B, 0.92 GB for the others) that `raceline pull` fetches with the
+  model. The terminal agent takes `--image FILE` and `/image FILE`, and its
+  `read_file` shows the model image files; the server reads OpenAI's
+  `image_url` parts with a data URL and Anthropic's base64 `image` blocks, in
+  user messages and tool results. An image is scaled down to a megapixel at
+  most (`RACELINE_IMAGE_PIXELS`), a row of context per 32 x 32 pixels.
+- The engine takes rows as vectors (`forward_embeds`, `rl_forward_embeds`)
+  with Qwen's three-dimensional rotary positions (M-RoPE), which travel with
+  the attention entries of a conversation set aside; text is bit-for-bit
+  unchanged. The session keys an image's rows by the image's content, so
+  they are computed once per conversation and never confused with another
+  image of the same size.
+- Checks against transformers: `tests/verify_vision.py` (patches identical,
+  the tower within 8e-5 in float32) and `tests/verify_image_input.py` (every
+  rotary position and angle equal; after an image, KL 0.072 nats and 94.7%
+  top-1 agreement on Qwen3.5-4B's answer, against 0.165 and 89.8% without
+  one), with `tests/reference_image.py` making the references;
+  `tests/check_image_chat.py` for the runtime on a real model.
+
+### Changed
+
+- Pillow is a dependency (images are decoded with it).
+
 ### Fixed
 
 - A process that forked after the engine had loaded a model (a program

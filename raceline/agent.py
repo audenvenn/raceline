@@ -78,7 +78,26 @@ def _short(text: str, limit: int = 72) -> str:
     return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
+IMAGE_FILES = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")
+
+
+def tools_for(images: bool) -> list:
+    """The tool list; with image input, read_file also looks at images."""
+    if not images:
+        return TOOLS
+    out = []
+    for tool in TOOLS:
+        if tool["function"]["name"] == "read_file":
+            tool = json.loads(json.dumps(tool))
+            tool["function"]["description"] = ("Read a text file, returned as numbered lines, or look at an image "
+                                               "file (PNG, JPEG, GIF, WebP, BMP, TIFF).")
+        out.append(tool)
+    return out
+
+
 def _clip(text: str) -> str:
+    if not isinstance(text, str):      # an image and its caption
+        return text
     if len(text) <= MAX_OUTPUT:
         return text
     head, tail = MAX_OUTPUT * 2 // 3, MAX_OUTPUT // 3
@@ -151,9 +170,10 @@ def run_command(command, cwd: str, timeout: float, shell: bool = True):
 
 
 class Tools:
-    def __init__(self, cwd: str, approve):
+    def __init__(self, cwd: str, approve, images: bool = False):
         self.cwd = cwd
         self.approve = approve   # (summary: str) -> bool
+        self.images = images     # the model takes images: read_file shows it image files
 
     def _path(self, path: str) -> str:
         return os.path.abspath(os.path.join(self.cwd, os.path.expanduser(path)))
@@ -190,8 +210,16 @@ class Tools:
             how = f"exit code {r.returncode}"
         return f"[{how}]\n{out}" if out else f"[{how}, no output]"
 
-    def tool_read_file(self, path: str, offset: int = 1, limit: int = 400) -> str:
-        with open(self._path(path), encoding="utf-8", errors="replace") as f:
+    def tool_read_file(self, path: str, offset: int = 1, limit: int = 400):
+        full = self._path(path)
+        if self.images and full.lower().endswith(IMAGE_FILES):
+            from .images import Picture
+            with open(full, "rb") as f:
+                picture = Picture(f.read())
+            w, h = picture.size
+            return [{"type": "image", "image": picture},
+                    {"type": "text", "text": f"{self._show(full)}: an image of {w} x {h} pixels."}]
+        with open(full, encoding="utf-8", errors="replace") as f:
             lines = f.read().split("\n")
         chosen = lines[max(offset, 1) - 1:max(offset, 1) - 1 + limit]
         body = "\n".join(f"{i:6d}\t{line}" for i, line in enumerate(chosen, max(offset, 1)))
@@ -273,7 +301,8 @@ class Agent:
         self.keep_reasoning = keep_reasoning
         self.auto_approve, self.interactive = auto_approve, interactive
         self.c = (lambda code, s: f"\033[{code}m{s}\033[0m") if color else (lambda code, s: s)
-        self.tools = Tools(self.cwd, self._approve)
+        self.tools = Tools(self.cwd, self._approve, images=getattr(runtime, "vision", None) is not None)
+        self.tool_list = tools_for(self.tools.images)
         self.messages = [{"role": "system", "content": SYSTEM.format(
             cwd=self.cwd, release=platform.mac_ver()[0], machine=platform.machine(), date=time.strftime("%Y-%m-%d"))}]
 
@@ -305,13 +334,18 @@ class Agent:
         for m in self.messages[:-6]:
             if excess <= 0:
                 break
-            if m["role"] == "tool" and len(m["content"]) > 200:
+            if m["role"] == "tool" and isinstance(m["content"], str) and len(m["content"]) > 200:
                 excess -= len(tok.encode(m["content"], add_special_tokens=False))
                 m["content"] = "[output dropped to save context; run the tool again if it is needed]"
 
-    def turn(self, text: str) -> dict:
-        """Runs one user request to completion (the model may take many tool steps)."""
-        self.messages.append({"role": "user", "content": text})
+    def turn(self, text: str, images=()) -> dict:
+        """Runs one user request to completion (the model may take many tool steps).
+        `images`: paths of image files that come with it."""
+        if images:
+            self.messages.append({"role": "user", "content": [{"type": "image", "path": p} for p in images]
+                                  + [{"type": "text", "text": text}]})
+        else:
+            self.messages.append({"role": "user", "content": text})
         totals = dict(prompt_tokens=0, cached_tokens=0, completion_tokens=0, steps=0, seconds=0.0,
                       prefill_seconds=0.0, decode_seconds=0.0)
         out = sys.stdout
@@ -319,7 +353,7 @@ class Agent:
             content, reasoning, calls, stats, shown = "", "", [], None, None
             t0 = time.perf_counter()
             try:
-                for kind, value in self.rt.chat(self.messages, TOOLS, max_tokens=self.max_tokens,
+                for kind, value in self.rt.chat(self.messages, self.tool_list, max_tokens=self.max_tokens,
                                                 thinking=self.thinking, effort=self.effort,
                                                 keep_reasoning=self.keep_reasoning):
                     if kind == "reasoning":
@@ -368,7 +402,9 @@ class Agent:
                 out.write(self.c("36", f"\n  > {call['name']}({brief})\n"))
                 out.flush()
                 result = self.tools.run(call["name"], call["arguments"])
-                first = result.strip().split("\n")
+                shown = result if isinstance(result, str) else " ".join(
+                    p["text"] for p in result if p["type"] == "text")
+                first = shown.strip().split("\n")
                 out.write(self.c("2", "    " + first[0][:160] + (f"  [+{len(first) - 1} lines]" if len(first) > 1 else "") + "\n"))
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
         out.write("\n")
@@ -387,7 +423,8 @@ class Agent:
                 + f" · {totals['seconds']:.1f}s]")
 
 
-def repl(agent: Agent) -> None:
+def repl(agent: Agent, images=()) -> None:
+    """The interactive agent; `images` go with the first message."""
     try:
         import readline  # noqa: F401  (line editing and history for input())
     except ImportError:
@@ -395,7 +432,10 @@ def repl(agent: Agent) -> None:
     b = agent.rt.backend
     print(agent.c("1", "raceline") + f" · {getattr(b, 'model_id', '')} · {b.name} backend"
           + (" · speculative decoding" if getattr(b, "mtp", False) else "") + f" · {agent.cwd}")
-    print(agent.c("2", "  /reset clears the conversation, /exit quits, Ctrl-C interrupts a reply."))
+    takes_images = getattr(agent.rt, "vision", None) is not None
+    print(agent.c("2", "  /reset clears the conversation, /exit quits, Ctrl-C interrupts a reply."
+                  + (" /image FILE attaches an image to the next message." if takes_images else "")))
+    pending = list(images)
     while True:
         try:
             text = input(agent.c("1", "\n> ")).strip()
@@ -410,5 +450,16 @@ def repl(agent: Agent) -> None:
             agent.reset()
             print(agent.c("2", "  conversation cleared"))
             continue
-        totals = agent.turn(text)
+        if text.startswith("/image"):
+            path = os.path.expanduser(text[len("/image"):].strip())
+            if not takes_images:
+                print(agent.c("2", "  this model takes no images (its vision file is missing)"))
+            elif not os.path.isfile(path):
+                print(agent.c("2", f"  no such file: {path}"))
+            else:
+                pending.append(path)
+                print(agent.c("2", f"  {os.path.basename(path)} goes with your next message"))
+            continue
+        totals = agent.turn(text, pending)
+        pending = []
         print(agent.c("2", agent.status(totals)))

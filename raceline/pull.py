@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 
 MODELS = {  # alias -> file name in the release
@@ -109,8 +110,21 @@ def base_url(model: str, source: str | None = None) -> str:
 
 
 def pull(model: str, dest: str | None = None, source: str | None = None) -> str:
+    """Downloads a model and, where one is published with it, its vision file (image input)."""
     name = MODELS.get(model.lower(), model)
     base = base_url(model, source)
+    out = _fetch(base, name, dest)
+    if name.endswith(".rlm"):
+        try:
+            _fetch(base, name[:-4] + ".vision.safetensors", out[:-4] + ".vision.safetensors")
+        except urllib.error.URLError as e:      # none published for this model: fine
+            if not (getattr(e, "code", None) == 404 or isinstance(e.reason, FileNotFoundError)):
+                raise
+    return out
+
+
+def _fetch(base: str, name: str, dest: str | None) -> str:
+    """Downloads the file `name` described by its manifest at `base`."""
     with _open(f"{base}/{name}.json") as r:
         manifest = json.load(r)
     out = dest or os.path.join(models_dir(), manifest["name"])

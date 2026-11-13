@@ -122,11 +122,16 @@ def _library() -> ctypes.CDLL:
     return lib
 
 
-def _model_config(model_path: str) -> dict:
-    """The configuration in a .rlm file's header."""
+def _model_header(model_path: str) -> dict:
+    """A .rlm file's header."""
     with open(model_path, "rb") as f:
         f.seek(8)
-        return json.loads(f.read(int.from_bytes(f.read(8), "little"))).get("config", {})
+        return json.loads(f.read(int.from_bytes(f.read(8), "little")))
+
+
+def _model_config(model_path: str) -> dict:
+    """The configuration in a .rlm file's header."""
+    return _model_header(model_path).get("config", {})
 
 
 def _tokenizer_dir(model_path: str) -> str:
@@ -186,6 +191,8 @@ class RacelineBackend(Backend):
         self.eos_ids = {i for i in (self.tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>"))
                         if i is not None and i >= 0}
         self.model_id = os.path.basename(model_path)
+        self.model_path = model_path
+        self.source = _model_header(model_path).get("source") or ""     # the checkpoint it was converted from
         pad = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
         self.image_token = pad if isinstance(pad, int) and pad >= 0 and pad != self.tokenizer.unk_token_id else None
         self._lib = _library()

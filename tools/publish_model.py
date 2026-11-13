@@ -22,9 +22,11 @@ import time
 
 
 def files_of(dist):
-    manifest = next(iter(glob.glob(os.path.join(dist, "*.rlm.json"))), None)
+    manifest = next(iter(glob.glob(os.path.join(dist, "*.rlm.json")) +
+                         glob.glob(os.path.join(dist, "*.vision.safetensors.json"))), None)
     if manifest is None:
-        raise SystemExit(f"{dist} has no manifest (*.rlm.json): cut the model with tools/release_model.py first")
+        raise SystemExit(f"{dist} has no manifest (*.rlm.json, *.vision.safetensors.json): cut the file with "
+                         "tools/release_model.py first")
     m = json.load(open(manifest))
     parts = [os.path.join(dist, p["name"]) for p in m["parts"]]
     for p, info in zip(parts, m["parts"]):
@@ -65,7 +67,8 @@ def huggingface(dist, repo_id):
     api.create_repo(repo_id, repo_type="model", exist_ok=True)
     m, manifest, parts = files_of(dist)
     ok = True
-    for path in parts + [os.path.join(dist, "README.md"), manifest]:
+    card = [os.path.join(dist, "README.md")] if os.path.isfile(os.path.join(dist, "README.md")) else []
+    for path in parts + card + [manifest]:
         name = os.path.basename(path)
         ok &= retry(f"Hugging Face {name}", lambda path=path, name=name: api.upload_file(
             path_or_fileobj=path, path_in_repo=name, repo_id=repo_id, commit_message=f"Add {name}"))

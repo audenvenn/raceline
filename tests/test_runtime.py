@@ -494,6 +494,124 @@ def test_keep_reasoning_is_passed_to_the_template_as_preserve_thinking():
     assert seen == ["unset", True, False], seen
 
 
+def _png(width, height, color=(200, 40, 40)) -> bytes:
+    import io
+
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), color).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_image_parts_become_pictures_or_notes():
+    import base64
+    import tempfile
+
+    from raceline.images import Picture
+    data = _png(448, 320)
+    url = "data:image/png;base64," + base64.b64encode(data).decode()
+    path = os.path.join(tempfile.mkdtemp(), "p.png")
+    with open(path, "wb") as f:
+        f.write(data)
+    parts = [{"type": "text", "text": "Look: "},
+             {"type": "image_url", "image_url": {"url": url}},                                   # OpenAI
+             {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                          "data": base64.b64encode(data).decode()}},             # Anthropic
+             {"type": "image", "path": path}]                                                    # raceline's own
+    msgs = normalize_messages([{"role": "user", "content": parts}], images=True)
+    content = msgs[0]["content"]
+    assert [p["type"] for p in content] == ["text", "image", "image", "image"], content
+    assert all(isinstance(p["image"], Picture) and p["image"].size == (448, 320) for p in content[1:])
+    assert len({p["image"].digest for p in content[1:]}) == 1           # the same picture three times
+    # A model without image input reads a note instead; a system prompt never takes images.
+    assert "image left out" in normalize_messages([{"role": "user", "content": parts}])[0]["content"]
+    sys_msg = normalize_messages([{"role": "system", "content": parts}], images=True)[0]["content"]
+    assert isinstance(sys_msg, str) and "image left out" in sys_msg
+    for bad in ([{"role": "assistant", "content": parts}],
+                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://x/y.png"}}]}],
+                [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]):
+        try:
+            normalize_messages(bad, images=True)
+            raise AssertionError(f"accepted {bad}")
+        except ValueError:
+            pass
+
+
+def test_picture_rows_follow_the_processor():
+    from raceline.images import Picture, image_keys, key_row
+    proc = {"patch_size": 16, "merge_size": 2, "min_pixels": 65536, "max_pixels": 16777216}
+    assert Picture(_png(448, 320)).rows(proc) == (140, 14)
+    rows, width = Picture(_png(500, 375)).rows(proc)     # resized to 512 x 384
+    assert (rows, width) == (192, 16), (rows, width)
+    rows, width = Picture(_png(4000, 3000)).rows(proc)   # a megapixel at most by default
+    assert rows <= 1024 and width * 32 <= 4000 * 1.01, (rows, width)
+    rows, width = Picture(_png(4000, 3000)).rows(proc, max_pixels=4 << 20)
+    assert 3000 < rows <= 4096, rows
+    keys = image_keys(0xABCDEF123456, 3) + image_keys(7, 2)
+    assert all(k < 0 for k in keys) and len(set(keys)) == 5
+    assert [key_row(k) for k in keys] == [(0xABCDEF123456, 0), (0xABCDEF123456, 1), (0xABCDEF123456, 2), (7, 0), (7, 1)]
+
+
+class ImageFakeBackend(FakeBackend):
+    """FakeBackend that takes images: an image row feeds the state with its vector's first value."""
+
+    image_token = 99
+
+    def __init__(self):
+        super().__init__()
+        self.calls, self.histories = [], []
+
+    def prefill(self, tokens, progress=None, images=()):
+        self.calls.append((list(tokens), list(images)))
+        rows = {im.start + i: int(v[0]) for im in images for i, v in enumerate(im.vectors)}
+        for i, t in enumerate(tokens):
+            self._feed(1000 + rows[i] if i in rows else t)
+
+    def generate(self, sampling, max_tokens, history):
+        self.histories.append(list(history))
+        yield from super().generate(sampling, max_tokens, history)
+
+
+def test_session_feeds_image_rows_by_their_keys():
+    from raceline.images import image_keys
+    vectors = {1: np.arange(6 * 2).reshape(6, 2) * 10, 2: np.arange(6 * 2).reshape(6, 2) * 10 + 5}
+    looked_up = []
+
+    def rows(digest):
+        looked_up.append(digest)
+        return vectors[digest], 3
+
+    a = [5, 6] + image_keys(1, 6) + [7]
+    s = Session(ImageFakeBackend())
+    s.sync(a, branch_points=(5,), images=rows)
+    b = s.backend
+    tokens, images = b.calls[0]
+    assert tokens == [5, 6, 99, 99, 99] and images[0].start == 2 and images[0].offset == 0
+    assert [int(v[0]) for v in images[0].vectors] == [0, 20, 40] and images[0].width == 3
+    tokens, images = b.calls[1]                     # after the snapshot at 5: the image's rows 3 to 5
+    assert tokens == [99, 99, 99, 7] and images[0].start == 0 and images[0].offset == 3
+    assert [int(v[0]) for v in images[0].vectors] == [60, 80, 100]
+    list(s.generate(Sampling(), 2))
+    assert b.histories[0] == [5, 6] + [99] * 6 + [7]     # an image's rows go to sampling as its token
+
+    # The same prompt with a different tail resumes inside the image (the snapshot at 5) ...
+    b.calls.clear()
+    s.sync(a[:-1] + [8], images=rows)
+    tokens, images = b.calls[0]
+    assert tokens == [99, 99, 99, 8] and images[0].offset == 3
+    # ... and a picture of the same size is another picture: computed from its first row.
+    b.calls.clear()
+    other = [5, 6] + image_keys(2, 6) + [7]
+    usage = s.sync(other, images=rows)
+    assert usage["cached_tokens"] <= 2
+    fed = [int(v[0]) for _, ims in b.calls for im in ims for v in im.vectors]
+    assert fed == [5, 25, 45, 65, 85, 105], fed
+    ref = FakeBackend()
+    for t in [5, 6] + [1000 + v for v in fed] + [7]:
+        ref._feed(t)
+    assert s.backend.state == ref.state
+
+
 def test_transformers_notice_is_silenced_for_the_import_only():
     from raceline.backends import without_torch_notice
 

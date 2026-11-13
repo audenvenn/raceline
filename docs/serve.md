@@ -103,8 +103,10 @@ guidance on larger tasks.
 Claude Code's `Read` of an image file sends the image back as a tool result,
 which the model reads with its vision tower. Asked which test failed in a
 1280 x 800 screenshot of a CI run, Qwen3.6-35B-A3B on the 24 GB Mac called
-`Read` and answered in 20 s over two requests, the second reusing 3610 of
-its 4627 tokens.
+`Read` and answered in 14 s over two requests, the second reusing 3602 of
+its 4619 tokens: the first token came after 5.3 s and 3.3 s (8.4 s and 6.8 s
+with raceline 0.6.0, before snapshots inside passes and a preloaded expert
+cache).
 
 ## What is reused between requests
 

@@ -595,8 +595,8 @@ the `.rlm` conversion leaves out: `tools/convert_vision.py` writes it to a
 vision file of its own that `raceline pull` fetches with the model. The tower
 is a ViT over 16-pixel patches (24 layers for the 4B, 27 for the others) and
 runs in MLX (`raceline/vision.py`), in float16: in 8 bits its output was a
-hundred times further from transformers'. On the M6 it takes 0.9 s for a
-1280 x 800 screenshot with the 4B's tower and 1.4 s with the others'. Its
+hundred times further from transformers'. On the M6 it takes 0.6 s for a
+1280 x 800 screenshot with the 4B's tower and 1.1 s with the others'. Its
 output, one vector per 2 x 2 patches, enters the engine in place of the
 image's `<|image_pad|>` rows (`forward_embeds`), rotated like the model's
 residual stream, with Qwen's three-dimensional rotary positions: time, row

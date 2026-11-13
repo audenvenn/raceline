@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import os
 import sys
 import time
 import uuid
@@ -325,7 +326,9 @@ class Server(ThreadingHTTPServer):
 
 def serve(runtime: Runtime, model_id: str, host: str = "127.0.0.1", port: int = 8080):
     server = Server((host, port), make_handler(runtime, model_id))
-    print(f"raceline: {model_id} on the {runtime.backend.name} backend")
+    vision = getattr(runtime, "vision_path", None)
+    print(f"raceline: {model_id} on the {runtime.backend.name} backend, "
+          + (f"images read with {os.path.basename(vision)}" if vision else "no image input (no vision file)"))
     print(f"OpenAI-compatible API at http://{host}:{port}/v1, Anthropic's Messages API at /v1/messages "
           "(Ctrl-C to stop)", flush=True)
     try:

@@ -155,6 +155,8 @@ class VisionTower:
 
     def __call__(self, patches, grid: tuple):
         """patches [N, 3 * 2 * 16 * 16] (one image), grid (1, grid_h, grid_w) -> [N / 4, text hidden] float32."""
+        import mlx.nn as nn
+
         mx, w = self.mx, self.w
         t, gh, gw = grid
         if t != 1:
@@ -184,13 +186,13 @@ class VisionTower:
             x = x + self.linear(a, p + "attn.proj")
             h = mx.fast.layer_norm(x, w[p + "norm2.weight"].astype(mx.float32), w[p + "norm2.bias"].astype(mx.float32), 1e-6)
             u = self.linear(h, p + "mlp.linear_fc1")
-            u = 0.5 * u * (1 + mx.tanh(math.sqrt(2 / math.pi) * (u + 0.044715 * u * u * u)))   # gelu, tanh form
+            u = nn.gelu_approx(u)          # the tanh form, fused: no chain of [patches][4304] temporaries
             x = x + self.linear(u, p + "mlp.linear_fc2")
             mx.eval(x)
         h = mx.fast.layer_norm(x, w["merger.norm.weight"].astype(mx.float32), w["merger.norm.bias"].astype(mx.float32), 1e-6)
         h = h.reshape(n // (self.merge * self.merge), -1)
         h = self.linear(h, "merger.linear_fc1")
-        h = 0.5 * h * (1 + mx.erf(h / math.sqrt(2)))                                          # gelu, exact
+        h = nn.gelu(h)                                                                        # exact (erf)
         out = self.linear(h, "merger.linear_fc2")
         mx.eval(out)
         return out

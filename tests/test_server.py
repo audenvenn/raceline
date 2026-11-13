@@ -221,7 +221,10 @@ def test_anthropic_request_becomes_runtime_messages():
     args = to_runtime(ANTHROPIC_REQUEST)
     roles = [m["role"] for m in args["messages"]]
     assert roles == ["system", "user", "assistant", "tool", "user"], roles
-    assert "image left out" in args["messages"][1]["content"]
+    user = args["messages"][1]["content"]       # the image block goes on to the runtime, which reads it
+    assert user[0] == {"type": "text", "text": "Fix a.py."} and user[1]["type"] == "image", user
+    from raceline.chat import normalize_messages   # ... or, for a model without image input, notes it
+    assert "image left out" in normalize_messages(args["messages"], images=False)[1]["content"]
     a = args["messages"][2]
     assert a["reasoning_content"] == "Read it first." and a["content"] == "Reading."
     assert json.loads(a["tool_calls"][0]["function"]["arguments"]) == {"path": "a.py"}

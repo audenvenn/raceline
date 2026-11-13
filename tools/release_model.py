@@ -25,14 +25,21 @@ BLOCK = 8 << 20
 
 
 def cut(model, outdir, name=None, part_size=PART):
-    """Splits `model` into parts in `outdir`, writes the manifest there and returns it."""
+    """Splits `model` (a .rlm file, or a vision file of tools/convert_vision.py) into parts in
+    `outdir`, writes the manifest there and returns it."""
     name = name or os.path.basename(model)
     os.makedirs(outdir, exist_ok=True)
     with open(model, "rb") as f:
-        if f.read(4) != b"RLM1":
-            raise SystemExit(f"{model} is not a raceline model file")
-        _, n = struct.unpack("<IQ", f.read(12))
-        hdr = json.loads(f.read(n))
+        magic = f.read(4)
+        if magic == b"RLM1":
+            _, n = struct.unpack("<IQ", f.read(12))
+            hdr = json.loads(f.read(n))
+        elif model.endswith(".vision.safetensors"):
+            f.seek(0)
+            n = struct.unpack("<Q", f.read(8))[0]
+            hdr = {"vision": json.loads(f.read(n)).get("__metadata__") or {}}
+        else:
+            raise SystemExit(f"{model} is neither a raceline model file nor a vision file")
         f.seek(0)
         whole, parts, size = hashlib.sha256(), [], os.path.getsize(model)
         while f.tell() < size:
@@ -48,6 +55,12 @@ def cut(model, outdir, name=None, part_size=PART):
                     whole.update(block)
                     written += len(block)
             parts.append(dict(name=part_name, size=written, sha256=digest.hexdigest()))
+    if "vision" in hdr:     # the tower of a model's image input
+        manifest = dict(name=name, size=size, sha256=whole.hexdigest(), parts=parts, kind="vision",
+                        source=hdr["vision"].get("source"), format=hdr["vision"].get("format"), license="Apache-2.0")
+        with open(os.path.join(outdir, name + ".json"), "w") as out:
+            json.dump(manifest, out, indent=1)
+        return manifest
     manifest = dict(name=name, size=size, sha256=whole.hexdigest(), parts=parts,
                     source=hdr.get("source"), arch=hdr.get("arch"), quant=hdr.get("quant"),
                     quality=hdr.get("quality"), mtp=hdr.get("mtp"), license="Apache-2.0")
@@ -67,7 +80,7 @@ CARD = """---
 license: apache-2.0
 base_model: {base}
 base_model_relation: quantized
-pipeline_tag: text-generation
+pipeline_tag: {pipeline}
 tags:
 - raceline
 - apple-silicon
@@ -88,7 +101,7 @@ column ({bits} bits per weight), quantized with GPTQ after a {rotation}; the mod
 multi-token-prediction head, which raceline uses for exact speculative decoding; and the tokenizer
 and chat template. It is split into parts of under 2 GB described by `{name}.json`. It needs
 raceline {needs} or later and is not usable with other runtimes.
-{moe_text}
+{moe_text}{vision_text}
 ## Use
 
 ```sh
@@ -115,7 +128,15 @@ Apache-2.0, as the original model.
 """
 
 
-def write_card(outdir, manifest, base, alias, needs="0.2.0"):
+VISION = """
+`{vision}` is the model's vision tower in float16 ({size:.2f} GB), for image input (raceline
+{needs} or later): `raceline pull` fetches it with the model, and raceline reads images with it
+in the terminal agent and through its OpenAI and Anthropic APIs.
+"""
+
+
+def write_card(outdir, manifest, base, alias, needs="0.2.0", vision=None):
+    """`vision`: the manifest of the model's vision file, if one is published with it."""
     q, m, quant = manifest["quality"], manifest.get("mtp") or {}, manifest["quant"]
     rot = (quant.get("rotation") or {}).get("kind")
     title = base.split("/")[-1]
@@ -127,8 +148,11 @@ def write_card(outdir, manifest, base, alias, needs="0.2.0"):
         "leaves them in the file and keeps the ones in use in memory, reading the others from the SSD when a layer "
         "needs them (`--expert-cache GB` sets how much memory that cache takes). The experts' down "
         "projections are rounded to nearest; the other matrices are quantized with GPTQ.\n")
+    vision_text = "" if not vision else VISION.format(vision=vision["name"], size=vision["size"] / 1e9,
+                                                       needs=vision.get("needs", "0.6.0"))
     text = CARD.format(base=base, title=title, alias=alias, name=manifest["name"], bits=f"{quant['bits']:.1f}",
-                       moe_tag="\n- moe" if moe else "", moe_text=moe_text,
+                       moe_tag="\n- moe" if moe else "", moe_text=moe_text, vision_text=vision_text,
+                       pipeline="image-text-to-text" if vision else "text-generation",
                        rotation=("Hadamard rotation of the residual stream that is folded into the weights"
                                  if rot else "search of the row and column scales"),
                        positions=q["positions"], kl=q["kl"], ppl=q["ppl"], top1=100 * q["top1"],

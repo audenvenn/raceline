@@ -46,6 +46,25 @@ def _text(content) -> str:
     return "\n".join(parts)
 
 
+def _parts(content):
+    """User or tool-result content -> its text, or with images a list of text parts and the image
+    blocks themselves (raceline.chat.normalize_messages reads them, or notes them for a model
+    without image input)."""
+    if isinstance(content, str) or not any(isinstance(b, dict) and b.get("type") == "image" for b in content or []):
+        return _text(content)
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "image":
+            parts.append(block)
+        else:
+            text = _text([block])
+            if parts and parts[-1].get("type") == "text":
+                parts[-1] = {"type": "text", "text": parts[-1]["text"] + "\n" + text}
+            elif text:
+                parts.append({"type": "text", "text": text})
+    return parts
+
+
 def to_runtime(body: dict) -> dict:
     """An Anthropic request -> keyword arguments of Runtime.chat (messages, tools, thinking, stop)."""
     messages = []
@@ -59,16 +78,19 @@ def to_runtime(body: dict) -> dict:
             messages.append({"role": role, "content": _text(content)})
             continue
         if role == "user":
-            text = []
+            rest = []
             for block in content or []:
                 if block.get("type") == "tool_result":
-                    result = _text(block.get("content", ""))
-                    messages.append({"role": "tool", "tool_call_id": block.get("tool_use_id"),
-                                     "content": ("Error: " + result) if block.get("is_error") else result})
+                    result = _parts(block.get("content", ""))
+                    if block.get("is_error"):
+                        result = ("Error: " + result if isinstance(result, str)
+                                  else [{"type": "text", "text": "Error: "}] + result)
+                    messages.append({"role": "tool", "tool_call_id": block.get("tool_use_id"), "content": result})
                 else:
-                    text.append(_text([block]))
-            if any(text):
-                messages.append({"role": "user", "content": "\n".join(t for t in text if t)})
+                    rest.append(block)
+            user = _parts(rest)
+            if user:
+                messages.append({"role": "user", "content": user})
         else:
             text, reasoning, calls = [], [], []
             for block in content or []:

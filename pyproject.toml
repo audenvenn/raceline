@@ -23,7 +23,7 @@ classifiers = [
   "Programming Language :: C++",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["mlx-lm>=0.32", "numpy", "transformers", "tokenizers"]
+dependencies = ["mlx-lm>=0.32", "numpy", "pillow", "transformers", "tokenizers"]
 
 [project.urls]
 Homepage = "https://github.com/audenvenn/raceline"

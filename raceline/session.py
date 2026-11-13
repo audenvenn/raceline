@@ -20,6 +20,11 @@ state, and its attention entries from where it parts from the new prompt.
 When a later prompt continues it, those are put back and nothing is
 recomputed. Parked conversations are kept within `max_parked_bytes`, the
 least recently used dropped first.
+
+A prompt is a list of keys: token ids, and for the rows of an image negative
+numbers that name the image and the row (raceline.images.image_keys). Two
+images of the same size are then never mistaken for each other. The rows'
+vectors come from the `images` callback, only for rows that are computed.
 """
 
 from __future__ import annotations
@@ -27,7 +32,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Optional, Sequence
 
-from .backends import Backend, Sampling, Snapshot
+from .backends import Backend, ImageRows, Sampling, Snapshot
+from .images import key_row
 
 
 def _common(a: Sequence[int], b: Sequence[int]) -> int:
@@ -63,6 +69,7 @@ class Session:
         self._branches: set = set()     # positions of snapshots taken at a caller's branch point
         self._pinned: Optional[int] = None
         self._parked: list = []         # least recently used first
+        self._images = None             # the image rows of the prompt being synced (sync)
         self.max_snapshots = max_snapshots
         self.max_snapshot_bytes = max_snapshot_bytes
         self.max_parked_bytes = max_parked_bytes
@@ -74,14 +81,17 @@ class Session:
         self._branches = set()
 
     def sync(self, prompt: Sequence[int], branch_points: Sequence[int] = (), pin: Optional[int] = None,
-             progress: Optional[Callable[[int, int], None]] = None) -> dict:
+             progress: Optional[Callable[[int, int], None]] = None,
+             images: Optional[Callable[[int], tuple]] = None) -> dict:
         """Brings the model to exactly `prompt` and returns what it cost.
 
         `branch_points` are positions inside the prompt worth a snapshot; `pin`
         is the one to keep for as long as it stays valid (the end of the system
-        prompt: every conversation with these tools starts from it).
+        prompt: every conversation with these tools starts from it). `images`
+        maps an image's digest to (its rows' vectors, its width).
         """
         b = self.backend
+        self._images = images
         common = _common(self.tokens, prompt)
         if common == len(self.tokens):
             here, snap = common, None
@@ -118,7 +128,7 @@ class Session:
                     else:
                         b.reset()
                     done = first.position if first is not None else 0
-                    b.prefill(list(back.tokens[done:back.kv_from]), progress)
+                    self._feed(back.tokens[done:back.kv_from], progress)
                     redone = back.kv_from - done
                     self._snaps = [s for s in self._snaps if s.position <= done]
                     self.tokens, shared = list(back.tokens[:back.kv_from]), back.kv_from
@@ -152,16 +162,42 @@ class Session:
         position = start
         for cut in cuts:
             if cut > position:
-                b.prefill(list(prompt[position:cut]), progress)
+                self._feed(prompt[position:cut], progress)
                 position = cut
             self._remember(b.snapshot())
         self._branches = {p for p in self._branches if p <= start} | branches
         self.tokens = list(prompt)
         return dict(prompt_tokens=len(prompt), cached_tokens=start - redone)
 
+    def _feed(self, keys: Sequence[int], progress=None) -> None:
+        """Feeds keys to the backend: tokens, and the image rows among them as vectors."""
+        b = self.backend
+        tokens, rows, i = list(keys), [], 0
+        while i < len(keys):
+            if keys[i] >= 0:
+                i += 1
+                continue
+            digest, row = key_row(keys[i])
+            j = i + 1
+            while j < len(keys) and keys[j] == keys[j - 1] - 1 and key_row(keys[j])[0] == digest:
+                j += 1
+            if b.image_token is None or self._images is None:
+                raise ValueError("this model takes no images")
+            vectors, width = self._images(digest)
+            rows.append(ImageRows(i, vectors[row:row + j - i], width, row))
+            tokens[i:j] = [b.image_token] * (j - i)
+            i = j
+        if rows:
+            b.prefill(tokens, progress, images=rows)
+        else:
+            b.prefill(tokens, progress)
+
     def generate(self, sampling: Sampling, max_tokens: int, stop_ids=()) -> Iterator[int]:
         """Yields sampled tokens, ending after one in `stop_ids` (which is yielded too)."""
-        for token in self.backend.generate(sampling, max_tokens, self.tokens):
+        history = self.tokens
+        if history and min(history) < 0:        # an image's rows count as its token there
+            history = [t if t >= 0 else self.backend.image_token for t in history]
+        for token in self.backend.generate(sampling, max_tokens, history):
             self.tokens.append(token)
             yield token
             if token in stop_ids:

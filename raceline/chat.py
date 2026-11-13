@@ -21,10 +21,13 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Iterator, Optional
 
 from .backends import Backend, Sampling
+from .images import image_keys, picture_of, vision_settings
 from .session import Session
+from .vision import find_vision
 
 _FUNCTION = re.compile(r"<function=([^>\n]+)>(.*?)(?:</function>|\Z)", re.S)
 _PARAMETER = re.compile(r"<parameter=([^>\n]+)>\n?(.*?)\n?</parameter>", re.S)
@@ -38,12 +41,47 @@ class ContextFull(ValueError):
         self.tokens, self.limit = tokens, limit
 
 
-def normalize_messages(messages: list) -> list:
+IMAGE_LEFT_OUT = "[image left out: this model runs without image input]"
+
+
+def _content(content, images: bool):
+    """A message's content -> a string, or with images a list of text and image parts
+    ({"type": "image", "image": Picture}); without `images`, a note in each image's place."""
+    if not isinstance(content, list):
+        return content or ""
+    parts = []
+
+    def add_text(text):
+        if parts and parts[-1]["type"] == "text":
+            parts[-1]["text"] += text
+        else:
+            parts.append({"type": "text", "text": text})
+
+    for p in content:
+        kind = p.get("type") if isinstance(p, dict) else None
+        if not isinstance(p, dict):
+            add_text(str(p))
+        elif kind in ("text", "input_text") or (kind is None and "image_url" not in p):
+            add_text(p.get("text", ""))
+        elif kind == "document":
+            add_text("[document left out: this model runs without document input]")
+        elif kind in ("image", "image_url", "input_image") or kind is None:
+            picture = picture_of(p) if images else None
+            parts.append({"type": "image", "image": picture} if picture else {"type": "text", "text": IMAGE_LEFT_OUT})
+        else:
+            raise ValueError(f"unsupported content part '{kind}'")
+    if all(p["type"] == "text" for p in parts):
+        return "".join(p["text"] for p in parts)
+    return parts
+
+
+def normalize_messages(messages: list, images: bool = False) -> list:
     """OpenAI-style messages -> what the chat template expects.
 
     The Qwen templates take one system message, first. Several at the start
     are joined; one that comes later in the conversation (clients insert
-    them, such as reminders) becomes a user message at that point."""
+    them, such as reminders) becomes a user message at that point. Image
+    parts become Pictures where the model takes `images`, else a note."""
     out = []
     for m in messages:
         m = dict(m)
@@ -51,12 +89,10 @@ def normalize_messages(messages: list) -> list:
             m["role"] = "system"
         if m.get("role") == "system" and any(x["role"] != "system" for x in out):
             m["role"] = "user"
-        content = m.get("content")
-        if isinstance(content, list):  # text parts only
-            if any(p.get("type") not in ("text", None) for p in content if isinstance(p, dict)):
-                raise ValueError("only text content is supported")
-            content = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
-        m["content"] = content or ""
+        content = _content(m.get("content"), images and m.get("role") != "system")
+        if isinstance(content, list) and m.get("role") not in ("user", "tool"):
+            raise ValueError(f"images in a {m.get('role')} message: only user messages and tool results take them")
+        m["content"] = content
         calls = []
         for call in m.get("tool_calls") or []:
             fn = dict(call.get("function", call))
@@ -149,6 +185,12 @@ class Runtime:
                 park_bytes = min(2 << 30, ram // 12)
         self.session = Session(backend, max_parked_bytes=park_bytes)
         self.defaults = defaults or Sampling()
+        # Image input: the model's vision file, its processor settings, and the tower once an image comes.
+        path = getattr(backend, "model_path", None)
+        self.vision_path = find_vision(path) if path and getattr(backend, "image_token", None) is not None else None
+        self.vision = vision_settings(self.vision_path) if self.vision_path else None
+        self._tower = None
+        self._pictures: OrderedDict = OrderedDict()    # digest -> [Picture, width, rows' vectors or None]
         self.lock = threading.Lock()   # one generation at a time: this is a single-user runtime
         tok = backend.tokenizer
         ids = {name: tok.convert_tokens_to_ids(name) for name in
@@ -169,13 +211,17 @@ class Runtime:
         re-rendered without its reasoning and processed again from its first
         reply on, tool outputs included."""
         tok = self.backend.tokenizer
-        msgs = normalize_messages(messages)
+        msgs = normalize_messages(messages, images=self.vision is not None)
         extra = {"reasoning_effort": effort} if effort and thinking else {}
         if keep_reasoning is not None:
             extra["preserve_thinking"] = keep_reasoning
         text = tok.apply_chat_template(msgs, tools=tools or None, add_generation_prompt=True, tokenize=False,
                                        enable_thinking=thinking, **extra)
         tokens = tok.encode(text, add_special_tokens=False)
+        pictures = [p["image"] for m in msgs if isinstance(m["content"], list) for p in m["content"]
+                    if p["type"] == "image"]
+        if pictures:
+            tokens = self._place(tokens, pictures)
         starts = [i for i, t in enumerate(tokens) if t == self._im_start]
         has_system = bool(tools) or (msgs and msgs[0].get("role") == "system")
         pin = starts[1] if has_system and len(starts) > 1 else None
@@ -183,6 +229,56 @@ class Runtime:
         # request, so the start of the generation prompt is where it branches.
         points = [p for p in (pin, starts[-1] if starts else None) if p is not None]
         return tokens, points, pin
+
+    def _place(self, tokens: list, pictures: list) -> list:
+        """Widens each picture's <|image_pad|> to its rows, keyed by image_keys."""
+        pad = self.backend.image_token
+        at = [i for i, t in enumerate(tokens) if t == pad]
+        if len(at) != len(pictures):
+            raise ValueError(f"{len(pictures)} images and {len(at)} places for them in the prompt "
+                             "(the text may not contain '<|image_pad|>')")
+        out, prev = [], 0
+        for i, pic in zip(at, pictures):
+            n, width = pic.rows(self.vision)
+            entry = self._pictures.setdefault(pic.digest, [pic, width, None])
+            if entry[1] != width:                   # another size limit since: its rows change
+                self._pictures[pic.digest] = [pic, width, None]
+            self._pictures.move_to_end(pic.digest)
+            out += tokens[prev:i] + image_keys(pic.digest, n)
+            prev = i + 1
+        # The oldest go (a request that has them brings them again), never one of this prompt.
+        while len(self._pictures) > max(64, len({p.digest for p in pictures})):
+            self._pictures.popitem(last=False)
+        return out + tokens[prev:]
+
+    def _image_rows(self, digest: int) -> tuple:
+        """(the tower's rows of a picture of the current prompt, its width), computed once."""
+        entry = self._pictures[digest]
+        if entry[2] is None:
+            if self._tower is None:
+                from .vision import load_tower
+
+                tower = load_tower(self.vision_path)
+                source = getattr(self.backend, "source", "")
+                if source and tower.source and not source.startswith(tower.source):
+                    raise ValueError(f"the vision file {self.vision_path} is {tower.source}'s, the model "
+                                     f"{source}")
+                self._tower = tower
+            vectors, width = self._tower.encode(entry[0].open())
+            if width != entry[1]:
+                raise RuntimeError(f"the tower made an image {width} rows wide, the prompt has {entry[1]}")
+            entry[2] = vectors
+            self._tower.mx.clear_cache()            # the tower's working memory back to the system
+            # Vectors are kept for 512 MB of pictures, the least recently used dropped first: they are
+            # only needed again where a conversation's rows have to be computed again.
+            kept = 0
+            for other in reversed(self._pictures.values()):
+                if other[2] is not None:
+                    kept += other[2].nbytes
+                    if kept > 512 << 20 and other is not entry:
+                        other[2] = None
+        self._pictures.move_to_end(digest)
+        return entry[2], entry[1]
 
     def chat(self, messages: list, tools: Optional[list] = None, sampling: Optional[Sampling] = None,
              max_tokens: int = 2048, thinking: bool = True, stop: Optional[list] = None,
@@ -205,7 +301,7 @@ class Runtime:
         experts = getattr(self.backend, "expert_cache", lambda: None)
         experts0 = experts()
         t0 = time.perf_counter()
-        usage = self.session.sync(prompt, points, pin, progress)
+        usage = self.session.sync(prompt, points, pin, progress, images=self._image_rows)
         self.prompt_usage = usage     # for a reply that reports it before the first token (Anthropic's stream)
         t_prefill = time.perf_counter() - t0
 

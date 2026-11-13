@@ -379,6 +379,7 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   yo_ = mt_.alloc(R * c.lin_value_dim() * sizeof(float));
   const int G = c.heads / c.kv_heads;
   kv_blocks_ = (max_ctx_ + 255) / 256;
+  rpos_.assign((size_t)3 * (kv_blocks_ * 256 + kSpecRows), 0);
   q_rows_ = rows_cap_ * G + 32;
   aq_ = mt_.alloc((size_t)c.kv_heads * q_rows_ * c.head_dim * sizeof(_Float16));
   al_ = mt_.alloc((size_t)c.kv_heads * q_rows_ * sizeof(float));
@@ -627,7 +628,7 @@ size_t Engine::kv_bytes(int from, int to) const {
   const size_t blocks = (size_t)((to + 255) / 256 - from / 256);
   size_t layers = 0;
   for (const auto &A : attn_) layers += A != nullptr;
-  return layers * 2 * c.kv_heads * blocks * 256 * c.head_dim * sizeof(_Float16);
+  return layers * 2 * c.kv_heads * blocks * 256 * c.head_dim * sizeof(_Float16) + blocks * 256 * 3 * sizeof(int32_t);
 }
 
 void Engine::save_kv(int from, int to, void *dst) const {
@@ -647,6 +648,7 @@ void Engine::save_kv(int from, int to, void *dst) const {
       p += 2 * run;
     }
   }
+  memcpy(p, &rpos_[(size_t)b0 * 256 * 3], (size_t)(b1 - b0) * 256 * 3 * sizeof(int32_t));
 }
 
 void Engine::load_kv(int from, int to, const void *src) {
@@ -666,6 +668,7 @@ void Engine::load_kv(int from, int to, const void *src) {
       p += 2 * run;
     }
   }
+  memcpy(&rpos_[(size_t)b0 * 256 * 3], p, (size_t)(b1 - b0) * 256 * 3 * sizeof(int32_t));
 }
 
 void Engine::keep_drafts(int accepted) {
@@ -1169,16 +1172,57 @@ void Engine::flush(bool reopen) {
   if (reopen) begin();
 }
 
-// Rotary angles in double precision: position * theta^(-i/32).
-void Engine::fill_rope(id<MTLBuffer> buf, int pos0, int T) {
-  float *rope = (float *)buf.contents;
+// A text token's rotary position: one past the largest component of the one before.
+int32_t Engine::text_position(int p) const {
+  if (p == 0) return 0;
+  const int32_t *q = &rpos_[(size_t)(p - 1) * 3];
+  return std::max(q[0], std::max(q[1], q[2])) + 1;
+}
+
+void Engine::set_positions(int p0, int T, const ImageRows *spans, int n_spans) {
+  int s = 0;
   for (int t = 0; t < T; t++) {
-    for (int i = 0; i < 32; i++) {
-      const double ang = (double)(pos0 + t) * pow(config().rope_theta, -(double)i / 32.0);
-      rope[t * 64 + i] = (float)cos(ang);
-      rope[t * 64 + 32 + i] = (float)sin(ang);
+    int32_t *q = &rpos_[(size_t)(p0 + t) * 3];
+    while (s < n_spans && t >= spans[s].first + spans[s].rows) s++;
+    if (s < n_spans && t >= spans[s].first) {
+      const int k = spans[s].offset + t - spans[s].first;            // the patch's index in its image
+      const int32_t start = k == 0 ? text_position(p0 + t) : q[-3];  // the image's time position
+      q[0] = start;
+      q[1] = start + k / spans[s].width;
+      q[2] = start + k % spans[s].width;
+    } else {
+      q[0] = q[1] = q[2] = text_position(p0 + t);
     }
   }
+}
+
+void Engine::rope_position(int p, int32_t out[3]) const {
+  if (p < 0 || p >= pos_) fatal("rope_position: position %d is not in the context (%d tokens)", p, pos_);
+  memcpy(out, &rpos_[(size_t)p * 3], 3 * sizeof(int32_t));
+}
+
+// Rotary angles in double precision: position * theta^(-i/32). Qwen3.5's
+// M-RoPE interleaves its sections (11, 11, 10): frequency i turns with the
+// height position when i % 3 == 1, with the width when i % 3 == 2 and i < 30,
+// and with the time otherwise. For text the three are the same.
+void Engine::rope_row(int p, float *out) const {
+  const int32_t *q = &rpos_[(size_t)p * 3];
+  for (int i = 0; i < 32; i++) {
+    const int k = i % 3 == 1 ? 1 : (i % 3 == 2 && i < 30) ? 2 : 0;
+    const double ang = (double)q[k] * pow(config().rope_theta, -(double)i / 32.0);
+    out[i] = (float)cos(ang);
+    out[32 + i] = (float)sin(ang);
+  }
+}
+
+void Engine::fill_rope(id<MTLBuffer> buf, int pos0, int T) {
+  float *rope = (float *)buf.contents;
+  for (int t = 0; t < T; t++) rope_row(pos0 + t, rope + t * 64);
+}
+
+void Engine::rope_angles(int p, float out[64]) const {
+  if (p < 0 || p >= pos_) fatal("rope_angles: position %d is not in the context (%d tokens)", p, pos_);
+  rope_row(p, out);
 }
 
 // h_[t] = row tok[t] of the token table.
@@ -1200,6 +1244,28 @@ void Engine::encode_embed(id<MTLBuffer> tok, int T) {
   set_params(enc_, EmbedParams{T, c.hidden, c.hidden / 64, c.hidden}, 5);
   run_threads(c.hidden / 8, T);
   mark("embed");
+}
+
+void Engine::encode_image_rows(int shift, int M) {
+  const int H = config().hidden;
+  const size_t row = (size_t)H * sizeof(float);
+  int src = 0;
+  for (const ImageRows &s : spans_) {
+    int a = s.first + shift, from = src;
+    const int b = std::min(s.first + s.rows + shift, M);
+    src += s.rows;
+    if (a < 0) {
+      from -= a;
+      a = 0;
+    }
+    if (b <= a) continue;
+    [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "copy_rows")];
+    [enc_ setBuffer:emb_ offset:from * row atIndex:0];
+    [enc_ setBuffer:h_ offset:a * row atIndex:1];
+    set_params(enc_, CopyParams{b - a, H}, 2);
+    run_threads(H, b - a);
+    mark("image_rows");
+  }
 }
 
 void Engine::encode_copy_rows(id<MTLBuffer> dst, int dst_row, int src_row, int rows) {
@@ -1239,11 +1305,12 @@ void Engine::encode_mtp_hidden(id<MTLBuffer> src, const FTensor &w1, int rows, i
   mark("mtp_norm");
 }
 
-void Engine::encode_mtp_layer(int M, int pos0, bool logits) {
+void Engine::encode_mtp_layer(int M, int pos0, bool logits, int image_shift) {
   const Config &c = config();
   const int H = c.hidden;
   // From here on h_ is the head's own residual stream.
   encode_embed(mtp_tok_, M);
+  encode_image_rows(image_shift, M);  // a head row whose next token is an image patch reads the patch
   encode_rms(h_, 0, H, mtp_norm_e_, 0, M, 0);
   encode_linear(model_->q("mtp.fc"), M, h_, 0, H, false, "linear:mtp_fc");
   encode_full_attn(c.layers, M, pos0, mtp_rope_);
@@ -1305,10 +1372,33 @@ void Engine::encode_mtp(int n_carry, int n_chunk, int keep_row, bool logits) {
     encode_mtp_hidden(h_, fn, n_chunk, n_carry);
   }
   if (keep_row >= 0) encode_copy_rows(mtp_h_, 0, keep_row, 1);
-  if (n_carry + n_chunk > 0) encode_mtp_layer(n_carry + n_chunk, mtp_pos_, logits);
+  if (n_carry + n_chunk > 0) encode_mtp_layer(n_carry + n_chunk, mtp_pos_, logits, n_carry - 1);
 }
 
 const float *Engine::forward(const int32_t *tokens, int T) { return run(tokens, T, false); }
+
+const float *Engine::forward_embeds(const int32_t *tokens, int T, const ImageRows *spans, int n_spans,
+                                    const float *embeds) {
+  if (T < 1 || T > max_chunk_) fatal("forward: %d tokens, chunk limit is %d", T, max_chunk_);
+  if (n_spans < 0 || (n_spans > 0 && (!spans || !embeds))) fatal("forward_embeds: no spans or no vectors");
+  int end = 0, rows = 0;
+  for (int i = 0; i < n_spans; i++) {
+    const ImageRows &s = spans[i];
+    if (s.rows < 1 || s.width < 1 || s.offset < 0 || s.first < end || s.first + s.rows > T)
+      fatal("forward_embeds: span %d (rows %d to %d of %d) is out of order or out of range", i, s.first,
+            s.first + s.rows, T);
+    if (s.offset > 0 && (s.first != 0 || pos_ == 0))
+      fatal("forward_embeds: an image continued from the previous chunk must start the chunk");
+    end = s.first + s.rows;
+    rows += s.rows;
+  }
+  if (n_spans > 0) {
+    const size_t bytes = (size_t)rows * config().hidden * sizeof(float);
+    if (!emb_) emb_ = mt_.alloc((size_t)max_chunk_ * config().hidden * sizeof(float));
+    memcpy(emb_.contents, embeds, bytes);
+  }
+  return run(tokens, T, false, spans, n_spans);
+}
 
 const float *Engine::forward_draft(const int32_t *tokens, int n) {
   if (!mtp_) fatal("forward_draft: the model has no MTP head, or it is off");
@@ -1350,6 +1440,7 @@ const float *Engine::draft_more(int32_t guess) {
   if (slot >= max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
   gpu_seconds_ = 0;
   *(int32_t *)mtp_tok_.contents = guess;
+  set_positions(slot, 1);  // text, past the context: drafts are tokens
   fill_rope(mtp_rope_, slot, 1);
   @autoreleasepool {
     begin();
@@ -1361,7 +1452,7 @@ const float *Engine::draft_more(int32_t guess) {
   return (const float *)mtp_logits_.contents;
 }
 
-const float *Engine::run(const int32_t *tokens, int T, bool spec) {
+const float *Engine::run(const int32_t *tokens, int T, bool spec, const ImageRows *spans, int n_spans) {
   const Config &c = config();
   if (T < 1 || T > max_chunk_) fatal("forward: %d tokens, chunk limit is %d", T, max_chunk_);
   if (pos_ + T > max_ctx_) fatal("context window of %d tokens is full", max_ctx_);
@@ -1378,6 +1469,8 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
   gpu_seconds_ = 0;
 
   memcpy(tok_.contents, tokens, (size_t)T * sizeof(int32_t));
+  spans_.assign(spans, spans + n_spans);
+  set_positions(pos_, T, spans, n_spans);
   fill_rope(rope_, pos_, T);
   // Head positions whose next token this call supplies: the waiting ones and
   // all rows of this chunk but the last.
@@ -1392,7 +1485,24 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
 
   @autoreleasepool {
     begin();
+    if (!spans_.empty() && c.rot_block) {  // into the rotated stream: x -> x Q
+      if (!emb_rot_) {
+        const float *sg = model_->f("rotation.signs").data;
+        emb_rot_ = mt_.alloc((size_t)c.hidden * sizeof(float));
+        for (int k = 0; k < c.hidden; k++) ((float *)emb_rot_.contents)[k] = sg[k] / sqrtf((float)c.rot_block);
+      }
+      int rows = 0;
+      for (const ImageRows &s : spans_) rows += s.rows;
+      const Macros mac = {{"ROT_D", std::to_string(c.hidden)}, {"ROT_BLOCK", std::to_string(c.rot_block)}};
+      [enc_ setComputePipelineState:mt_.pipeline("ops.metal", "rotate_rows", mac)];
+      [enc_ setBuffer:emb_ offset:0 atIndex:0];
+      [enc_ setBuffer:emb_rot_ offset:0 atIndex:1];
+      set_params(enc_, CopyParams{rows, c.hidden}, 2);
+      run_groups(1, rows, 256);
+      mark("rotate_rows");
+    }
     encode_embed(tok_, T);
+    encode_image_rows(0, T);
     for (int i = 0; i < c.layers; i++) {
       if (c.is_linear_layer(i)) encode_linear_attn(i, T, spec);
       else encode_full_attn(i, T, pos_, rope_);
@@ -1420,6 +1530,7 @@ const float *Engine::run(const int32_t *tokens, int T, bool spec) {
     flush(false);
   }
 
+  spans_.clear();
   pos_ += T;
   if (mtp_) {
     mtp_pos_ += head_rows;

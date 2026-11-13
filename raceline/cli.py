@@ -97,6 +97,8 @@ def _main(argv=None):
     p.add_argument("--effort", choices=["low", "medium", "xhigh"], default="low",
                    help="reasoning effort, for models whose template takes one (default: low, for short steps)")
     p.add_argument("--max-tokens", type=int, default=4096)
+    p.add_argument("--image", action="append", default=[], metavar="FILE",
+                   help="an image that goes with the first message (repeatable; models with a vision file)")
 
     p = sub.add_parser("probe", help="measure this Mac's limits for local inference (and a model against them)")
     p.add_argument("model", nargs="?", help="optional: a model to measure against the limits")
@@ -135,10 +137,16 @@ def _main(argv=None):
         from .agent import Agent, repl
         agent = Agent(rt, args.cwd, auto_approve=args.yes, thinking=not args.no_think, max_tokens=args.max_tokens,
                       interactive=args.prompt is None, color=sys.stdout.isatty(), effort=args.effort)
+        for path in args.image:
+            if getattr(rt, "vision", None) is None:
+                raise RuntimeError("this model takes no images: its vision file is missing "
+                                   "(`raceline pull` fetches it with a converted model)")
+            if not os.path.isfile(path):
+                raise RuntimeError(f"no such image: {path}")
         if args.prompt is None:
-            repl(agent)
+            repl(agent, args.image)
         else:
-            totals = agent.turn(args.prompt)
+            totals = agent.turn(args.prompt, args.image)
             print(agent.status(totals), file=sys.stderr)
 
 

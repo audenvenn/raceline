@@ -83,6 +83,12 @@ def _library() -> ctypes.CDLL:
     lib.rl_open.argtypes = [ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
     lib.rl_forward.restype = ctypes.POINTER(ctypes.c_float)
     lib.rl_forward.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int]
+    lib.rl_forward_embeds.restype = ctypes.POINTER(ctypes.c_float)
+    lib.rl_forward_embeds.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int, ctypes.c_void_p,
+                                      ctypes.c_int, ctypes.c_void_p]
+    lib.rl_rope_position.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+    lib.rl_set_dump_dir.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.rl_rope_angles.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
     lib.rl_state_bytes.restype = ctypes.c_size_t
     lib.rl_last_gpu_seconds.restype = ctypes.c_double
     for fn in ("rl_close", "rl_vocab", "rl_position", "rl_reset", "rl_argmax", "rl_state_bytes",
@@ -116,11 +122,16 @@ def _library() -> ctypes.CDLL:
     return lib
 
 
-def _model_config(model_path: str) -> dict:
-    """The configuration in a .rlm file's header."""
+def _model_header(model_path: str) -> dict:
+    """A .rlm file's header."""
     with open(model_path, "rb") as f:
         f.seek(8)
-        return json.loads(f.read(int.from_bytes(f.read(8), "little"))).get("config", {})
+        return json.loads(f.read(int.from_bytes(f.read(8), "little")))
+
+
+def _model_config(model_path: str) -> dict:
+    """The configuration in a .rlm file's header."""
+    return _model_header(model_path).get("config", {})
 
 
 def _tokenizer_dir(model_path: str) -> str:
@@ -180,6 +191,10 @@ class RacelineBackend(Backend):
         self.eos_ids = {i for i in (self.tokenizer.convert_tokens_to_ids(t) for t in ("<|im_end|>", "<|endoftext|>"))
                         if i is not None and i >= 0}
         self.model_id = os.path.basename(model_path)
+        self.model_path = model_path
+        self.source = _model_header(model_path).get("source") or ""     # the checkpoint it was converted from
+        pad = self.tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        self.image_token = pad if isinstance(pad, int) and pad >= 0 and pad != self.tokenizer.unk_token_id else None
         self._lib = _library()
         if chunk is None:
             # Rows per prompt pass. A mixture of experts reads every expert once per
@@ -274,21 +289,53 @@ class RacelineBackend(Backend):
             self.gpu_seconds += self._lib.rl_last_gpu_seconds(self._e)
             self._open = None
 
-    def _forward(self, tokens) -> None:
+    def _forward(self, tokens, spans=()) -> None:
         self._settle()
         if self.position + len(tokens) > self._max_ctx:
             raise RuntimeError(f"the context window of {self._max_ctx} tokens is full")
         arr = (ctypes.c_int32 * len(tokens))(*tokens)
-        ptr = self._lib.rl_forward(self._e, arr, len(tokens))
+        if spans:   # (first row, rows, offset, width, vectors) per image part in this pass
+            table = np.array([s[:4] for s in spans], dtype=np.int32)
+            vectors = np.ascontiguousarray(np.concatenate([s[4] for s in spans]), dtype=np.float32)
+            if vectors.shape != (int(table[:, 1].sum()), self._lib.rl_hidden_size(self._e)):
+                raise ValueError(f"image rows of shape {vectors.shape} for a model {self._lib.rl_hidden_size(self._e)} wide")
+            ptr = self._lib.rl_forward_embeds(self._e, arr, len(tokens), table.ctypes.data, len(spans),
+                                              vectors.ctypes.data)
+        else:
+            ptr = self._lib.rl_forward(self._e, arr, len(tokens))
         self.gpu_seconds += self._lib.rl_last_gpu_seconds(self._e)
         self.counters["passes"] += 1
         self._logits = np.ctypeslib.as_array(ptr, shape=(self._vocab,))   # a view, valid until the next forward
 
-    def prefill(self, tokens, progress=None) -> None:
+    def prefill(self, tokens, progress=None, images=()) -> None:
         for i in range(0, len(tokens), self._chunk):
-            self._forward(tokens[i:i + self._chunk])
+            j = min(i + self._chunk, len(tokens))
+            spans = []
+            for im in images:
+                a, b = max(im.start, i), min(im.start + len(im.vectors), j)
+                if a < b:
+                    spans.append((a - i, b - a, im.offset + a - im.start, im.width,
+                                  im.vectors[a - im.start:b - im.start]))
+            self._forward(tokens[i:j], spans)
             if progress:
-                progress(min(i + self._chunk, len(tokens)), len(tokens))
+                progress(j, len(tokens))
+
+    def dump_layers(self, directory: Optional[str]) -> None:
+        """Debug: every pass from now on writes the residual stream after each layer to
+        <directory>/layer_NN.f32 ([rows][hidden] float32; None: stop)."""
+        self._lib.rl_set_dump_dir(self._e, directory.encode() if directory else None)
+
+    def rope_angles(self, p: int):
+        """cos then sin of the 32 rotary frequencies attention applies at context position p."""
+        out = np.empty(64, dtype=np.float32)
+        self._lib.rl_rope_angles(self._e, p, out.ctypes.data)
+        return out
+
+    def rope_position(self, p: int) -> tuple:
+        """Rotary position (time, height, width) of context position p."""
+        out = (ctypes.c_int32 * 3)()
+        self._lib.rl_rope_position(self._e, p, out)
+        return tuple(out)
 
     def generate(self, sampling: Sampling, max_tokens: int, history: list):
         if self._logits is None:

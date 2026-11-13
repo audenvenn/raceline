@@ -16,7 +16,8 @@ Qwen3.5-35B-A3B, the same size).** Its agent
 finishes eight small coding tasks with the 27B in 5 minutes where the same
 agent on mlx-lm takes 39, and with the 9B, which fits a 16 GB Mac, in 2. The text it produces is
 bit-for-bit what decoding one token at a time produces, at any sampling
-temperature.
+temperature. It reads images too, with each model's own vision tower:
+screenshots and diagrams, in the agent and through both APIs.
 
 ![The same agent fixing the same bug with Qwen3.8-27B on mlx-lm and on raceline, replayed at three times the measured speed](docs/agent_race.gif)
 
@@ -299,6 +300,7 @@ pip install git+https://github.com/audenvenn/raceline    # compiles the engine, 
 raceline pull                 # the models, and how each fits this Mac
 raceline pull  qwen3.5-4b     # 2.5 GB, converted and ready to run
 raceline chat  qwen3.5-4b     # terminal agent in the current directory
+raceline chat  qwen3.5-4b --image screenshot.png -p "What does this show?"
 raceline serve qwen3.5-4b     # OpenAI-compatible API on localhost:8080
 raceline probe qwen3.5-4b     # this Mac's limits, and what the model reaches
 
@@ -349,6 +351,11 @@ template has one (Qwen3.8). It samples as Qwen recommends for coding
 (temperature 0.6, top-p 0.95, top-k 20 with thinking; `--temperature`
 overrides).
 
+The models read images. `raceline pull` fetches a model's vision file with
+it; then `--image FILE` sends an image with the first message, `/image FILE`
+with the next one, and `read_file` shows the model an image file (PNG, JPEG,
+GIF, WebP, BMP, TIFF) instead of its bytes.
+
 `raceline serve` speaks the OpenAI chat-completions protocol, streaming or not,
 with tool calls and the model's reasoning as `reasoning_content`:
 
@@ -364,8 +371,8 @@ model, for example the anthropic SDK with `base_url="http://localhost:8080"`.
 Claude Code pointed at it (`ANTHROPIC_BASE_URL`) solved the `inventory` agent
 task on Qwen3.5-35B-A3B in 52 s, with every request reusing the previous one.
 [docs/serve.md](docs/serve.md) has examples for both APIs and for Claude Code.
-Images are left out with a note (no vision input yet, #28). The context
-window is 32768 tokens unless `--ctx` sets another (agents with long system
+Images in either API go to the model's vision tower
+([docs/serve.md](docs/serve.md#images)). The context window is 32768 tokens unless `--ctx` sets another (agents with long system
 prompts and tool lists need more; the models take up to 262144).
 
 Responses carry `usage.prompt_tokens_details.cached_tokens` and a `timings`
@@ -395,6 +402,8 @@ Environment variables, all optional:
 | `RACELINE_LIB`, `RL_KERNEL_DIR` | The engine library and the kernel sources, when they are not where the build left them. |
 | `RACELINE_EXPERT_CACHE` | Mixture-of-experts models: GB of experts kept in memory, the rest read from disk when needed (`0`: all in memory; by default the engine decides from the memory the GPU may use). |
 | `RACELINE_GPU_KEEPALIVE` | `0` stops the light kernel that keeps the GPU busy while a mixture of experts waits for experts read from disk (on by default; see "Experts on disk"). |
+| `RACELINE_IMAGE_PIXELS` | Pixels an image is scaled down to at most (default 1048576, a megapixel: 1024 rows of context; the models take up to 16.7 million). |
+| `RACELINE_VISION` | The vision file to use, when it is not the one next to the model file. |
 | `RACELINE_PARK_GB` | `raceline serve`: memory for conversations set aside while the client is in another one (default: a twelfth of the Mac's memory, at most 2; `0` keeps none). |
 | `RACELINE_ANY_GPU` | `1` lets the engine try a Mac it does not support (before Apple M5); please report the result in #2. |
 
@@ -416,7 +425,10 @@ Environment variables, all optional:
 - chunks of 96, 17 and 1 tokens with the experts in memory, on disk with the smallest cache, and on disk 70% cached;
 - speculative passes. | same top token; every run bit-identical |
 | Qwen3.5-35B-A3B's first 4 layers against MLX on the decoded weights (`tests/verify_moe.py`), experts in memory and on disk | logits within 1.5e-3 relative, same top token; bit-identical with the experts on disk |
-| Session reuse and snapshots, tool-call parsing, the sampler, copied drafts, resuming a conversion, model downloads (`tests/test_runtime.py`); the server (`tests/test_server.py`); the agent tasks' checks (`tests/test_agent_tasks.py`). No GPU needed, run by CI | pass |
+| Image processor and vision tower against transformers' (`tests/verify_vision.py`, references from `tests/reference_image.py`) | patches identical; the tower's output within 8e-5 relative in float32, cosine 0.99998 in float16 |
+| Image input end to end on Qwen3.5-4B against transformers (`tests/verify_image_input.py`) | every rotary position equal, rotary angles within 1.9e-6; on the answer after an image KL 0.072 nats and 94.7% top-1 agreement, against 0.165 and 89.8% for a prompt without one; 1.65 nats with the image's rows zeroed |
+| Images through the chat runtime (`tests/check_image_chat.py`) | read right; a follow-up reuses the image's rows; another image of the same size is not taken for it; set aside and continued without computing its rows again |
+| Session reuse and snapshots, tool-call parsing, the sampler, copied drafts, resuming a conversion, model downloads, image parts and their rows (`tests/test_runtime.py`); the server (`tests/test_server.py`); the agent tasks' checks (`tests/test_agent_tasks.py`). No GPU needed, run by CI | pass |
 
 The comparisons with MLX in the first three rows are on Qwen3.5-4B: the float
 27B model does not fit in this machine's memory.
@@ -578,6 +590,25 @@ such a kernel running back to back on a queue of its own and stops it 50 ms
 after the last one (`RACELINE_GPU_KEEPALIVE=0` turns it off). Dense models
 do not wait on the CPU inside a pass and gain nothing from it.
 
+**Images.** The Qwen3.5 / 3.6 / 3.8 checkpoints carry a vision tower, which
+the `.rlm` conversion leaves out: `tools/convert_vision.py` writes it to a
+vision file of its own that `raceline pull` fetches with the model. The tower
+is a ViT over 16-pixel patches (24 layers for the 4B, 27 for the others) and
+runs in MLX (`raceline/vision.py`), in float16: in 8 bits its output was a
+hundred times further from transformers'. On the M6 it takes 0.6 s for a
+1280 x 800 screenshot with the 4B's tower and 1.1 s with the others'. Its
+output, one vector per 2 x 2 patches, enters the engine in place of the
+image's `<|image_pad|>` rows (`forward_embeds`), rotated like the model's
+residual stream, with Qwen's three-dimensional rotary positions: time, row
+and column, interleaved over the 32 rotary frequencies. Text has all three
+equal, so text comes out bit-for-bit as before. In the session an image's
+rows are keyed by the image's content, so a conversation that goes on reuses
+them and another image of the same size is never taken for it; their
+positions travel with a conversation set aside. Qwen3.6-35B-A3B on the 24 GB
+Mac, experts on disk: a 1280 x 800 screenshot and a question (1021 rows) are
+read in 3.4 s, tower included, and text decodes at 74 tok/s before and after
+it, without swapping: the tower's 0.9 GB fit beside the model.
+
 **Hardware limits.** `raceline probe` prints them for your Mac:
 
 ```
@@ -610,6 +641,7 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 | `raceline/` | The runtime: backends (engine, MLX), session reuse and snapshots, chat rendering and tool-call parsing, OpenAI-compatible server, terminal agent, probe. |
 | `src/`, `kernels/` | The engine: Metal runtime, model file reader, forward pass, speculative decoding. Kernels are compiled at run time. C API in `src/capi.h`. |
 | `tools/quantize.py`, `tools/add_mtp.py` | Original checkpoint to native `.rlm`; adds the MTP head. `tools/convert.py` repacks an MLX 4-bit model instead (MLX's exact values, no drafts). |
+| `tools/convert_vision.py` | The checkpoint's vision tower to a vision file (float16) for image input. |
 | `tools/release_model.py`, `tools/publish_model.py` | Cut a model file into release parts with a model card; upload them to the GitHub release and Hugging Face. |
 | `setup.py` | Builds the engine into the Python package on `pip install`. |
 | `tools/mtp_study.py`, `tools/quant_study.py` | The measurements behind the design choices above. |
@@ -617,8 +649,11 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 
 ## Limits
 
-- One model family: Qwen3.5 / Qwen3.8 text models, dense and mixture of
-  experts. No vision input (#28).
+- One model family: Qwen3.5 / 3.6 / 3.8, dense and mixture of experts.
+  Images, but not video.
+- Images go through the vision tower in MLX rather than the engine: 0.6 to
+  1.1 s per screenshot, and the tower stays in memory (0.67 GB for the 4B,
+  about 0.9 GB for the others) once an image has come.
 - The 27B conversion loses more quality than MLX's 4-bit format does (KL
   0.148 against 0.105 nats to the float model on held-out text, #15; a
   power-of-two scale per 32 weights, which the accelerators could apply, did

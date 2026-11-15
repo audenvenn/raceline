@@ -619,6 +619,10 @@ of Qwen3.6-35B-A3B 59% faster, and that of the tiny test model 2.6 times
 such a kernel running back to back on a queue of its own and stops it 50 ms
 after the last one (`RACELINE_GPU_KEEPALIVE=0` turns it off). Dense models
 do not wait on the CPU inside a pass and gain nothing from it.
+`bench/hw/gpu_wait.mm` shows the effect without a model: with the CPU
+answering each handoff after 100 to 300 us, as a read from the SSD does, a
+handoff costs 79 to 102 us beyond the wait, and 50 to 67 us with the
+keep-alive.
 
 A fresh cache is empty, and the first prompt would read nearly every expert
 from the SSD. While no pass is waiting, the CPU thread therefore fills the

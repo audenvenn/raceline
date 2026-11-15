@@ -206,6 +206,24 @@ Chat answers, thinking off, three requests of up to 300 tokens
 | temperature 0.7, top-p 0.8, top-k 20 | 27.6 tok/s | **60.8 tok/s** | 28.6 tok/s |
 | temperature 1.0, top-p 0.95, top-k 20 | 27.8 tok/s | **56.8 tok/s** | 28.6 tok/s |
 
+Long prompts, standard library source, 128 tokens decoded after them
+(`raceline-engine bench`, back to back with `bench/baselines/mlx_bench.py`).
+Drafts keep decoding at twice mlx-lm's speed; prompt processing at this
+length is 15 to 25% slower than MLX's, and the attention kernel is where
+that is lost (#74):
+
+| Context | Runtime | Prompt processing | Decoding |
+|---|---|---|---|
+| 16,384 tokens | mlx-lm, MLX 4-bit weights | 1057 tok/s | 27.2 tok/s |
+| | **raceline** | 851 tok/s | **63.5 tok/s** |
+| | raceline, drafts off | 897 tok/s | 27.4 tok/s |
+| 32,768 tokens | mlx-lm, MLX 4-bit weights | 964 tok/s | 24.0 tok/s |
+| | **raceline** | 767 tok/s | **47.2 tok/s** |
+| | raceline, drafts off | 807 tok/s | 23.0 tok/s |
+| 65,536 tokens | mlx-lm, MLX 4-bit weights | 814 tok/s | 19.8 tok/s |
+| | **raceline** | 612 tok/s | **40.8 tok/s** |
+| | raceline, drafts off | 659 tok/s | 18.8 tok/s |
+
 **Qwen3.5-4B.** The same benchmarks:
 
 | Text | Context | Runtime | Prompt processing | Decoding | Memory |
@@ -257,8 +275,9 @@ machine. The engine is built around getting more than one token out of a pass.
    hands packed 4-bit weights straight to the GPU's neural accelerators
    (Metal 4 `matmul2d` with FP4 operands) over a layout made for streaming.
    The time goes into reading weights, so the extra rows of a speculative
-   pass are nearly free. Attention is two such matrix products, so the cache
-   is read once for all rows as well.
+   pass are nearly free. Attention runs on the accelerators too, flash
+   style (the scores never leave registers), so the cache is read once for
+   all rows of a pass as well.
 3. **Wrong guesses cost almost nothing.** Three quarters of these models'
    layers are recurrent (Gated DeltaNet) and cannot be rewound. A speculative
    pass leaves the old state next to the new one and keeps, per layer, what
@@ -672,6 +691,9 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 
 ## Limits
 
+- Long prompts are processed 15 to 25% slower than by mlx-lm beyond 16k
+  tokens (Qwen3.5-9B at 64k: 612 against 814 tok/s, #74); decoding after
+  them is still twice as fast with drafts.
 - One model family: Qwen3.5 / 3.6 / 3.8, dense and mixture of experts.
   Images, but not video.
 - Images go through the vision tower in MLX rather than the engine: 0.54 to

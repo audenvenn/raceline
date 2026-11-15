@@ -18,6 +18,18 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
   The tower's output stays within the checks against transformers, 1.1%
   (relative RMS) from a float32 run where the checkpoint's own bfloat16 is
   8.2% away.
+- Attention runs flash style (`kernels/flash.metal`): the scores stay in
+  registers, and a pass with few rows over a long context, such as a
+  decoding step, is split over the keys and merged after. Before, the
+  scores went through a 96 MB buffer, and a long prompt was cut into groups
+  of 16 rows that each read the whole attention cache again. Qwen3.5-9B
+  without drafts, back to back: prompts of 64k tokens 537 -> 659 tok/s
+  (32k: 745 -> 807), decoding after them 17.7 -> 18.8 tok/s; short contexts
+  unchanged within noise, except decoding without drafts at 1k tokens,
+  about 3% slower. Every row still comes out the same bits in every pass
+  (prompt chunks, decoding steps, speculative passes), and the engine needs
+  144 MB less GPU scratch memory. Long prompts remain slower than mlx-lm's
+  (#74).
 
 ## [0.7.1] - 2026-11-13
 

@@ -256,11 +256,15 @@ class Engine {
   // in a cache of that size (see ExpertCache in engine.mm).
   struct ExpertCache;
   std::unique_ptr<ExpertCache> cache_;
-  // Attention: queries [KVH][q_rows_][head_dim] half, and for one group of rows
-  // the scores (float), unnormalized probabilities (half) and their row sums.
-  id<MTLBuffer> aq_, as_, ap_, al_;
-  int q_rows_ = 0, kv_blocks_ = 0;
-  size_t score_cap_ = 0;  // elements in as_ / ap_
+  // Attention (kernels/flash.metal): queries [KVH][q_rows_][head_dim] half, and
+  // the partial results of passes split over the keys: few rows (at most
+  // split_rows_ per key/value head) over more than one segment of keys.
+  // Keys per segment: fixed for a run, so rows come out alike in every pass
+  // (RACELINE_ATTN_SEG, a multiple of 32, lets the tests exercise several
+  // segments with short prompts).
+  int attn_seg_ = 1024;
+  id<MTLBuffer> aq_, part_;
+  int q_rows_ = 0, kv_blocks_ = 0, seg_cap_ = 0, split_rows_ = 0;
 
   // Native-format models scale each matrix's input columns outside the matmul:
   // the norm weights are pre-multiplied by the column scale of the matrix they

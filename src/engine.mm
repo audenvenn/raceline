@@ -422,12 +422,12 @@ Engine::Engine(const std::string &model_path, int max_ctx, int max_chunk)
   rpos_.assign((size_t)3 * (kv_blocks_ * 256 + kSpecRows), 0);
   q_rows_ = rows_cap_ * G + 32;
   aq_ = mt_.alloc((size_t)c.kv_heads * q_rows_ * c.head_dim * sizeof(_Float16));
-  al_ = mt_.alloc((size_t)c.kv_heads * q_rows_ * sizeof(float));
-  // Scores for a group of rows: [KVH][rows * G][keys]. A decode step touches a
-  // sliver of this; a prefill chunk at long context is cut into groups that fit.
-  score_cap_ = std::max((size_t)24 << 20, (size_t)c.kv_heads * 64 * kv_blocks_ * 256);
-  as_ = mt_.alloc(score_cap_ * sizeof(float));
-  ap_ = mt_.alloc(score_cap_ * sizeof(_Float16));
+  // Per (key/value head, segment, row): the segment's (max, sum) and its unnormalized output.
+  if (const char *s = getenv("RACELINE_ATTN_SEG")) attn_seg_ = atoi(s);
+  if (attn_seg_ < 32 || attn_seg_ % 32) fatal("RACELINE_ATTN_SEG must be a positive multiple of 32");
+  seg_cap_ = (kv_blocks_ * 256 + attn_seg_ - 1) / attn_seg_;
+  split_rows_ = 128;
+  part_ = mt_.alloc((size_t)c.kv_heads * seg_cap_ * split_rows_ * (c.head_dim + 2) * sizeof(float));
   rope_ = mt_.alloc(R * 64 * sizeof(float));
   logits_ = mt_.alloc((size_t)16 * model_->q("lm_head").n_pad * sizeof(float));
   if (c.is_moe()) {
@@ -1185,48 +1185,40 @@ void Engine::encode_full_attn(int layer, int T, int pos0, id<MTLBuffer> rope) {
   run_groups(c.heads + 2 * c.kv_heads, T);
   mark("attn_prep");
 
-  // Rows are taken in groups whose scores fit the scratch buffers: all of
-  // them in one group unless the context is long.
-  for (int r0 = 0; r0 < T;) {
-    int R = T - r0, kv_rows = 0, n_pad = 0;
-    Tile t{};
-    for (;; R = (R + 1) / 2) {
-      t = tile_for(R * G);
-      kv_rows = (R * G + t.tm - 1) / t.tm * t.tm;
-      n_pad = (pos0 + r0 + R + 255) / 256 * 256;
-      if ((size_t)c.kv_heads * kv_rows * n_pad <= score_cap_ || R == 1) break;
-    }
-    ap.pos0 = pos0 + r0;
-    ap.M = R * G, ap.kv_rows = kv_rows, ap.n_pad = n_pad, ap.n_stride = n_pad;
-    const Macros mac = {{"TM", std::to_string(t.tm)}, {"TN", std::to_string(t.tn)}, {"NSG", std::to_string(t.nsg)}};
-
-    [enc_ setComputePipelineState:mt_.pipeline("attention.metal", "attn_scores", mac)];
-    [enc_ setBuffer:aq_ offset:(size_t)r0 * G * D * sizeof(_Float16) atIndex:0];
-    [enc_ setBuffer:A.K offset:0 atIndex:1];
-    [enc_ setBuffer:as_ offset:0 atIndex:2];
+  // Softmax attention (kernels/flash.metal). A pass with few rows over keys
+  // that span several segments runs each segment in a threadgroup of its own and
+  // merges them after; the rows come out the same bits either way.
+  if (D % 64 != 0) fatal("head dim %d is not a multiple of 64", D);
+  const int M = T * G, n_seg = (pos0 + T + attn_seg_ - 1) / attn_seg_;
+  const bool split = n_seg > 1 && M <= split_rows_;
+  ap.pos0 = pos0, ap.M = M, ap.seg_cap = seg_cap_, ap.rows_cap = split_rows_;
+  // Row groups per threadgroup: 64 rows share each key and value read at long context, where the reads
+  // bound the speed (16k keys: 8.1 TFLOPS against 5.5 with 32 rows); 32 rows keep more threadgroups
+  // in flight below that (4k keys: 9.2 against 7.8). The rows come out the same bits either way.
+  const int WN = 4, WM = split || M <= 16 ? 1 : pos0 + T > 8192 ? 4 : 2;
+  const Macros mac = {{"HD", std::to_string(D)}, {"WN", std::to_string(WN)}, {"WM", std::to_string(WM)},
+                      {"BK", "32"}, {"SEG", std::to_string(attn_seg_)}, {"SPLIT", split ? "1" : "0"}};
+  [enc_ setComputePipelineState:mt_.pipeline("flash.metal", "attn_flash", mac)];
+  [enc_ setBuffer:aq_ offset:0 atIndex:0];
+  [enc_ setBuffer:A.K offset:0 atIndex:1];
+  [enc_ setBuffer:A.V offset:0 atIndex:2];
+  [enc_ setBuffer:proj_ offset:0 atIndex:3];
+  [enc_ setBuffer:xn_ offset:0 atIndex:4];
+  set_params(enc_, ap, 5);
+  bind_column_scale(model_->q(lname(layer, "attn.o_proj")), 6);
+  [enc_ setBuffer:part_ offset:0 atIndex:7];
+  if (split) run_groups((M + 15) / 16, n_seg, 32 * WN * WM, c.kv_heads);
+  else run_groups((M + 16 * WM - 1) / (16 * WM), 1, 32 * WN * WM, c.kv_heads);
+  mark("attn_flash");
+  if (split) {
+    [enc_ setComputePipelineState:mt_.pipeline("flash.metal", "attn_combine", mac)];
+    [enc_ setBuffer:part_ offset:0 atIndex:0];
+    [enc_ setBuffer:proj_ offset:0 atIndex:1];
+    [enc_ setBuffer:xn_ offset:0 atIndex:2];
     set_params(enc_, ap, 3);
-    run_groups(n_pad / t.tn, kv_rows / t.tm, 32 * t.nsg, c.kv_heads);
-    mark("attn_scores");
-
-    [enc_ setComputePipelineState:mt_.pipeline("attention.metal", "attn_softmax", mac)];
-    [enc_ setBuffer:as_ offset:0 atIndex:0];
-    [enc_ setBuffer:ap_ offset:0 atIndex:1];
-    [enc_ setBuffer:al_ offset:0 atIndex:2];
-    set_params(enc_, ap, 3);
-    run_groups(1, R * G, 32, c.kv_heads);
-    mark("attn_softmax");
-
-    [enc_ setComputePipelineState:mt_.pipeline("attention.metal", "attn_pv", mac)];
-    [enc_ setBuffer:ap_ offset:0 atIndex:0];
-    [enc_ setBuffer:A.V offset:0 atIndex:1];
-    [enc_ setBuffer:al_ offset:0 atIndex:2];
-    [enc_ setBuffer:proj_ offset:(size_t)r0 * proj_stride_ * sizeof(float) atIndex:3];
-    [enc_ setBuffer:xn_ offset:(size_t)r0 * x_stride_ * sizeof(_Float16) atIndex:4];
-    set_params(enc_, ap, 5);
-    bind_column_scale(model_->q(lname(layer, "attn.o_proj")), 6);
-    run_groups(D / t.tn, kv_rows / t.tm, 32 * t.nsg, c.kv_heads);
-    mark("attn_pv");
-    r0 += R;
+    bind_column_scale(model_->q(lname(layer, "attn.o_proj")), 4);
+    run_groups(1, M, 32, c.kv_heads);
+    mark("attn_combine");
   }
 
   encode_linear(model_->q(lname(layer, "attn.o_proj")), T, h_, 0, c.hidden, true, "linear:attn_out");

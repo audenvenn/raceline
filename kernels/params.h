@@ -39,10 +39,9 @@ struct AttnParams {
   int out_stride;
   int pos0, Lb;              // absolute position of row 0; KV cache capacity in blocks of 256 keys
   float eps, scale;
-  // One group of rows in the matmul kernels (kernels/attention.metal); pos0 is then the group's first row.
+  // kernels/flash.metal
   int M;                     // query rows per key/value head: rows * (H / KVH)
-  int kv_rows;               // M padded to the tile height: rows between key/value heads in the score buffers
-  int n_pad, n_stride;       // keys covered (a multiple of 256); elements between rows of the score buffers
+  int seg_cap, rows_cap;     // segments and rows of the buffer for passes split over the keys
 };
 
 #endif

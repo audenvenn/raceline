@@ -10,7 +10,11 @@
      of 70% of them, where prompt chunks prefetch the next layer's experts
      while the GPU computes;
   5. tests/verify_spec.py (speculative passes, abandoned drafts, saved state)
-     in all three modes.
+     in all three modes;
+  6. 4 and 5 again with attention segments of 32 keys (RACELINE_ATTN_SEG), so
+     that these short prompts take every attention path: chunks of 96 merge
+     several segments in one threadgroup, chunks of 17 and single tokens split
+     them over threadgroups and merge them after (kernels/flash.metal).
 
   .venv/bin/python tests/check_moe.py models/Qwen3.5-4B build/ref/tokens_96.i32
 """
@@ -87,6 +91,20 @@ def checks(args, work) -> bool:
 
     for label, env in modes:
         ok = run(f"speculative decoding exact, experts {label}", [PY, "tests/verify_spec.py", rlm, args.tokens], env) and ok
+
+    seg = {"RACELINE_ATTN_SEG": "32", "RACELINE_EXPERT_CACHE": "0"}
+    outs = []
+    for chunk in (96, 17, 1):
+        out = os.path.join(work, f"logits_seg32_{chunk}.f32")
+        ok = run(f"logits, attention segments of 32 keys, chunks of {chunk}",
+                 [args.engine, "logits", rlm, args.tokens, out, "--chunk", str(chunk)], seg) and ok
+        outs.append(out)
+    data = [open(v, "rb").read() for v in outs if os.path.exists(v)]
+    same = len(data) == len(outs) and len(set(data)) == 1
+    print(f"{'ok  ' if same else 'FAIL'}  all {len(outs)} logits bit-identical with segments of 32 keys")
+    ok = ok and same
+    ok = run("speculative decoding exact, attention segments of 32 keys",
+             [PY, "tests/verify_spec.py", rlm, args.tokens], seg) and ok
     return ok
 
 

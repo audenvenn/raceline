@@ -722,17 +722,18 @@ What building raceline showed on an M6 Mac mini (24 GB), for anyone writing an e
   keeps on the SSD are read again for every such chunk: it read new tokens at 420 tokens/s (306 with a
   smaller expert cache) against 925 to 1005, and took 1.45 times as long end to end as the fixed kapitsa
   build. It also takes more memory: 12.7 to 14.3 GB less was available to the system while it ran, against
-  8.2 to 10.6 GB for the others, and the Mac swaps.
-- **What the drafts buy depends on the text.** With the model's own MTP head, Qwen3.8-27B writes 48 to 56
-  tokens/s continuing code but 31 to 34 writing a module from a request, on the same Mac. In an agent's
-  thinking the drafts of Qwen3.6-35B-A3B lifted it no higher than engines that do not draft: 61 tokens/s
+  8.2 to 10.6 GB for the others, and the Mac paged out 0.1 to 0.2 GB during its agent runs, the others none.
+- **What the drafts buy depends on the text.** With the model's own MTP head, Qwen3.6-35B-A3B decodes
+  standard-library code at 118 tokens/s against about 55 without drafts, but chat answers at 61 to 72 (see
+  [Numbers](#numbers)). In an agent's thinking it wrote no faster than engines that do not draft: 61 tokens/s
   against 60 to 66.
 - **Flash-style attention on the GPU's matrix units** reaches about 8 of the 20.5 TFLOPS the units manage
   on their own (#74), and any loop over an array of matrix fragments that is not fully unrolled sends the
   array to memory (5.2 TFLOPS).
 - **The Neural Engine is compute an engine can add.** kapitsa splits the prefill of the dense 27B between
-  the GPU and the Neural Engine (14848 of 17408 FFN channels on the Neural Engine, from its log) and reads
-  prompts about 1.35x faster than raceline, which uses the GPU alone.
+  the GPU and the Neural Engine (14848 of 17408 FFN channels on the Neural Engine, from its log), which may
+  be why it reads prompts faster on that model; raceline uses the GPU alone. A measured comparison follows
+  with solvetime's 27B results.
 
 ## Limits
 

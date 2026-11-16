@@ -8,6 +8,26 @@ files are published separately: in GitHub releases (`models-v1` for 0.1.0,
 
 ## [Unreleased]
 
+### Fixed
+
+- Sampling without a top-k (`top_k` 0) drew only among the 1024 most likely
+  tokens. At temperature 1 the rest of the vocabulary holds about 0.1% of the
+  mass on average and up to 8% at one position (Qwen3.5-4B), so roughly one
+  reply in five of 256 tokens missed a token it could have had. An independent
+  statistical test of the sampler found it: no draws past rank 1024 where 41.5
+  were due over 59,000. The draw now covers the whole vocabulary exactly. The
+  1024 candidates keep their per-token noise, and the rest competes as one: the
+  largest perturbed value of a set follows a Gumbel distribution placed at the
+  log of its total mass, and its argmax is independent of it. Top-p and min-p
+  are now cut against the whole mass, with every token ranked when they reach
+  past the candidates. With a top-k (the model cards' settings), every draw is
+  the same as before. Drafted and plain decoding still write the same text bit
+  for bit: 32 of 32 replies of Qwen3.5-4B at temperature 1 with no top-k were
+  identical with drafts on and off. A token sampled without a top-k costs
+  0.7 ms more (1.85 instead of 1.11 ms on a 248k vocabulary).
+  `tests/check_sampler.py` checks the draws against the exact distribution,
+  computed by ranking the whole vocabulary.
+
 ## [0.8.0] - 2026-11-16
 
 ### Changed

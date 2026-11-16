@@ -654,9 +654,80 @@ def _sample(logits: np.ndarray, s: Sampling, recent: list, seed: int, position: 
         keep = min(keep, int(np.searchsorted(np.cumsum(p), s.top_p)) + 1)
     if s.min_p > 0:
         keep = min(keep, int(np.count_nonzero(p >= s.min_p * p[0])))
+    if s.top_k <= 0 and tail is None and len(top) < logits.size:
+        # No top-k was asked for, but only the 1024 largest logits are candidates above: the rest of the
+        # vocabulary carries real mass at high temperatures (up to a few percent at one position). It is
+        # accounted for exactly, with the candidates' draw unchanged.
+        return _sample_with_tail(logits, s, recent, seed, position, top, z, with_probability)
     top, logp = ids(top[:keep]), logp[:keep]
     gumbel = -np.log(-np.log(_uniform(seed, position, top)))
     pick = int(np.argmax(logp + gumbel))
     if not with_probability:
         return int(top[pick])
     return int(top[pick]), float(p[pick] / p[:keep].sum())
+
+
+TAIL_IDS = np.array([1 << 62, (1 << 62) + 1], dtype=np.int64)   # the tail's own draws: ids no vocabulary has
+
+
+def _sample_with_tail(logits: np.ndarray, s, recent: list, seed: int, position: int, head: np.ndarray,
+                      z: np.ndarray, with_probability: bool):
+    """The draw over the whole vocabulary when no top-k is set: the head (the candidates `_sample` chose, sorted,
+    their penalties applied) keeps its per-token Gumbel noise, so a draft and the model still pick the same token
+    when they agree; the tail (every other token) competes as one: the largest perturbed value among a set is
+    distributed as Gumbel(log of its total mass) and its argmax is independent of it, drawn in proportion to the
+    tokens' probabilities. That is an exact sample from the distribution top-p and min-p define over the whole
+    vocabulary. (Found, and this method proposed, by an independent statistical test of the sampler: at T = 1
+    with no top-k it saw no draws past rank 1024 where 41.5 were due.) Should top-p or min-p reach into the
+    tail (a rare case), every token is ranked instead."""
+    T = s.temperature
+    zf = np.asarray(logits, dtype=np.float64)
+    in_head = np.zeros(zf.size, dtype=bool)
+    in_head[head] = True
+    rest = (zf - z[0]) / T                       # log-probabilities relative to the head's best, unpenalized
+    pen = {}
+    if recent and (s.repetition_penalty != 1.0 or s.presence_penalty):
+        for t in np.unique(np.asarray(recent[-64:], dtype=np.int64)):
+            if t < zf.size and not in_head[t]:   # a penalized token the head left out keeps its penalty
+                v = zf[t]
+                if s.repetition_penalty != 1.0:
+                    v = v / s.repetition_penalty if v > 0 else v * s.repetition_penalty
+                v -= s.presence_penalty
+                pen[int(t)] = (v - z[0]) / T
+    tail_ids = np.flatnonzero(~in_head)
+    tail_lp = rest[tail_ids]
+    for t, v in pen.items():
+        tail_lp[np.searchsorted(tail_ids, t)] = v
+    m = tail_lp.max()
+    tail_mass = float(np.exp(tail_lp - m).sum()) * float(np.exp(m))      # relative to the head's best token
+    head_lp = (z - z[0]).astype(np.float64) / T   # as _sample computes it, so the head's draw is the same bits
+    q = np.exp(head_lp)
+    total = q.sum() + tail_mass
+    keep, with_tail = len(head), True
+    if 0 < s.top_p < 1:
+        reached = np.cumsum(q) / total
+        if reached[-1] >= s.top_p:               # the nucleus ends inside the head: the tail is out
+            keep, with_tail = int(np.searchsorted(reached, s.top_p)) + 1, False
+    if s.min_p > 0:
+        keep = min(keep, int(np.count_nonzero(q >= s.min_p)))
+        if m < np.log(s.min_p):                  # no tail token reaches min-p
+            with_tail = False
+    if with_tail and (0 < s.top_p < 1 or s.min_p > 0):
+        # top-p or min-p reaches into the tail: rank the whole vocabulary (rare: the tail holds more than
+        # 1 - top_p of the mass, or one of its tokens more than min_p of the best one's)
+        full = s.__class__(**{**s.__dict__, "top_k": zf.size})
+        return _sample(logits, full, recent, seed, position, with_probability)
+    head = head[:keep]
+    perturbed = head_lp[:keep] - np.log(-np.log(_uniform(seed, position, head)))
+    pick = int(np.argmax(perturbed))
+    if with_tail:
+        u = _uniform(seed, position, TAIL_IDS)
+        if np.log(tail_mass) - np.log(-np.log(u[0])) > perturbed[pick]:
+            w = np.exp(tail_lp - m)
+            i = int(np.searchsorted(np.cumsum(w), u[1] * w.sum()))
+            token = int(tail_ids[min(i, len(tail_ids) - 1)])
+            return token if not with_probability else (token, float(w[min(i, len(w) - 1)] * np.exp(m) / total))
+    if not with_probability:
+        return int(head[pick])
+    kept = q[:keep].sum() + (tail_mass if with_tail else 0.0)
+    return int(head[pick]), float(q[pick] / kept)

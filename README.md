@@ -3,6 +3,14 @@
 [![CI](https://github.com/audenvenn/raceline/actions/workflows/ci.yml/badge.svg)](https://github.com/audenvenn/raceline/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+> **Status: research / maintenance mode** (from 0.8.0, November 2026): fixes and documentation, no new
+> features. raceline set out to see how far an engine written for one model family could push one Mac.
+> On the 24 GB M6 it was built on, our open benchmark [solvetime](https://github.com/audenvenn/solvetime)
+> found that [kapitsa](https://github.com/nace-ai/kapitsa), after a same-day fix to how it reads tool
+> calls, solves as many coding-agent tasks with Qwen3.6-35B-A3B at about 2.5 bits per weight as raceline
+> does at 4 bits (28 and 30 of 32 attempts, a difference the counts cannot tell apart), in less time. What
+> raceline found along the way is under [Findings](#findings).
+
 A local agent runtime for Apple Silicon with its own inference engine, built
 to get as much out of one Mac, for one user, as the hardware allows.
 
@@ -12,7 +20,10 @@ against 27 to 29, and Qwen3.5-4B at 94 to 178 against 46 to 51.
 **Qwen3.6-35B-A3B, a mixture of experts too large for the memory the GPU may
 use, runs at 61 to 118 tokens/s with its experts read from the SSD as they
 are needed; mlx-lm has to hold all of such a model and swaps (3.5 tok/s on
-Qwen3.5-35B-A3B, the same size).** Its agent
+Qwen3.5-35B-A3B, the same size).** (Those are single requests. Through an
+agent run on 24 GB it wrote at a median of 61 tokens/s and read new tokens
+at 420, where kapitsa, holding every expert in memory at about 2.5 bits,
+read at 925: see [Findings](#findings).) Its agent
 finishes eight small coding tasks with the 27B in 5 minutes where the same
 agent on mlx-lm takes 39, and with the 9B, which fits a 16 GB Mac, in 2. The text it produces is
 bit-for-bit what decoding one token at a time produces, at any sampling
@@ -693,8 +704,39 @@ them, one expert (1.6 MB) in 0.4 ms on this Mac.
 | `tools/mtp_study.py`, `tools/quant_study.py`, `tools/act_study.py`, `tools/lowrank_study.py`, `tools/hadamard_down_study.py` | The measurements behind the design choices above: what 8-bit activations would cost (#6), what a low-rank correction of the weights would gain (#15). |
 | `tests/`, `bench/` | Verification against MLX and CPU references; benchmarks and hardware probes. |
 
+## Findings
+
+What building raceline showed on an M6 Mac mini (24 GB), for anyone writing an engine for these Macs.
+
+- **The GPU slows down while it waits for the CPU.** Its power management takes a wait for idleness and
+  lowers its performance, so the work after each wait runs slower. An engine whose experts live on disk
+  waits after every layer: `bench/hw/gpu_wait.mm` reproduces it without a model (43 to 68 us lost per
+  layer beyond the work when the CPU answers at once, 79 to 102 us when it answers after an SSD read's
+  100 to 300 us). A light kernel looping on a second queue keeps the GPU up; in the engine it made
+  single-token passes of Qwen3.6-35B-A3B with experts on disk 27% faster (44.3 to 56.4 tok/s, #47, #50).
+- **A mixture of experts can stay at 4 bits on a 24 GB Mac with its experts read from the SSD, but an agent
+  pays for it in prompt reading.** In [solvetime](https://github.com/audenvenn/solvetime)'s speed test
+  raceline reads a 4K-token prompt at 1268 to 1333 tokens/s and writes at 78 to 85, faster than the 2-bit
+  builds that hold every expert in memory (1053 to 1121 and 60 to 68). In agent use the order flips. Each
+  tool output adds a few hundred new tokens, which route to most of the model's 256 experts, and the 29% it
+  keeps on the SSD are read again for every such chunk: it read new tokens at 420 tokens/s (306 with a
+  smaller expert cache) against 925 to 1005, and took 1.45 times as long end to end as the fixed kapitsa
+  build. It also takes more memory: 12.7 to 14.3 GB less was available to the system while it ran, against
+  8.2 to 10.6 GB for the others, and the Mac swaps.
+- **What the drafts buy depends on the text.** With the model's own MTP head, Qwen3.8-27B writes 48 to 56
+  tokens/s continuing code but 31 to 34 writing a module from a request, on the same Mac. In an agent's
+  thinking the drafts of Qwen3.6-35B-A3B lifted it no higher than engines that do not draft: 61 tokens/s
+  against 60 to 66.
+- **Flash-style attention on the GPU's matrix units** reaches about 8 of the 20.5 TFLOPS the units manage
+  on their own (#74), and any loop over an array of matrix fragments that is not fully unrolled sends the
+  array to memory (5.2 TFLOPS).
+- **The Neural Engine is compute an engine can add.** kapitsa splits the prefill of the dense 27B between
+  the GPU and the Neural Engine (14848 of 17408 FFN channels on the Neural Engine, from its log) and reads
+  prompts about 1.35x faster than raceline, which uses the GPU alone.
+
 ## Limits
 
+- Research / maintenance mode: fixes and documentation only.
 - Long prompts are processed 15 to 25% slower than by mlx-lm beyond 16k
   tokens (Qwen3.5-9B at 64k: 612 against 814 tok/s, #74); decoding after
   them is still twice as fast with drafts.

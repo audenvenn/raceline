@@ -714,6 +714,7 @@ What building raceline showed on an M6 Mac mini (24 GB), for anyone writing an e
   layer beyond the work when the CPU answers at once, 79 to 102 us when it answers after an SSD read's
   100 to 300 us). A light kernel looping on a second queue keeps the GPU up; in the engine it made
   single-token passes of Qwen3.6-35B-A3B with experts on disk 27% faster (44.3 to 56.4 tok/s, #47, #50).
+  The full account: [A Mac's GPU slows down while it waits for the CPU](https://audenvenn.github.io/2026/11/17/gpu-slows-down-while-it-waits.html).
 - **A mixture of experts can stay at 4 bits on a 24 GB Mac with its experts read from the SSD, but an agent
   pays for it in prompt reading.** In [solvetime](https://github.com/audenvenn/solvetime)'s speed test
   raceline reads a 4K-token prompt at 1268 to 1333 tokens/s and writes at 78 to 85, faster than the 2-bit
